@@ -1,0 +1,23 @@
+services:
+  videoeditor:
+    image: nimitpatel1209/videoeditor:latest
+    platform: linux/amd64
+    ports:
+      - "1000:1000"
+    environment:
+      - DATABASE_URL=jdbc:mysql://aws.connect.psdb.cloud/video_editor_db?sslMode=REQUIRED&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      - DATABASE_USERNAME=kja315cybx3s1e39ooky
+      - DATABASE_PASSWORD=pscale_pw_sypvaMrOutzljLW7p5vUFv3xQONZzgsXvXdCIjG0Y7k
+      - SPRING_PROFILES_ACTIVE=prod
+      - FFMPEG_PATH=/usr/local/bin/ffmpeg
+      - FFPROBE_PATH=/usr/local/bin/ffprobe
+      - B2_BUCKET_NAME=video-editor-scenith
+      - B2_APPLICATION_KEY_ID=0051d2c0c06bcb80000000001
+      - B2_APPLICATION_KEY=K005aQw2A2Yw6gdWyOZp33bYLbMI98w
+      - FRONTEND_URL=https://scenith.in
+      - MAIL_USERNAME=nimit1209patel@gmail.com
+      - MAIL_PASSWORD=twfbtyfmpxqptfxu
+      - GOOGLE_CLIENT_ID=475177334034-ufjdi8pebqvbgf9ogv0gs85nq9588a8m.apps.googleusercontent.com
+      - GOOGLE_CLIENT_SECRET=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
+      - JWT_SECRET=yMRis1CAA4gQJkfWZDSOy0/qyNPqpZj1oCm4aD9oo/fLG3UC10EhVi0D6uNBpGKe
+      - RENDER=true
