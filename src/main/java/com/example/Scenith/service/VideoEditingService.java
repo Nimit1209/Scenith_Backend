@@ -1,6 +1,5 @@
 package com.example.Scenith.service;
 
-
 import com.example.Scenith.developer.entity.GlobalElement;
 import com.example.Scenith.developer.repository.GlobalElementRepository;
 import com.example.Scenith.dto.*;
@@ -12,13 +11,13 @@ import com.example.Scenith.repository.ProjectRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.Data;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.ImageIO;
@@ -36,8 +35,6 @@ import java.text.DecimalFormat;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -719,6 +716,8 @@ public class VideoEditingService {
             // Files.deleteIfExists(localFile.toPath());
         }
     }
+
+    @Transactional(isolation = Isolation.SERIALIZABLE)
     public void updateVideoSegment(
             String sessionId,
             String segmentId,
@@ -739,6 +738,10 @@ public class VideoEditingService {
             Double rotation,
             Map<String, List<Keyframe>> keyframes
     ) throws IOException, InterruptedException {
+
+        logger.debug("Updating VideoSegment {}: positionX={}, positionY={}, layer={}",
+                segmentId, positionX, positionY);
+
         Project project = getProjectBySession(sessionId);
         TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
 
@@ -1081,6 +1084,7 @@ public class VideoEditingService {
         projectRepository.save(project);
     }
 
+    @Transactional(isolation = Isolation.SERIALIZABLE)
     public void updateTextSegment(
             String sessionId,
             String segmentId,
@@ -1110,6 +1114,9 @@ public class VideoEditingService {
             Double rotation, // New parameter
             Map<String, List<Keyframe>> keyframes
     ) throws IOException {
+
+        logger.debug("Updating TextSegment {}: positionX={}, positionY={}, layer={}",
+                segmentId, positionX, positionY, layer);
         Project project = getProjectBySession(sessionId);
         TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
 
@@ -1809,6 +1816,7 @@ public class VideoEditingService {
         }
     }
 
+    @Transactional(isolation = Isolation.SERIALIZABLE)
     public void updateImageSegment(
             String sessionId,
             String imageSegmentId,
@@ -1829,6 +1837,8 @@ public class VideoEditingService {
             Double rotation, // New parameter
             Map<String, List<Keyframe>> keyframes
     ) throws IOException {
+        logger.debug("Updating ImageSegment {}: positionX={}, positionY={}, layer={}",
+                imageSegmentId, positionX, positionY, layer);
         Project project = getProjectBySession(sessionId);
         TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
 
@@ -2006,9 +2016,13 @@ public class VideoEditingService {
         saveTimelineState(sessionId, timelineState);
     }
 
+    @Transactional(isolation = Isolation.SERIALIZABLE)
     public void saveTimelineState(String sessionId, TimelineState timelineState) throws JsonProcessingException {
+        logger.debug("Saving TimelineState for sessionId: {}", sessionId);
         Project project = getProjectBySession(sessionId);
-        project.setTimelineState(objectMapper.writeValueAsString(timelineState));
+        String serializedState = objectMapper.writeValueAsString(timelineState);
+        logger.debug("Serialized TimelineState: {}", serializedState);
+        project.setTimelineState(serializedState);
         project.setLastModified(LocalDateTime.now());
         projectRepository.save(project);
         logger.info("Saved timeline state for sessionId: {}", sessionId);
@@ -3952,192 +3966,218 @@ public class VideoEditingService {
 
 
     private String generateTextPng(TextSegment ts, File tempDir, int canvasWidth, int canvasHeight) throws IOException {
-            // Resolution multiplier for high-quality text (1.5 for 4K, 2.0 for 1080p)
-            final double RESOLUTION_MULTIPLIER = canvasWidth >= 3840 ? 1.5 : 2.0;
-            // Scaling factor for border width to match frontend's typical scaleFactor
-            final double BORDER_SCALE_FACTOR = canvasWidth >= 3840 ? 1.5 : 2.0;
+        // Resolution multiplier for high-quality text (1.5 for 4K, 2.0 for 1080p)
+        final double RESOLUTION_MULTIPLIER = canvasWidth >= 3840 ? 1.5 : 2.0;
+        // Scaling factor for border width to match frontend's typical scaleFactor
+        final double BORDER_SCALE_FACTOR = canvasWidth >= 3840 ? 1.5 : 2.0;
 
-            // Determine maximum scale from keyframes or default scale
-            double defaultScale = ts.getScale() != null ? ts.getScale() : 1.0;
-            List<Keyframe> scaleKeyframes = ts.getKeyframes().getOrDefault("scale", new ArrayList<>());
-            double maxScale = defaultScale;
-            if (!scaleKeyframes.isEmpty()) {
-                maxScale = Math.max(
-                        defaultScale,
-                        scaleKeyframes.stream()
-                                .mapToDouble(kf -> ((Number) kf.getValue()).doubleValue())
-                                .max()
-                                .orElse(defaultScale)
+        // Determine maximum scale from keyframes or default scale
+        double defaultScale = ts.getScale() != null ? ts.getScale() : 1.0;
+        List<Keyframe> scaleKeyframes = ts.getKeyframes().getOrDefault("scale", new ArrayList<>());
+        double maxScale = defaultScale;
+        if (!scaleKeyframes.isEmpty()) {
+            maxScale = Math.max(
+                    defaultScale,
+                    scaleKeyframes.stream()
+                            .mapToDouble(kf -> ((Number) kf.getValue()).doubleValue())
+                            .max()
+                            .orElse(defaultScale)
+            );
+        }
+
+        // Parse colors
+        Color fontColor = parseColor(ts.getFontColor(), Color.WHITE, "font", ts.getId());
+        Color bgColor = ts.getBackgroundColor() != null && !ts.getBackgroundColor().equals("transparent") ?
+                parseColor(ts.getBackgroundColor(), null, "background", ts.getId()) : null;
+        Color bgBorderColor = ts.getBackgroundBorderColor() != null && !ts.getBackgroundBorderColor().equals("transparent") ?
+                parseColor(ts.getBackgroundBorderColor(), null, "border", ts.getId()) : null;
+        Color textBorderColor = ts.getTextBorderColor() != null && !ts.getTextBorderColor().equals("transparent") ?
+                parseColor(ts.getTextBorderColor(), null, "text border", ts.getId()) : null;
+
+        // Load font with fixed base size of 24, scaled by maxScale and resolution multiplier
+        double baseFontSize = 24.0 * maxScale * RESOLUTION_MULTIPLIER;
+        Font font;
+        try {
+            font = Font.createFont(Font.TRUETYPE_FONT, new File(getFontPathByFamily(ts.getFontFamily())))
+                    .deriveFont((float) baseFontSize);
+        } catch (Exception e) {
+            System.err.println("Failed to load font for text segment " + ts.getId() + ": " + ts.getFontFamily() + ", using Arial");
+            font = new Font("Arial", Font.PLAIN, (int) baseFontSize);
+        }
+
+        // Get letter spacing and line spacing, then scale them
+        double letterSpacing = ts.getLetterSpacing() != null ? ts.getLetterSpacing() : 0.0;
+        double scaledLetterSpacing = letterSpacing * maxScale * RESOLUTION_MULTIPLIER;
+        double lineSpacing = ts.getLineSpacing() != null ? ts.getLineSpacing() : 1.2; // Use TextSegment's lineSpacing
+        double scaledLineSpacing = lineSpacing * baseFontSize; // Line spacing as multiplier of font size
+
+        // Measure text with letter spacing
+        BufferedImage tempImage = new BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g2d = tempImage.createGraphics();
+        g2d.setFont(font);
+        FontMetrics fm = g2d.getFontMetrics();
+        String[] lines = ts.getText().split("\n");
+        int lineHeight = (int) scaledLineSpacing; // Use scaledLineSpacing for line height
+        int totalTextHeight = lines.length > 1 ? (lines.length - 1) * lineHeight + fm.getAscent() + fm.getDescent() : fm.getAscent() + fm.getDescent();
+        int maxTextWidth = 0;
+        for (String line : lines) {
+            // Calculate width with letter spacing
+            int lineWidth = 0;
+            for (int i = 0; i < line.length(); i++) {
+                lineWidth += fm.charWidth(line.charAt(i));
+                if (i < line.length() - 1) {
+                    lineWidth += (int) scaledLetterSpacing;
+                }
+            }
+            maxTextWidth = Math.max(maxTextWidth, lineWidth);
+        }
+        // Calculate text block height for centering
+        int textBlockHeight = totalTextHeight;
+        g2d.dispose();
+        tempImage.flush();
+
+        // Apply background dimensions and borders (aligned with frontend logic, using maxScale)
+        int bgHeight = (int) ((ts.getBackgroundH() != null ? ts.getBackgroundH() : 0) * maxScale * RESOLUTION_MULTIPLIER);
+        int bgWidth = (int) ((ts.getBackgroundW() != null ? ts.getBackgroundW() : 0) * maxScale * RESOLUTION_MULTIPLIER);
+        int bgBorderWidth = (int) ((ts.getBackgroundBorderWidth() != null ? ts.getBackgroundBorderWidth() : 0) * maxScale * BORDER_SCALE_FACTOR);
+        int borderRadius = (int) ((ts.getBackgroundBorderRadius() != null ? ts.getBackgroundBorderRadius() : 0) * maxScale * RESOLUTION_MULTIPLIER);
+        int textBorderWidth = (int) ((ts.getTextBorderWidth() != null ? ts.getTextBorderWidth() : 0) * maxScale * BORDER_SCALE_FACTOR);
+
+        // Calculate content dimensions (text size + background dimensions)
+        int contentWidth = maxTextWidth + bgWidth + 2 * textBorderWidth;
+        int contentHeight = textBlockHeight + bgHeight + 2 * textBorderWidth;
+
+        // Cap dimensions to prevent excessive memory usage
+        int maxDimension = (int) (Math.max(canvasWidth, canvasHeight) * RESOLUTION_MULTIPLIER * 1.5);
+        double scaleDown = 1.0;
+        if (contentWidth + 2 * bgBorderWidth + 2 * textBorderWidth > maxDimension ||
+                contentHeight + 2 * bgBorderWidth + 2 * textBorderWidth > maxDimension) {
+            scaleDown = Math.min(
+                    maxDimension / (double) (contentWidth + 2 * bgBorderWidth + 2 * textBorderWidth),
+                    maxDimension / (double) (contentHeight + 2 * bgBorderWidth + 2 * textBorderWidth)
+            );
+            scaleDown = Math.max(scaleDown, 0.5);
+            bgWidth = (int) (bgWidth * scaleDown);
+            bgHeight = (int) (bgHeight * scaleDown);
+            bgBorderWidth = (int) (bgBorderWidth * scaleDown);
+            borderRadius = (int) (borderRadius * scaleDown);
+            textBorderWidth = (int) (textBorderWidth * scaleDown);
+            contentWidth = maxTextWidth + bgWidth + 2 * textBorderWidth;
+            contentHeight = textBlockHeight + bgHeight + 2 * textBorderWidth;
+        }
+
+        // Calculate final image dimensions
+        int totalWidth = contentWidth + 2 * bgBorderWidth + 2 * textBorderWidth;
+        int totalHeight = contentHeight + 2 * bgBorderWidth + 2 * textBorderWidth;
+
+        // Create high-resolution image
+        BufferedImage image = new BufferedImage(totalWidth, totalHeight, BufferedImage.TYPE_INT_ARGB);
+        g2d = image.createGraphics();
+        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        g2d.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, RenderingHints.VALUE_FRACTIONALMETRICS_ON);
+        g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+        g2d.setFont(font);
+        fm = g2d.getFontMetrics();
+
+        // Draw background
+        if (bgColor != null) {
+            float bgOpacity = ts.getBackgroundOpacity() != null ? ts.getBackgroundOpacity().floatValue() : 1.0f;
+            g2d.setColor(new Color(bgColor.getRed(), bgColor.getGreen(), bgColor.getBlue(), (int) (bgOpacity * 255)));
+            if (borderRadius > 0) {
+                g2d.fillRoundRect(
+                        bgBorderWidth + textBorderWidth,
+                        bgBorderWidth + textBorderWidth,
+                        contentWidth,
+                        contentHeight,
+                        borderRadius,
+                        borderRadius
+                );
+            } else {
+                g2d.fillRect(
+                        bgBorderWidth + textBorderWidth,
+                        bgBorderWidth + textBorderWidth,
+                        contentWidth,
+                        contentHeight
                 );
             }
+        }
 
-            // Parse colors
-            Color fontColor = parseColor(ts.getFontColor(), Color.WHITE, "font", ts.getId());
-            Color bgColor = ts.getBackgroundColor() != null && !ts.getBackgroundColor().equals("transparent") ?
-                    parseColor(ts.getBackgroundColor(), null, "background", ts.getId()) : null;
-            Color bgBorderColor = ts.getBackgroundBorderColor() != null && !ts.getBackgroundBorderColor().equals("transparent") ?
-                    parseColor(ts.getBackgroundBorderColor(), null, "border", ts.getId()) : null;
-            Color textBorderColor = ts.getTextBorderColor() != null && !ts.getTextBorderColor().equals("transparent") ?
-                    parseColor(ts.getTextBorderColor(), null, "text border", ts.getId()) : null;
-
-            // Load font with fixed base size of 24, scaled by maxScale and resolution multiplier
-            double baseFontSize = 24.0 * maxScale * RESOLUTION_MULTIPLIER;
-            Font font;
-            try {
-                font = Font.createFont(Font.TRUETYPE_FONT, new File(getFontPathByFamily(ts.getFontFamily())))
-                        .deriveFont((float) baseFontSize);
-            } catch (Exception e) {
-                System.err.println("Failed to load font for text segment " + ts.getId() + ": " + ts.getFontFamily() + ", using Arial");
-                font = new Font("Arial", Font.PLAIN, (int) baseFontSize);
-            }
-
-            // Measure text
-            BufferedImage tempImage = new BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB);
-            Graphics2D g2d = tempImage.createGraphics();
-            g2d.setFont(font);
-            FontMetrics fm = g2d.getFontMetrics();
-            String[] lines = ts.getText().split("\n");
-            double lineSpacing = 1.2; // Match frontend's lineHeight = fontSize * 1.2
-            int lineHeight = (int) (baseFontSize * lineSpacing); // Use font size directly for consistency
-            int totalTextHeight = lines.length * lineHeight;
-            int maxTextWidth = 0;
-            for (String line : lines) {
-                int lineWidth = fm.stringWidth(line);
-                if (lineWidth > maxTextWidth) {
-                    maxTextWidth = lineWidth;
-                }
-            }
-            // Calculate text block height for centering
-            int textBlockHeight = totalTextHeight;
-            if (lines.length == 1) {
-                textBlockHeight = fm.getAscent() + fm.getDescent(); // Single line uses ascent + descent
-            }
-            g2d.dispose();
-            tempImage.flush();
-
-            // Apply background dimensions and borders (aligned with frontend logic, using maxScale)
-            int bgHeight = (int) ((ts.getBackgroundH() != null ? ts.getBackgroundH() : 0) * maxScale * RESOLUTION_MULTIPLIER);
-            int bgWidth = (int) ((ts.getBackgroundW() != null ? ts.getBackgroundW() : 0) * maxScale * RESOLUTION_MULTIPLIER);
-            int bgBorderWidth = (int) ((ts.getBackgroundBorderWidth() != null ? ts.getBackgroundBorderWidth() : 0) * maxScale * BORDER_SCALE_FACTOR);
-            int borderRadius = (int) ((ts.getBackgroundBorderRadius() != null ? ts.getBackgroundBorderRadius() : 0) * maxScale * RESOLUTION_MULTIPLIER);
-            int textBorderWidth = (int) ((ts.getTextBorderWidth() != null ? ts.getTextBorderWidth() : 0) * maxScale * BORDER_SCALE_FACTOR);
-
-            // Calculate content dimensions (text size + background dimensions)
-            // Replace the existing calculations
-            int contentWidth = maxTextWidth + bgWidth + 2 * textBorderWidth; // Include text border width
-            int contentHeight = textBlockHeight + bgHeight + 2 * textBorderWidth; // Include text border height
-
-            // Cap dimensions to prevent excessive memory usage
-            int maxDimension = (int) (Math.max(canvasWidth, canvasHeight) * RESOLUTION_MULTIPLIER * 1.5);
-            double scaleDown = 1.0;
-            if (contentWidth + 2 * bgBorderWidth + 2 * textBorderWidth > maxDimension ||
-                    contentHeight + 2 * bgBorderWidth + 2 * textBorderWidth > maxDimension) {
-                scaleDown = Math.min(
-                        maxDimension / (double) (contentWidth + 2 * bgBorderWidth + 2 * textBorderWidth),
-                        maxDimension / (double) (contentHeight + 2 * bgBorderWidth + 2 * textBorderWidth)
+        // Draw background border
+        if (bgBorderColor != null && bgBorderWidth > 0) {
+            g2d.setColor(bgBorderColor);
+            g2d.setStroke(new BasicStroke((float) bgBorderWidth));
+            if (borderRadius > 0) {
+                g2d.drawRoundRect(
+                        bgBorderWidth / 2 + textBorderWidth,
+                        bgBorderWidth / 2 + textBorderWidth,
+                        contentWidth + bgBorderWidth,
+                        contentHeight + bgBorderWidth,
+                        borderRadius + bgBorderWidth,
+                        borderRadius + bgBorderWidth
                 );
-                scaleDown = Math.max(scaleDown, 0.5); // Ensure at least 50% of original size
-                bgWidth = (int) (bgWidth * scaleDown);
-                bgHeight = (int) (bgHeight * scaleDown);
-                bgBorderWidth = (int) (bgBorderWidth * scaleDown);
-                borderRadius = (int) (borderRadius * scaleDown);
-                textBorderWidth = (int) (textBorderWidth * scaleDown);
-                contentWidth = maxTextWidth + bgWidth;
-                contentHeight = textBlockHeight + bgHeight; // Recompute with scaled values
+            } else {
+                g2d.drawRect(
+                        bgBorderWidth / 2 + textBorderWidth,
+                        bgBorderWidth / 2 + textBorderWidth,
+                        contentWidth + bgBorderWidth,
+                        contentHeight + bgBorderWidth
+                );
             }
+        }
 
-            // Calculate final image dimensions
-            int totalWidth = contentWidth + 2 * bgBorderWidth + 2 * textBorderWidth;
-            int totalHeight = contentHeight + 2 * bgBorderWidth + 2 * textBorderWidth;
-
-            // Create high-resolution image
-            BufferedImage image = new BufferedImage(totalWidth, totalHeight, BufferedImage.TYPE_INT_ARGB);
-            g2d = image.createGraphics();
-            g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-            g2d.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, RenderingHints.VALUE_FRACTIONALMETRICS_ON);
-            g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-            g2d.setFont(font);
-            fm = g2d.getFontMetrics();
-
-            // Draw background
-            // Replace the background drawing logic
-            if (bgColor != null) {
-                float bgOpacity = ts.getBackgroundOpacity() != null ? ts.getBackgroundOpacity().floatValue() : 1.0f;
-                g2d.setColor(new Color(bgColor.getRed(), bgColor.getGreen(), bgColor.getBlue(), (int) (bgOpacity * 255)));
-                if (borderRadius > 0) {
-                    g2d.fillRoundRect(
-                            bgBorderWidth + textBorderWidth,
-                            bgBorderWidth + textBorderWidth,
-                            contentWidth, // Updated to include textBorderWidth
-                            contentHeight, // Updated to include textBorderWidth
-                            borderRadius,
-                            borderRadius
-                    );
-                } else {
-                    g2d.fillRect(
-                            bgBorderWidth + textBorderWidth,
-                            bgBorderWidth + textBorderWidth,
-                            contentWidth, // Updated
-                            contentHeight // Updated
-                    );
+        // Draw text with border (stroke) and letter spacing
+        String alignment = ts.getAlignment() != null ? ts.getAlignment().toLowerCase() : "center";
+        // Center text vertically within contentHeight, accounting for background height
+        int textYStart = bgBorderWidth + textBorderWidth + (contentHeight - textBlockHeight) / 2 + fm.getAscent();
+        int y = textYStart;
+        for (String line : lines) {
+            // Calculate line width with letter spacing
+            int lineWidth = 0;
+            for (int i = 0; i < line.length(); i++) {
+                lineWidth += fm.charWidth(line.charAt(i));
+                if (i < line.length() - 1) {
+                    lineWidth += (int) scaledLetterSpacing;
                 }
             }
-
-            // Draw background border
-            // Replace the background border drawing logic
-            if (bgBorderColor != null && bgBorderWidth > 0) {
-                g2d.setColor(bgBorderColor);
-                g2d.setStroke(new BasicStroke((float) bgBorderWidth));
-                if (borderRadius > 0) {
-                    g2d.drawRoundRect(
-                            bgBorderWidth / 2 + textBorderWidth,
-                            bgBorderWidth / 2 + textBorderWidth,
-                            contentWidth + bgBorderWidth, // Updated
-                            contentHeight + bgBorderWidth, // Updated
-                            borderRadius + bgBorderWidth,
-                            borderRadius + bgBorderWidth
-                    );
-                } else {
-                    g2d.drawRect(
-                            bgBorderWidth / 2 + textBorderWidth,
-                            bgBorderWidth / 2 + textBorderWidth,
-                            contentWidth + bgBorderWidth, // Updated
-                            contentHeight + bgBorderWidth // Updated
-                    );
-                }
+            // Calculate starting x position based on alignment
+            int x;
+            if (alignment.equals("left")) {
+                x = bgBorderWidth + textBorderWidth;
+            } else if (alignment.equals("center")) {
+                x = bgBorderWidth + textBorderWidth + (contentWidth - lineWidth) / 2;
+            } else { // right
+                x = bgBorderWidth + textBorderWidth + contentWidth - lineWidth;
             }
-
-            // Draw text with border (stroke) if specified
-            String alignment = ts.getAlignment() != null ? ts.getAlignment().toLowerCase() : "center";
-            // Center text vertically within contentHeight, accounting for background height
-            int textYStart = bgBorderWidth + textBorderWidth + (contentHeight - textBlockHeight) / 2 + fm.getAscent();
-            int y = textYStart;
-            for (String line : lines) {
-                int x = calculateXPosition(line, alignment, totalWidth, fm, 0, bgBorderWidth + textBorderWidth);
+            // Draw each character with letter spacing
+            int currentX = x;
+            for (int i = 0; i < line.length(); i++) {
+                char c = line.charAt(i);
                 if (textBorderColor != null && textBorderWidth > 0) {
                     // Draw text border (stroke)
                     float textBorderOpacity = ts.getTextBorderOpacity() != null ? ts.getTextBorderOpacity().floatValue() : 1.0f;
                     g2d.setColor(new Color(textBorderColor.getRed(), textBorderColor.getGreen(), textBorderColor.getBlue(), (int) (textBorderOpacity * 255)));
                     g2d.setStroke(new BasicStroke((float) textBorderWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
                     FontRenderContext frc = g2d.getFontRenderContext();
-                    TextLayout textLayout = new TextLayout(line, font, frc);
-                    Shape shape = textLayout.getOutline(AffineTransform.getTranslateInstance(x, y));
+                    TextLayout textLayout = new TextLayout(String.valueOf(c), font, frc);
+                    Shape shape = textLayout.getOutline(AffineTransform.getTranslateInstance(currentX, y));
                     g2d.draw(shape);
                 }
                 // Draw text fill
                 g2d.setColor(fontColor);
-                g2d.drawString(line, x, y);
-                y += lineHeight; // Use computed lineHeight for consistent spacing
+                g2d.drawString(String.valueOf(c), currentX, y);
+                currentX += fm.charWidth(c) + (int) scaledLetterSpacing;
             }
-
-            g2d.dispose();
-
-            // Save the high-resolution PNG
-            String tempPngPath = new File(tempDir, "text_" + ts.getId() + ".png").getAbsolutePath();
-            ImageIO.write(image, "PNG", new File(tempPngPath));
-            return tempPngPath;
+            y += lineHeight; // Use computed lineHeight for consistent spacing
         }
+
+        g2d.dispose();
+
+        // Save the high-resolution PNG
+        String tempPngPath = new File(tempDir, "text_" + ts.getId() + ".png").getAbsolutePath();
+        ImageIO.write(image, "PNG", new File(tempPngPath));
+        return tempPngPath;
+    }
 
         // Helper method to parse colors
         private Color parseColor(String colorStr, Color fallback, String type, String segmentId) {
@@ -4688,13 +4728,8 @@ public class VideoEditingService {
         Project project = getProjectBySession(sessionId);
         TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
 
-        boolean removed = timelineState.getFilters().removeIf(f ->
-                f.getSegmentId().equals(segmentId)
-        );
-
-        if (!removed) {
-            throw new RuntimeException("No filters found for segment: " + segmentId);
-        }
+        // Remove filters for the segment, no exception if none found
+        timelineState.getFilters().removeIf(f -> f.getSegmentId().equals(segmentId));
 
         saveTimelineState(sessionId, timelineState);
     }

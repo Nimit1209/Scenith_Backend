@@ -57,6 +57,17 @@ public class Project {
     @Column(name = "edit_session") // New column for session ID
     private String editSession;
 
+    @Version
+    private Long version;
+
+    public Long getVersion() {
+        return version;
+    }
+
+    public void setVersion(Long version) {
+        this.version = version;
+    }
+
     public String getEditSession() {
         return editSession;
     }
