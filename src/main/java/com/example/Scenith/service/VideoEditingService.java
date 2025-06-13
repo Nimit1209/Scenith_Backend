@@ -11,12 +11,14 @@ import com.example.Scenith.repository.ProjectRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.persistence.OptimisticLockException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -244,6 +246,7 @@ public class VideoEditingService {
                 .orElseThrow(() -> new SessionNotFoundException("Edit session not found: " + sessionId));
     }
 
+    @Transactional
     public Project uploadVideoToProject(User user, Long projectId, MultipartFile[] videoFiles, String[] videoFileNames) throws IOException {
         Project project = projectRepository.findById(projectId)
                 .orElseThrow(() -> new RuntimeException("Project not found with ID: " + projectId));
@@ -272,27 +275,49 @@ public class VideoEditingService {
 
             String uploadedPath = cloudflareR2Service.uploadFile(videoFile, r2Path);
 
-            if (!cloudflareR2Service.fileExists(r2Path)) {
-                logger.error("Uploaded video not found in R2: r2Path={}, projectId={}", r2Path, projectId);
+            // Wait for file to be available in R2
+            int maxRetries = 10;
+            int attempt = 0;
+            boolean fileExists = false;
+            while (attempt < maxRetries) {
+                if (cloudflareR2Service.fileExists(r2Path)) {
+                    fileExists = true;
+                    break;
+                }
+                attempt++;
+                logger.warn("Video not found in R2 on attempt {}/{}: r2Path={}, projectId={}", attempt, maxRetries, r2Path, projectId);
+                try {
+                    Thread.sleep(1000 * (long) Math.pow(2, attempt)); // Exponential backoff
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting for R2 file: " + r2Path, e);
+                }
+            }
+
+            if (!fileExists) {
+                logger.error("Uploaded video not found in R2 after {} retries: r2Path = {}, projectId={}", maxRetries, r2Path, projectId);
                 throw new IOException("Failed to verify uploaded video in R2: " + r2Path);
             }
 
             Map<String, String> videoData = new HashMap<>();
             videoData.put("videoPath", r2Path);
             videoData.put("videoFileName", uniqueFileName);
-            videoData.put("cdnUrl", cloudflareR2Service.generateDownloadUrl(r2Path, 3600));
-            videoData.put("originalFileName", originalFileName); // Store original filename for matching
+            videoData.put("originalFileName", originalFileName);
+
+            // Generate both CDN and presigned URLs
+            Map<String, String> urls = cloudflareR2Service.generateUrls(r2Path, 3600);
+            videoData.put("cdnUrl", urls.get("cdnUrl"));
+            videoData.put("presignedUrl", urls.get("presignedUrl"));
+
             videoList.add(videoData);
         }
 
         String videosJsonStr = objectMapper.writeValueAsString(videoList);
         project.setVideosJson(videosJsonStr);
         project.setLastModified(LocalDateTime.now());
-        Project savedProject = projectRepository.save(project);
+        Project savedProject = projectRepository.saveAndFlush(project);
 
-        // Log saved videosJson
         logger.info("Saved videosJson for projectId={}: {}", projectId, videosJsonStr);
-
         return savedProject;
     }
 
@@ -316,52 +341,101 @@ public class VideoEditingService {
         String normalizedVideoPath = filename.toLowerCase().replaceAll("[^a-zA-Z0-9.-]", "_");
         logger.debug("Extracted filename={} from videoPath={}, normalized to={}", filename, videoPath, normalizedVideoPath);
 
-        String r2Path;
-        if (videoPath.startsWith("videos/projects/")) {
-            r2Path = videoPath; // Use directly if it's a full R2 path
-        } else {
-            List<Map<String, String>> videos = getVideos(project);
-            Map<String, String> targetVideo = videos.stream()
-                    .filter(video -> {
-                        String videoFileName = video.get("videoFileName").toLowerCase();
-                        String videoPathLower = video.get("videoPath").toLowerCase();
-                        String cdnUrl = video.get("cdnUrl") != null ? video.get("cdnUrl").toLowerCase() : "";
-                        return videoFileName.equals(normalizedVideoPath) ||
-                                videoPathLower.endsWith("/" + normalizedVideoPath) ||
-                                cdnUrl.contains(normalizedVideoPath) ||
-                                videoFileName.equals(filename) ||
-                                videoPathLower.contains(filename.toLowerCase());
-                    })
-                    .findFirst()
-                    .orElseThrow(() -> {
-                        logger.error("Video not found in project metadata: videoPath={}, normalizedVideoPath={}, filename={}, projectId={}, videosJson={}",
-                                videoPath, normalizedVideoPath, filename, project.getId(), videos);
-                        return new IOException("Video file not found in project metadata: " + videoPath);
-                    });
-            r2Path = targetVideo.get("videoPath");
+        String r2Path = null;
+        String accessUrl = null; // URL to use for immediate access
+        int maxMetadataRetries = 10;
+        int metadataAttempt = 0;
+        while (metadataAttempt < maxMetadataRetries) {
+            final int currentAttempt = metadataAttempt;
+            try {
+                if (videoPath.startsWith("videos/projects/")) {
+                    r2Path = videoPath;
+                } else {
+                    List<Map<String, String>> videos = getVideos(project);
+                    Map<String, String> targetVideo = videos.stream()
+                            .filter(video -> {
+                                String videoFileName = video.get("videoFileName").toLowerCase();
+                                String videoPathLower = video.get("videoPath").toLowerCase();
+                                String cdnUrl = video.get("cdnUrl") != null ? video.get("cdnUrl").toLowerCase() : "";
+                                String presignedUrl = video.get("presignedUrl") != null ? video.get("presignedUrl").toLowerCase() : "";
+                                String originalFileName = video.get("originalFileName") != null ? video.get("originalFileName").toLowerCase() : "";
+                                return videoFileName.equals(normalizedVideoPath) ||
+                                        videoPathLower.endsWith("/" + normalizedVideoPath) ||
+                                        cdnUrl.contains(normalizedVideoPath) ||
+                                        presignedUrl.contains(normalizedVideoPath) ||
+                                        videoFileName.equals(filename) ||
+                                        videoPathLower.contains(filename.toLowerCase()) ||
+                                        originalFileName.equals(filename.toLowerCase());
+                            })
+                            .findFirst()
+                            .orElseThrow(() -> new IOException("Video file not found in project metadata: " + videoPath + ", attempt=" + (currentAttempt + 1)));
+                    r2Path = targetVideo.get("videoPath");
+                    accessUrl = targetVideo.get("presignedUrl"); // Use presigned URL initially
+                }
+                break;
+            } catch (IOException e) {
+                metadataAttempt++;
+                if (metadataAttempt >= maxMetadataRetries) {
+                    logger.error("Failed to find video metadata after {} retries: videoPath={}, normalizedVideoPath={}, filename={}, projectId={}",
+                            maxMetadataRetries, videoPath, normalizedVideoPath, filename, project.getId());
+                    throw e;
+                }
+                logger.warn("Video metadata not found on attempt {}/{}: videoPath={}. Retrying...", metadataAttempt, maxMetadataRetries, videoPath);
+                Thread.sleep(1000 * (long) Math.pow(2, metadataAttempt));
+                project = getProjectBySession(sessionId);
+            }
+        }
+
+        if (r2Path == null) {
+            logger.error("Failed to resolve R2 path for videoPath={}, projectId={}", videoPath, project.getId());
+            throw new IOException("Unable to resolve video path: " + videoPath);
+        }
+
+        if (accessUrl == null) {
+            // Fallback to generating URLs if not found in metadata
+            Map<String, String> urls = cloudflareR2Service.generateUrls(r2Path, 3600);
+            accessUrl = urls.get("presignedUrl");
         }
 
         logger.info("Resolved videoPath={} to R2 path={} for projectId={}", videoPath, r2Path, project.getId());
 
         // Verify file existence in R2
-        if (!cloudflareR2Service.fileExists(r2Path)) {
-            logger.error("Video file does not exist in R2: r2Path={}, projectId={}", r2Path, project.getId());
+        int maxFileRetries = 10;
+        int fileAttempt = 0;
+        boolean fileExists = false;
+        while (fileAttempt < maxFileRetries) {
+            try {
+                if (cloudflareR2Service.fileExists(r2Path)) {
+                    fileExists = true;
+                    break;
+                }
+            } catch (Exception e) {
+                logger.warn("Error checking file existence on attempt {}/{}: r2Path={}, error={}", fileAttempt + 1, maxFileRetries, r2Path, e.getMessage());
+            }
+            fileAttempt++;
+            if (fileAttempt < maxFileRetries) {
+                logger.warn("Video not found in R2 on attempt {}/{}: r2Path={}, projectId={}", fileAttempt, maxFileRetries, r2Path, project.getId());
+                Thread.sleep(1000 * (long) Math.pow(2, fileAttempt));
+            }
+        }
+
+        if (!fileExists) {
+            logger.error("Video file does not exist in R2 after {} retries: r2Path={}, projectId={}", maxFileRetries, r2Path, project.getId());
             throw new IOException("Video file not found in R2: " + r2Path);
         }
 
-        // Construct local file path for download
+        // Download video using presigned URL
         String localFileName = project.getId() + "_" + System.currentTimeMillis() + "_" + new File(r2Path).getName();
         String localRelativePath = "temp/videos/" + localFileName;
         File localFile = new File(baseDir, localRelativePath);
 
-        // Download video from R2
-        logger.info("Downloading video from R2: r2Path={} to localPath={}", r2Path, localFile.getAbsolutePath());
+        logger.info("Downloading video from URL: {} to localPath={}", accessUrl, localFile.getAbsolutePath());
         try {
             localFile.getParentFile().mkdirs();
             cloudflareR2Service.downloadFile(r2Path, localFile.getAbsolutePath());
-            if (!localFile.exists() || !localFile.isFile()) {
-                logger.error("Downloaded file is invalid: localPath={}, exists={}, isFile={}",
-                        localFile.getAbsolutePath(), localFile.exists(), localFile.isFile());
+            if (!localFile.exists() || !localFile.isFile() || localFile.length() == 0) {
+                logger.error("Downloaded file is invalid: localPath={}, exists={}, isFile={}, size={}",
+                        localFile.getAbsolutePath(), localFile.exists(), localFile.isFile(), localFile.length());
                 throw new IOException("Downloaded video file is invalid: " + localFile.getAbsolutePath());
             }
             logger.info("Successfully downloaded video to: {}", localFile.getAbsolutePath());
@@ -375,6 +449,7 @@ public class VideoEditingService {
             double fullDuration = getVideoDuration(r2Path);
             logger.info("Video duration for {}: {} seconds for projectId={}", r2Path, fullDuration, project.getId());
 
+            // Validate inputs
             layer = layer != null ? layer : 0;
             timelineStartTime = timelineStartTime != null ? roundToThreeDecimals(timelineStartTime) : getLastSegmentEndTime(timelineState, layer);
             startTime = startTime != null ? roundToThreeDecimals(startTime) : 0.0;
@@ -395,6 +470,7 @@ public class VideoEditingService {
                 throw new IOException("Invalid startTime or endTime for video segment");
             }
 
+            // Handle audio extraction
             String audioPath = null;
             AudioSegment audioSegment = null;
 
@@ -404,8 +480,9 @@ public class VideoEditingService {
                 String audioR2Path = "audio/projects/" + project.getId() + "/extracted/" + audioFileName;
 
                 List<Map<String, String>> extractedAudio = getExtractedAudio(project);
+                final String finalR2Path = r2Path;
                 Map<String, String> existingAudio = extractedAudio.stream()
-                        .filter(audio -> audio.get("sourceVideoPath").equals(r2Path) && audio.get("audioFileName").equals(audioFileName))
+                        .filter(audio -> audio.get("sourceVideoPath").equals(finalR2Path) && audio.get("audioFileName").equals(audioFileName))
                         .findFirst()
                         .orElse(null);
 
@@ -431,6 +508,7 @@ public class VideoEditingService {
                 }
             }
 
+            // Create video segment
             VideoSegment segment = new VideoSegment();
             segment.setSourceVideoPath(r2Path);
             segment.setStartTime(startTime);
@@ -455,10 +533,9 @@ public class VideoEditingService {
             }
 
             timelineState.getSegments().add(segment);
-            saveTimelineState(sessionId, timelineState);
+            saveTimelineStateNewTransaction(sessionId, timelineState);
             logger.info("Successfully added video segment to timeline: projectId={}, r2Path={}", project.getId(), r2Path);
         } finally {
-            // Clean up temporary file
             try {
                 if (localFile.exists()) {
                     Files.delete(localFile.toPath());
@@ -469,6 +546,7 @@ public class VideoEditingService {
             }
         }
     }
+
     private double getLastSegmentEndTime(TimelineState timelineState, int layer) {
         return timelineState.getSegments().stream()
                 .filter(segment -> segment.getLayer() == layer)
@@ -717,7 +795,7 @@ public class VideoEditingService {
         }
     }
 
-    @Transactional(isolation = Isolation.SERIALIZABLE)
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public void updateVideoSegment(
             String sessionId,
             String segmentId,
@@ -738,225 +816,242 @@ public class VideoEditingService {
             Double rotation,
             Map<String, List<Keyframe>> keyframes
     ) throws IOException, InterruptedException {
+        int maxRetries = 3;
+        int attempt = 0;
+        try {
+            logger.debug("Updating VideoSegment {}: positionX={}, positionY={}, layer={}",
+                    segmentId, positionX, positionY);
 
-        logger.debug("Updating VideoSegment {}: positionX={}, positionY={}, layer={}",
-                segmentId, positionX, positionY);
+            Project project = getProjectBySession(sessionId);
+            TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
 
-        Project project = getProjectBySession(sessionId);
-        TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
+            VideoSegment segmentToUpdate = timelineState.getSegments().stream()
+                    .filter(segment -> segment.getId().equals(segmentId))
+                    .findFirst()
+                    .orElseThrow(() -> new RuntimeException("No segment found with ID: " + segmentId));
 
-        VideoSegment segmentToUpdate = timelineState.getSegments().stream()
-                .filter(segment -> segment.getId().equals(segmentId))
-                .findFirst()
-                .orElseThrow(() -> new RuntimeException("No segment found with ID: " + segmentId));
+            double originalTimelineStartTime = segmentToUpdate.getTimelineStartTime();
+            double originalTimelineEndTime = segmentToUpdate.getTimelineEndTime();
+            double originalStartTime = segmentToUpdate.getStartTime();
+            double originalEndTime = segmentToUpdate.getEndTime();
+            int originalLayer = segmentToUpdate.getLayer();
+            Double originalCropL = segmentToUpdate.getCropL();
+            Double originalCropR = segmentToUpdate.getCropR();
+            Double originalCropT = segmentToUpdate.getCropT();
+            Double originalCropB = segmentToUpdate.getCropB();
+            Double originalSpeed = segmentToUpdate.getSpeed();
+            Double originalRotation = segmentToUpdate.getRotation();
 
-        double originalTimelineStartTime = segmentToUpdate.getTimelineStartTime();
-        double originalTimelineEndTime = segmentToUpdate.getTimelineEndTime();
-        double originalStartTime = segmentToUpdate.getStartTime();
-        double originalEndTime = segmentToUpdate.getEndTime();
-        int originalLayer = segmentToUpdate.getLayer();
-        Double originalCropL = segmentToUpdate.getCropL();
-        Double originalCropR = segmentToUpdate.getCropR();
-        Double originalCropT = segmentToUpdate.getCropT();
-        Double originalCropB = segmentToUpdate.getCropB();
-        Double originalSpeed = segmentToUpdate.getSpeed();
-        Double originalRotation = segmentToUpdate.getRotation();
+            boolean timelineOrLayerChanged = false;
 
-        boolean timelineOrLayerChanged = false;
+            String videoPath = segmentToUpdate.getSourceVideoPath();
+            String r2Path = videoPath.startsWith("videos/projects/") ? videoPath : "videos/projects/" + project.getId() + "/" + videoPath;
 
-        String videoPath = segmentToUpdate.getSourceVideoPath();
-        String r2Path = videoPath.startsWith("videos/projects/") ? videoPath : "videos/projects/" + project.getId() + "/" + videoPath;
+            String localFileName = new File(r2Path).getName();
+            String localRelativePath = "temp/videos/" + localFileName;
+            File localFile = new File(baseDir, localRelativePath);
 
-        String localFileName = new File(r2Path).getName();
-        String localRelativePath = "temp/videos/" + localFileName;
-        File localFile = new File(baseDir, localRelativePath);
-
-        if (!localFile.exists()) {
-            logger.info("Local video not found, downloading from R2: {}", r2Path);
-            localFile.getParentFile().mkdirs();
-            cloudflareR2Service.downloadFile(r2Path, localFile.getAbsolutePath());
-            logger.info("Downloaded video to: {}", localFile.getAbsolutePath());
-        }
-
-        // Validate crop parameters
-        if (cropL != null && (cropL < 0 || cropL > 100)) {
-            throw new IllegalArgumentException("cropL must be between 0 and 100");
-        }
-        if (cropR != null && (cropR < 0 || cropR > 100)) {
-            throw new IllegalArgumentException("cropR must be between 0 and 100");
-        }
-        if (cropT != null && (cropT < 0 || cropT > 100)) {
-            throw new IllegalArgumentException("cropT must be between 0 and 100");
-        }
-        if (cropB != null && (cropB < 0 || cropB > 100)) {
-            throw new IllegalArgumentException("cropB must be between 0 and 100");
-        }
-        double effectiveCropL = cropL != null ? cropL : (segmentToUpdate.getCropL() != null ? segmentToUpdate.getCropL() : 0.0);
-        double effectiveCropR = cropR != null ? cropR : (segmentToUpdate.getCropR() != null ? segmentToUpdate.getCropR() : 0.0);
-        double effectiveCropT = cropT != null ? cropT : (segmentToUpdate.getCropT() != null ? segmentToUpdate.getCropT() : 0.0);
-        double effectiveCropB = cropB != null ? cropB : (segmentToUpdate.getCropB() != null ? segmentToUpdate.getCropB() : 0.0);
-        if (effectiveCropL + effectiveCropR >= 100) {
-            throw new IllegalArgumentException("Total crop percentage (left + right) must be less than 100");
-        }
-        if (effectiveCropT + effectiveCropB >= 100) {
-            throw new IllegalArgumentException("Total crop percentage (top + bottom) must be less than 100");
-        }
-
-        // Validate speed
-        if (speed != null) {
-            if (speed < 0.1 || speed > 5.0) {
-                throw new IllegalArgumentException("Speed must be between 0.1 and 5.0");
+            if (!localFile.exists()) {
+                logger.info("Local video not found, downloading from R2: {}", r2Path);
+                localFile.getParentFile().mkdirs();
+                cloudflareR2Service.downloadFile(r2Path, localFile.getAbsolutePath());
+                logger.info("Downloaded video to: {}", localFile.getAbsolutePath());
             }
-            segmentToUpdate.setSpeed(speed);
-        }
 
-        // Handle keyframes
-        if (keyframes != null && !keyframes.isEmpty()) {
-            for (Map.Entry<String, List<Keyframe>> entry : keyframes.entrySet()) {
-                String property = entry.getKey();
-                List<Keyframe> kfs = entry.getValue();
-                segmentToUpdate.getKeyframes().remove(property);
-                if (!kfs.isEmpty()) {
-                    for (Keyframe kf : kfs) {
-                        if (kf.getTime() < 0 || kf.getTime() > (segmentToUpdate.getTimelineEndTime() - segmentToUpdate.getTimelineStartTime())) {
-                            throw new IllegalArgumentException("Keyframe time out of segment bounds for property " + property);
+            // Validate crop parameters
+            if (cropL != null && (cropL < 0 || cropL > 100)) {
+                throw new IllegalArgumentException("cropL must be between 0 and 100");
+            }
+            if (cropR != null && (cropR < 0 || cropR > 100)) {
+                throw new IllegalArgumentException("cropR must be between 0 and 100");
+            }
+            if (cropT != null && (cropT < 0 || cropT > 100)) {
+                throw new IllegalArgumentException("cropT must be between 0 and 100");
+            }
+            if (cropB != null && (cropB < 0 || cropB > 100)) {
+                throw new IllegalArgumentException("cropB must be between 0 and 100");
+            }
+            double effectiveCropL = cropL != null ? cropL : (segmentToUpdate.getCropL() != null ? segmentToUpdate.getCropL() : 0.0);
+            double effectiveCropR = cropR != null ? cropR : (segmentToUpdate.getCropR() != null ? segmentToUpdate.getCropR() : 0.0);
+            double effectiveCropT = cropT != null ? cropT : (segmentToUpdate.getCropT() != null ? segmentToUpdate.getCropT() : 0.0);
+            double effectiveCropB = cropB != null ? cropB : (segmentToUpdate.getCropB() != null ? segmentToUpdate.getCropB() : 0.0);
+            if (effectiveCropL + effectiveCropR >= 100) {
+                throw new IllegalArgumentException("Total crop percentage (left + right) must be less than 100");
+            }
+            if (effectiveCropT + effectiveCropB >= 100) {
+                throw new IllegalArgumentException("Total crop percentage (top + bottom) must be less than 100");
+            }
+
+            // Validate speed
+            if (speed != null) {
+                if (speed < 0.1 || speed > 5.0) {
+                    throw new IllegalArgumentException("Speed must be between 0.1 and 5.0");
+                }
+                segmentToUpdate.setSpeed(speed);
+            }
+
+            // Handle keyframes
+            if (keyframes != null && !keyframes.isEmpty()) {
+                for (Map.Entry<String, List<Keyframe>> entry : keyframes.entrySet()) {
+                    String property = entry.getKey();
+                    List<Keyframe> kfs = entry.getValue();
+                    segmentToUpdate.getKeyframes().remove(property);
+                    if (!kfs.isEmpty()) {
+                        for (Keyframe kf : kfs) {
+                            if (kf.getTime() < 0 || kf.getTime() > (segmentToUpdate.getTimelineEndTime() - segmentToUpdate.getTimelineStartTime())) {
+                                throw new IllegalArgumentException("Keyframe time out of segment bounds for property " + property);
+                            }
+                            kf.setTime(roundToThreeDecimals(kf.getTime()));
+                            segmentToUpdate.addKeyframe(property, kf);
                         }
-                        kf.setTime(roundToThreeDecimals(kf.getTime()));
-                        segmentToUpdate.addKeyframe(property, kf);
+                    }
+                    switch (property) {
+                        case "positionX":
+                            if (kfs.isEmpty()) segmentToUpdate.setPositionX(positionX);
+                            else segmentToUpdate.setPositionX(null);
+                            break;
+                        case "positionY":
+                            if (kfs.isEmpty()) segmentToUpdate.setPositionY(positionY);
+                            else segmentToUpdate.setPositionY(null);
+                            break;
+                        case "scale":
+                            if (kfs.isEmpty()) segmentToUpdate.setScale(scale);
+                            else segmentToUpdate.setScale(null);
+                            break;
+                        case "opacity":
+                            if (kfs.isEmpty()) segmentToUpdate.setOpacity(opacity);
+                            else segmentToUpdate.setOpacity(null);
+                            break;
                     }
                 }
-                switch (property) {
-                    case "positionX":
-                        if (kfs.isEmpty()) segmentToUpdate.setPositionX(positionX);
-                        else segmentToUpdate.setPositionX(null);
-                        break;
-                    case "positionY":
-                        if (kfs.isEmpty()) segmentToUpdate.setPositionY(positionY);
-                        else segmentToUpdate.setPositionY(null);
-                        break;
-                    case "scale":
-                        if (kfs.isEmpty()) segmentToUpdate.setScale(scale);
-                        else segmentToUpdate.setScale(null);
-                        break;
-                    case "opacity":
-                        if (kfs.isEmpty()) segmentToUpdate.setOpacity(opacity);
-                        else segmentToUpdate.setOpacity(null);
-                        break;
+            } else {
+                segmentToUpdate.getKeyframes().clear();
+                if (positionX != null) segmentToUpdate.setPositionX(positionX);
+                if (positionY != null) segmentToUpdate.setPositionY(positionY);
+                if (scale != null) segmentToUpdate.setScale(scale);
+                if (opacity != null) segmentToUpdate.setOpacity(opacity);
+                if (rotation != null) segmentToUpdate.setRotation(rotation);
+            }
+
+            // Update non-keyframed properties
+            if (positionX != null && (keyframes == null || !keyframes.containsKey("positionX") || keyframes.get("positionX").isEmpty())) {
+                segmentToUpdate.setPositionX(positionX);
+            }
+            if (positionY != null && (keyframes == null || !keyframes.containsKey("positionY") || keyframes.get("positionY").isEmpty())) {
+                segmentToUpdate.setPositionY(positionY);
+            }
+            if (scale != null && (keyframes == null || !keyframes.containsKey("scale") || keyframes.get("scale").isEmpty())) {
+                segmentToUpdate.setScale(scale);
+            }
+            if (opacity != null && (keyframes == null || !keyframes.containsKey("opacity") || keyframes.get("opacity").isEmpty())) {
+                segmentToUpdate.setOpacity(opacity);
+            }
+            if (rotation != null) {
+                segmentToUpdate.setRotation(rotation);
+            }
+            if (layer != null) {
+                segmentToUpdate.setLayer(layer);
+                timelineOrLayerChanged = true;
+            }
+            if (timelineStartTime != null) {
+                timelineStartTime = roundToThreeDecimals(timelineStartTime);
+                segmentToUpdate.setTimelineStartTime(timelineStartTime);
+                timelineOrLayerChanged = true;
+            }
+            if (timelineEndTime != null) {
+                timelineEndTime = roundToThreeDecimals(timelineEndTime);
+                segmentToUpdate.setTimelineEndTime(timelineEndTime);
+                timelineOrLayerChanged = true;
+            }
+            if (startTime != null) {
+                startTime = roundToThreeDecimals(startTime);
+                segmentToUpdate.setStartTime(Math.max(0, startTime));
+            }
+            if (endTime != null) {
+                endTime = roundToThreeDecimals(endTime);
+                segmentToUpdate.setEndTime(endTime);
+                double originalVideoDuration = getVideoDuration(r2Path); // Use B2 path
+                if (endTime > originalVideoDuration) {
+                    segmentToUpdate.setEndTime(roundToThreeDecimals(originalVideoDuration));
                 }
             }
-        } else {
-            segmentToUpdate.getKeyframes().clear();
-            if (positionX != null) segmentToUpdate.setPositionX(positionX);
-            if (positionY != null) segmentToUpdate.setPositionY(positionY);
-            if (scale != null) segmentToUpdate.setScale(scale);
-            if (opacity != null) segmentToUpdate.setOpacity(opacity);
-            if (rotation != null) segmentToUpdate.setRotation(rotation);
-        }
+            if (cropL != null) segmentToUpdate.setCropL(cropL);
+            if (cropR != null) segmentToUpdate.setCropR(cropR);
+            if (cropT != null) segmentToUpdate.setCropT(cropT);
+            if (cropB != null) segmentToUpdate.setCropB(cropB);
 
-        // Update non-keyframed properties
-        if (positionX != null && (keyframes == null || !keyframes.containsKey("positionX") || keyframes.get("positionX").isEmpty())) {
-            segmentToUpdate.setPositionX(positionX);
-        }
-        if (positionY != null && (keyframes == null || !keyframes.containsKey("positionY") || keyframes.get("positionY").isEmpty())) {
-            segmentToUpdate.setPositionY(positionY);
-        }
-        if (scale != null && (keyframes == null || !keyframes.containsKey("scale") || keyframes.get("scale").isEmpty())) {
-            segmentToUpdate.setScale(scale);
-        }
-        if (opacity != null && (keyframes == null || !keyframes.containsKey("opacity") || keyframes.get("opacity").isEmpty())) {
-            segmentToUpdate.setOpacity(opacity);
-        }
-        if (rotation != null) {
-            segmentToUpdate.setRotation(rotation);
-        }
-        if (layer != null) {
-            segmentToUpdate.setLayer(layer);
-            timelineOrLayerChanged = true;
-        }
-        if (timelineStartTime != null) {
-            timelineStartTime = roundToThreeDecimals(timelineStartTime);
-            segmentToUpdate.setTimelineStartTime(timelineStartTime);
-            timelineOrLayerChanged = true;
-        }
-        if (timelineEndTime != null) {
-            timelineEndTime = roundToThreeDecimals(timelineEndTime);
-            segmentToUpdate.setTimelineEndTime(timelineEndTime);
-            timelineOrLayerChanged = true;
-        }
-        if (startTime != null) {
-            startTime = roundToThreeDecimals(startTime);
-            segmentToUpdate.setStartTime(Math.max(0, startTime));
-        }
-        if (endTime != null) {
-            endTime = roundToThreeDecimals(endTime);
-            segmentToUpdate.setEndTime(endTime);
-            double originalVideoDuration = getVideoDuration(r2Path); // Use B2 path
-            if (endTime > originalVideoDuration) {
-                segmentToUpdate.setEndTime(roundToThreeDecimals(originalVideoDuration));
-            }
-        }
-        if (cropL != null) segmentToUpdate.setCropL(cropL);
-        if (cropR != null) segmentToUpdate.setCropR(cropR);
-        if (cropT != null) segmentToUpdate.setCropT(cropT);
-        if (cropB != null) segmentToUpdate.setCropB(cropB);
+            // Adjust timelineEndTime based on speed
+            double newStartTime = startTime != null ? startTime : segmentToUpdate.getStartTime();
+            double newEndTime = endTime != null ? endTime : segmentToUpdate.getEndTime();
+            double newClipDuration = roundToThreeDecimals(newEndTime - newStartTime);
+            double effectiveSpeed = speed != null ? speed : (originalSpeed != null ? originalSpeed : 1.0);
 
-        // Adjust timelineEndTime based on speed
-        double newStartTime = startTime != null ? startTime : segmentToUpdate.getStartTime();
-        double newEndTime = endTime != null ? endTime : segmentToUpdate.getEndTime();
-        double newClipDuration = roundToThreeDecimals(newEndTime - newStartTime);
-        double effectiveSpeed = speed != null ? speed : (originalSpeed != null ? originalSpeed : 1.0);
-
-        if (speed != null && speed > originalSpeed && originalSpeed >= 1.0) {
-            double newTimelineDuration = roundToThreeDecimals(newClipDuration / effectiveSpeed);
-            if (timelineEndTime == null) {
-                segmentToUpdate.setTimelineEndTime(roundToThreeDecimals(segmentToUpdate.getTimelineStartTime() + newTimelineDuration));
+            if (speed != null && speed > originalSpeed && originalSpeed >= 1.0) {
+                double newTimelineDuration = roundToThreeDecimals(newClipDuration / effectiveSpeed);
+                if (timelineEndTime == null) {
+                    segmentToUpdate.setTimelineEndTime(roundToThreeDecimals(segmentToUpdate.getTimelineStartTime() + newTimelineDuration));
+                } else {
+                    double providedTimelineDuration = roundToThreeDecimals(timelineEndTime - segmentToUpdate.getTimelineStartTime());
+                    if (Math.abs(providedTimelineDuration - newTimelineDuration) > 0.001) {
+                        segmentToUpdate.setTimelineEndTime(roundToThreeDecimals(segmentToUpdate.getTimelineStartTime() + newTimelineDuration));
+                    }
+                }
             } else {
-                double providedTimelineDuration = roundToThreeDecimals(timelineEndTime - segmentToUpdate.getTimelineStartTime());
-                if (Math.abs(providedTimelineDuration - newTimelineDuration) > 0.001) {
+                if (timelineEndTime == null && (startTime != null || endTime != null)) {
+                    double newTimelineDuration = roundToThreeDecimals(newClipDuration / effectiveSpeed);
                     segmentToUpdate.setTimelineEndTime(roundToThreeDecimals(segmentToUpdate.getTimelineStartTime() + newTimelineDuration));
                 }
             }
-        } else {
-            if (timelineEndTime == null && (startTime != null || endTime != null)) {
-                double newTimelineDuration = roundToThreeDecimals(newClipDuration / effectiveSpeed);
-                segmentToUpdate.setTimelineEndTime(roundToThreeDecimals(segmentToUpdate.getTimelineStartTime() + newTimelineDuration));
+
+            // Validate timeline position
+            timelineState.getSegments().remove(segmentToUpdate);
+            boolean positionAvailable = timelineState.isTimelinePositionAvailable(
+                    segmentToUpdate.getTimelineStartTime(),
+                    segmentToUpdate.getTimelineEndTime(),
+                    segmentToUpdate.getLayer());
+            timelineState.getSegments().add(segmentToUpdate);
+
+            if (!positionAvailable) {
+                segmentToUpdate.setTimelineStartTime(originalTimelineStartTime);
+                segmentToUpdate.setTimelineEndTime(originalTimelineEndTime);
+                segmentToUpdate.setStartTime(originalStartTime);
+                segmentToUpdate.setEndTime(originalEndTime);
+                segmentToUpdate.setLayer(originalLayer);
+                segmentToUpdate.setCropL(originalCropL);
+                segmentToUpdate.setCropR(originalCropR);
+                segmentToUpdate.setCropT(originalCropT);
+                segmentToUpdate.setCropB(originalCropB);
+                segmentToUpdate.setSpeed(originalSpeed);
+                segmentToUpdate.setRotation(originalRotation);
+                throw new RuntimeException("Timeline position overlaps with an existing segment in layer " + segmentToUpdate.getLayer());
+            }
+
+            if (timelineOrLayerChanged) {
+                updateAssociatedTransitions(
+                        sessionId,
+                        segmentId,
+                        segmentToUpdate.getLayer(),
+                        segmentToUpdate.getTimelineStartTime(),
+                        segmentToUpdate.getTimelineEndTime()
+                );
+            }
+
+            saveTimelineState(sessionId, timelineState);
+        }
+        catch (OptimisticLockException e) {
+            attempt++;
+            if (attempt >= maxRetries) {
+                logger.error("Failed to update video segment after {} retries: sessionId={}, segmentId={}", maxRetries, sessionId, segmentId, e);
+                throw new RuntimeException("Failed to update segment due to concurrent modification", e);
+            }
+            logger.warn("Optimistic lock exception on attempt {}/{} for sessionId={}, segmentId={}. Retrying...", attempt, maxRetries, sessionId, segmentId);
+            try {
+                Thread.sleep(100 * attempt); // Backoff to reduce contention
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted during retry", ie);
             }
         }
-
-        // Validate timeline position
-        timelineState.getSegments().remove(segmentToUpdate);
-        boolean positionAvailable = timelineState.isTimelinePositionAvailable(
-                segmentToUpdate.getTimelineStartTime(),
-                segmentToUpdate.getTimelineEndTime(),
-                segmentToUpdate.getLayer());
-        timelineState.getSegments().add(segmentToUpdate);
-
-        if (!positionAvailable) {
-            segmentToUpdate.setTimelineStartTime(originalTimelineStartTime);
-            segmentToUpdate.setTimelineEndTime(originalTimelineEndTime);
-            segmentToUpdate.setStartTime(originalStartTime);
-            segmentToUpdate.setEndTime(originalEndTime);
-            segmentToUpdate.setLayer(originalLayer);
-            segmentToUpdate.setCropL(originalCropL);
-            segmentToUpdate.setCropR(originalCropR);
-            segmentToUpdate.setCropT(originalCropT);
-            segmentToUpdate.setCropB(originalCropB);
-            segmentToUpdate.setSpeed(originalSpeed);
-            segmentToUpdate.setRotation(originalRotation);
-            throw new RuntimeException("Timeline position overlaps with an existing segment in layer " + segmentToUpdate.getLayer());
-        }
-
-        if (timelineOrLayerChanged) {
-            updateAssociatedTransitions(
-                    sessionId,
-                    segmentId,
-                    segmentToUpdate.getLayer(),
-                    segmentToUpdate.getTimelineStartTime(),
-                    segmentToUpdate.getTimelineEndTime()
-            );
-        }
-
-        saveTimelineState(sessionId, timelineState);
     }
 
     // Private method for internal use with B2 paths
@@ -1084,7 +1179,6 @@ public class VideoEditingService {
         projectRepository.save(project);
     }
 
-    @Transactional(isolation = Isolation.SERIALIZABLE)
     public void updateTextSegment(
             String sessionId,
             String segmentId,
@@ -1110,16 +1204,117 @@ public class VideoEditingService {
             Integer textBorderWidth,
             Double textBorderOpacity,
             Double letterSpacing,
-            Double lineSpacing, // Added lineSpacing parameter
-            Double rotation, // New parameter
+            Double lineSpacing,
+            Double rotation,
             Map<String, List<Keyframe>> keyframes
     ) throws IOException {
+        // Validate inputs early
+        if (opacity != null && (opacity < 0 || opacity > 1)) {
+            throw new IllegalArgumentException("Opacity must be between 0 and 1");
+        }
+        if (scale != null && scale <= 0) {
+            throw new IllegalArgumentException("Scale must be positive");
+        }
+        if (backgroundOpacity != null && (backgroundOpacity < 0 || backgroundOpacity > 1)) {
+            throw new IllegalArgumentException("Background opacity must be between 0 and 1");
+        }
+        if (textBorderOpacity != null && (textBorderOpacity < 0 || textBorderOpacity > 1)) {
+            throw new IllegalArgumentException("Text border opacity must be between 0 and 1");
+        }
+        if (letterSpacing != null && letterSpacing < 0) {
+            throw new IllegalArgumentException("Letter spacing must be non-negative");
+        }
+        if (lineSpacing != null && lineSpacing < 0) {
+            throw new IllegalArgumentException("Line spacing must be non-negative");
+        }
+        if (timelineStartTime != null && timelineStartTime < 0) {
+            throw new IllegalArgumentException("Timeline start time must be non-negative");
+        }
+        if (timelineEndTime != null && timelineEndTime <= (timelineStartTime != null ? timelineStartTime : 0)) {
+            throw new IllegalArgumentException("Timeline end time must be greater than start time");
+        }
 
-        logger.debug("Updating TextSegment {}: positionX={}, positionY={}, layer={}",
-                segmentId, positionX, positionY, layer);
+        // Non-transactional: Load project and timeline state for validation
         Project project = getProjectBySession(sessionId);
         TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
+        TextSegment textSegment = timelineState.getTextSegments().stream()
+                .filter(segment -> segment.getId().equals(segmentId))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("Text segment not found with ID: " + segmentId));
 
+        // Validate keyframes
+        if (keyframes != null && !keyframes.isEmpty()) {
+            double segmentDuration = textSegment.getTimelineEndTime() - textSegment.getTimelineStartTime();
+            for (Map.Entry<String, List<Keyframe>> entry : keyframes.entrySet()) {
+                String property = entry.getKey();
+                for (Keyframe kf : entry.getValue()) {
+                    if (kf.getTime() < 0 || kf.getTime() > segmentDuration) {
+                        throw new IllegalArgumentException("Keyframe time out of segment bounds for property " + property);
+                    }
+                }
+            }
+        }
+
+        // Transactional update with retries
+        int maxRetries = 3;
+        int attempt = 0;
+        while (attempt < maxRetries) {
+            try {
+                doUpdateTextSegment(sessionId, segmentId, text, fontFamily, scale, fontColor, backgroundColor,
+                        positionX, positionY, opacity, timelineStartTime, timelineEndTime, layer, alignment,
+                        backgroundOpacity, backgroundBorderWidth, backgroundBorderColor, backgroundH, backgroundW,
+                        backgroundBorderRadius, textBorderColor, textBorderWidth, textBorderOpacity,
+                        letterSpacing, lineSpacing, rotation, keyframes);
+                return;
+            } catch (OptimisticLockException e) {
+                attempt++;
+                if (attempt >= maxRetries) {
+                    logger.error("Failed to update text segment after {} retries: sessionId={}, segmentId={}", maxRetries, sessionId, segmentId, e);
+                    throw new RuntimeException("Failed to update text segment due to concurrent modification", e);
+                }
+                logger.warn("Optimistic lock exception on attempt {}/{} for sessionId={}, segmentId={}. Retrying...", attempt, maxRetries, sessionId, segmentId);
+                try {
+                    Thread.sleep(100 * attempt); // Backoff
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted during retry", ie);
+                }
+            }
+        }
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    private void doUpdateTextSegment(
+            String sessionId,
+            String segmentId,
+            String text,
+            String fontFamily,
+            Double scale,
+            String fontColor,
+            String backgroundColor,
+            Integer positionX,
+            Integer positionY,
+            Double opacity,
+            Double timelineStartTime,
+            Double timelineEndTime,
+            Integer layer,
+            String alignment,
+            Double backgroundOpacity,
+            Integer backgroundBorderWidth,
+            String backgroundBorderColor,
+            Integer backgroundH,
+            Integer backgroundW,
+            Integer backgroundBorderRadius,
+            String textBorderColor,
+            Integer textBorderWidth,
+            Double textBorderOpacity,
+            Double letterSpacing,
+            Double lineSpacing,
+            Double rotation,
+            Map<String, List<Keyframe>> keyframes
+    ) throws IOException {
+        Project project = getProjectBySession(sessionId);
+        TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
         TextSegment textSegment = timelineState.getTextSegments().stream()
                 .filter(segment -> segment.getId().equals(segmentId))
                 .findFirst()
@@ -1136,19 +1331,13 @@ public class VideoEditingService {
             for (Map.Entry<String, List<Keyframe>> entry : keyframes.entrySet()) {
                 String property = entry.getKey();
                 List<Keyframe> kfs = entry.getValue();
-                // Clear existing keyframes for this property
                 textSegment.getKeyframes().remove(property);
                 if (!kfs.isEmpty()) {
-                    // Add new keyframes if provided
                     for (Keyframe kf : kfs) {
-                        if (kf.getTime() < 0 || kf.getTime() > (textSegment.getTimelineEndTime() - textSegment.getTimelineStartTime())) {
-                            throw new IllegalArgumentException("Keyframe time out of segment bounds for property " + property);
-                        }
                         kf.setTime(roundToThreeDecimals(kf.getTime()));
                         textSegment.addKeyframe(property, kf);
                     }
                 }
-                // If no keyframes are provided for this property, clear keyframe control
                 switch (property) {
                     case "positionX":
                         if (kfs.isEmpty()) textSegment.setPositionX(positionX);
@@ -1169,7 +1358,6 @@ public class VideoEditingService {
                 }
             }
         } else {
-            // If no keyframes are provided, restore all static properties
             textSegment.getKeyframes().clear();
             if (positionX != null) textSegment.setPositionX(positionX);
             if (positionY != null) textSegment.setPositionY(positionY);
@@ -1195,9 +1383,7 @@ public class VideoEditingService {
         if (opacity != null && (keyframes == null || !keyframes.containsKey("opacity") || keyframes.get("opacity").isEmpty())) {
             textSegment.setOpacity(opacity);
         }
-        if (rotation != null) {
-            textSegment.setRotation(rotation); // Always update static rotation
-        }
+        if (rotation != null) textSegment.setRotation(rotation);
         if (timelineStartTime != null) {
             timelineStartTime = roundToThreeDecimals(timelineStartTime);
             textSegment.setTimelineStartTime(timelineStartTime);
@@ -1223,7 +1409,7 @@ public class VideoEditingService {
         if (textBorderWidth != null) textSegment.setTextBorderWidth(textBorderWidth);
         if (textBorderOpacity != null) textSegment.setTextBorderOpacity(textBorderOpacity);
         if (letterSpacing != null) textSegment.setLetterSpacing(letterSpacing);
-        if (lineSpacing != null) textSegment.setLineSpacing(lineSpacing); // Added lineSpacing update
+        if (lineSpacing != null) textSegment.setLineSpacing(lineSpacing);
 
         // Validate timeline position
         timelineState.getTextSegments().remove(textSegment);
@@ -1237,11 +1423,10 @@ public class VideoEditingService {
             textSegment.setTimelineStartTime(originalTimelineStartTime);
             textSegment.setTimelineEndTime(originalTimelineEndTime);
             textSegment.setLayer(originalLayer);
-            textSegment.setRotation(originalRotation); // Restore original rotation
+            textSegment.setRotation(originalRotation);
             throw new RuntimeException("Timeline position overlaps with an existing segment in layer " + textSegment.getLayer());
         }
 
-        // Update associated transitions if timelineStartTime or layer changed
         if (timelineOrLayerChanged) {
             updateAssociatedTransitions(
                     sessionId,
@@ -1446,137 +1631,226 @@ public class VideoEditingService {
         }
         return waveformJsonPath;
     }
-        public void updateAudioSegment(
-                String sessionId,
-                String audioSegmentId,
-                Double startTime,
-                Double endTime,
-                Double timelineStartTime,
-                Double timelineEndTime,
-                Double volume,
-                Integer layer,
-                Map<String, List<Keyframe>> keyframes) throws IOException, InterruptedException {
-            Project project = getProjectBySession(sessionId);
-            TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
-
-            AudioSegment targetSegment = timelineState.getAudioSegments().stream()
-                    .filter(segment -> segment.getId().equals(audioSegmentId))
-                    .findFirst()
-                    .orElseThrow(() -> new RuntimeException("Audio segment not found: " + audioSegmentId));
-
-            double originalStartTime = targetSegment.getStartTime();
-            double originalEndTime = targetSegment.getEndTime();
-            double originalTimelineStartTime = targetSegment.getTimelineStartTime();
-            double originalTimelineEndTime = targetSegment.getTimelineEndTime();
-            int originalLayer = targetSegment.getLayer();
-
-            double audioDuration = getAudioDuration(targetSegment.getAudioPath());
-
-            if (keyframes != null && !keyframes.isEmpty()) {
-                for (Map.Entry<String, List<Keyframe>> entry : keyframes.entrySet()) {
-                    String property = entry.getKey();
-                    List<Keyframe> kfs = entry.getValue();
-                    for (Keyframe kf : kfs) {
-                        if (kf.getTime() < 0 || kf.getTime() > (targetSegment.getTimelineEndTime() - targetSegment.getTimelineStartTime())) {
-                            throw new IllegalArgumentException("Keyframe time out of segment bounds for property " + property);
-                        }
-                        kf.setTime(roundToThreeDecimals(kf.getTime()));
-                        targetSegment.addKeyframe(property, kf);
-                    }
-                    if ("volume".equals(property)) {
-                        targetSegment.setVolume(null);
-                    }
-                }
-            }
-
-            boolean timelineChanged = false;
-            if (timelineStartTime != null) {
-                timelineStartTime = roundToThreeDecimals(timelineStartTime);
-                if (timelineStartTime < 0) {
-                    throw new RuntimeException("Timeline start time cannot be negative");
-                }
-                targetSegment.setTimelineStartTime(timelineStartTime);
-                timelineChanged = true;
-            }
-            if (timelineEndTime != null) {
-                timelineEndTime = roundToThreeDecimals(timelineEndTime);
-                targetSegment.setTimelineEndTime(timelineEndTime);
-                timelineChanged = true;
-            }
-            if (layer != null) {
-                if (layer >= 0) throw new RuntimeException("Audio layers must be negative");
-                targetSegment.setLayer(layer);
-            }
-            if (volume != null) {
-                if (volume < 0 || volume > 15) throw new RuntimeException("Volume must be between 0.0 and 15.0");
-                targetSegment.setVolume(volume);
-            }
-
-            if (startTime != null || endTime != null || timelineChanged) {
-                double newStartTime = startTime != null ? roundToThreeDecimals(startTime) : originalStartTime;
-                double newEndTime = endTime != null ? roundToThreeDecimals(endTime) : originalEndTime;
-
-                // Validate startTime and endTime
-                if (startTime != null) {
-                    if (newStartTime < 0 || newStartTime >= audioDuration) {
-                        throw new RuntimeException("Start time out of bounds: " + newStartTime);
-                    }
-                    targetSegment.setStartTime(newStartTime);
-                }
-                if (endTime != null) {
-                    if (newEndTime <= newStartTime || newEndTime > audioDuration) {
-                        throw new RuntimeException("End time out of bounds: " + newEndTime + ", audioDuration: " + audioDuration);
-                    }
-                    targetSegment.setEndTime(newEndTime);
-                }
-
-                // Adjust timeline times based on audio clip duration
-                double clipDuration = roundToThreeDecimals(targetSegment.getEndTime() - targetSegment.getStartTime());
-                if (timelineChanged) {
-                    // If timeline times are provided, validate them
-                    double providedTimelineDuration = roundToThreeDecimals(targetSegment.getTimelineEndTime() - targetSegment.getTimelineStartTime());
-                    if (Math.abs(providedTimelineDuration - clipDuration) > 0.001) {
-                        // Adjust timelineEndTime to match clip duration
-                        targetSegment.setTimelineEndTime(roundToThreeDecimals(targetSegment.getTimelineStartTime() + clipDuration));
-                    }
-                } else {
-                    // If timeline times are not provided, derive them from audio times
-                    if (startTime != null) {
-                        double startTimeShift = newStartTime - originalStartTime;
-                        targetSegment.setTimelineStartTime(roundToThreeDecimals(originalTimelineStartTime + startTimeShift));
-                    }
-                    targetSegment.setTimelineEndTime(roundToThreeDecimals(targetSegment.getTimelineStartTime() + clipDuration));
-                }
-            }
-
-            // Final validation
-            double newTimelineDuration = roundToThreeDecimals(targetSegment.getTimelineEndTime() - targetSegment.getTimelineStartTime());
-            double newClipDuration = roundToThreeDecimals(targetSegment.getEndTime() - targetSegment.getStartTime());
-            if (Math.abs(newTimelineDuration - newClipDuration) > 0.001) {
-                throw new RuntimeException("Timeline duration (" + newTimelineDuration + ") does not match clip duration (" + newClipDuration + ")");
-            }
-            if (newTimelineDuration <= 0) {
-                throw new RuntimeException("Invalid timeline duration: " + newTimelineDuration);
-            }
-
-            timelineState.getAudioSegments().remove(targetSegment);
-            boolean positionAvailable = timelineState.isTimelinePositionAvailable(
-                    targetSegment.getTimelineStartTime(),
-                    targetSegment.getTimelineEndTime(),
-                    targetSegment.getLayer());
-            timelineState.getAudioSegments().add(targetSegment);
-
-            if (!positionAvailable) {
-                targetSegment.setStartTime(originalStartTime);
-                targetSegment.setEndTime(originalEndTime);
-                targetSegment.setTimelineStartTime(originalTimelineStartTime);
-                targetSegment.setTimelineEndTime(originalTimelineEndTime);
-                targetSegment.setLayer(originalLayer);
-                throw new RuntimeException("Timeline position overlaps with an existing segment in layer " + targetSegment.getLayer());
-            }
-
-            saveTimelineState(sessionId, timelineState);
+    public void updateAudioSegment(
+            String sessionId,
+            String audioSegmentId,
+            Double startTime,
+            Double endTime,
+            Double timelineStartTime,
+            Double timelineEndTime,
+            Double volume,
+            Integer layer,
+            Map<String, List<Keyframe>> keyframes
+    ) throws IOException, InterruptedException {
+        // Validate inputs early
+        if (volume != null && (volume < 0 || volume > 15)) {
+            throw new IllegalArgumentException("Volume must be between 0.0 and 15.0");
         }
+        if (startTime != null && startTime < 0) {
+            throw new IllegalArgumentException("Start time must be non-negative");
+        }
+        if (endTime != null && endTime <= (startTime != null ? startTime : 0)) {
+            throw new IllegalArgumentException("End time must be greater than start time");
+        }
+        if (timelineStartTime != null && timelineStartTime < 0) {
+            throw new IllegalArgumentException("Timeline start time must be non-negative");
+        }
+        if (timelineEndTime != null && timelineEndTime <= (timelineStartTime != null ? timelineStartTime : 0)) {
+            throw new IllegalArgumentException("Timeline end time must be greater than start time");
+        }
+        if (layer != null && layer >= 0) {
+            throw new IllegalArgumentException("Audio layers must be negative");
+        }
+
+        // Non-transactional: Load project and validate audio duration
+        Project project = getProjectBySession(sessionId);
+        TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
+        AudioSegment audioSegment = timelineState.getAudioSegments().stream()
+                .filter(segment -> segment.getId().equals(audioSegmentId))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("Audio segment not found: " + audioSegmentId));
+
+        // Get audio duration
+        double audioDuration = getAudioDuration(audioSegment.getAudioPath());
+
+        // Validate start/end times against duration
+        if (startTime != null && startTime >= audioDuration) {
+            throw new IllegalArgumentException("Start time out of bounds: " + startTime);
+        }
+        if (endTime != null && (endTime <= (startTime != null ? startTime : audioSegment.getStartTime()) || endTime > audioDuration)) {
+            throw new IllegalArgumentException("End time out of bounds: " + endTime + ", audioDuration: " + audioDuration);
+        }
+
+        // Validate keyframes
+        if (keyframes != null && !keyframes.isEmpty()) {
+            double segmentDuration = audioSegment.getTimelineEndTime() - audioSegment.getTimelineStartTime();
+            for (Map.Entry<String, List<Keyframe>> entry : keyframes.entrySet()) {
+                String property = entry.getKey();
+                for (Keyframe kf : entry.getValue()) {
+                    if (kf.getTime() < 0 || kf.getTime() > segmentDuration) {
+                        throw new IllegalArgumentException("Keyframe time out of segment bounds for property " + property);
+                    }
+                }
+            }
+        }
+
+        // Transactional update with retries
+        int maxRetries = 3;
+        int attempt = 0;
+        while (attempt < maxRetries) {
+            try {
+                doUpdateAudioSegment(
+                        sessionId,
+                        audioSegmentId,
+                        startTime,
+                        endTime,
+                        timelineStartTime,
+                        timelineEndTime,
+                        volume,
+                        layer,
+                        keyframes
+                );
+                return;
+            } catch (OptimisticLockException e) {
+                attempt++;
+                if (attempt >= maxRetries) {
+                    logger.error("Failed to update audio segment after {} retries: sessionId={}, segmentId={}", maxRetries, sessionId, audioSegmentId, e);
+                    throw new RuntimeException("Failed to update audio segment due to concurrent modification", e);
+                }
+                logger.warn("Optimistic lock exception on attempt {}/{} for sessionId={}, segmentId={}. Retrying...", attempt, maxRetries, sessionId, audioSegmentId);
+                try {
+                    Thread.sleep(100 * attempt); // Backoff
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted during retry", ie);
+                }
+            }
+        }
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    private void doUpdateAudioSegment(
+            String sessionId,
+            String audioSegmentId,
+            Double startTime,
+            Double endTime,
+            Double timelineStartTime,
+            Double timelineEndTime,
+            Double volume,
+            Integer layer,
+            Map<String, List<Keyframe>> keyframes
+    ) throws IOException {
+        Project project = getProjectBySession(sessionId);
+        TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
+        AudioSegment audioSegment = timelineState.getAudioSegments().stream()
+                .filter(segment -> segment.getId().equals(audioSegmentId))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("Audio segment not found: " + audioSegmentId));
+
+        double originalStartTime = audioSegment.getStartTime();
+        double originalEndTime = audioSegment.getEndTime();
+        double originalTimelineStartTime = audioSegment.getTimelineStartTime();
+        double originalTimelineEndTime = audioSegment.getTimelineEndTime();
+        int originalLayer = audioSegment.getLayer();
+        boolean timelineChanged = false;
+
+        // Handle keyframes
+        if (keyframes != null && !keyframes.isEmpty()) {
+            for (Map.Entry<String, List<Keyframe>> entry : keyframes.entrySet()) {
+                String property = entry.getKey();
+                List<Keyframe> kfs = entry.getValue();
+                audioSegment.getKeyframes().remove(property);
+                if (!kfs.isEmpty()) {
+                    for (Keyframe kf : kfs) {
+                        kf.setTime(roundToThreeDecimals(kf.getTime()));
+                        audioSegment.addKeyframe(property, kf);
+                    }
+                }
+                if ("volume".equals(property)) {
+                    audioSegment.setVolume(kfs.isEmpty() ? volume : null);
+                }
+            }
+        } else {
+            audioSegment.getKeyframes().clear();
+            if (volume != null) audioSegment.setVolume(volume);
+        }
+
+        // Update non-keyframed properties
+        if (volume != null && (keyframes == null || !keyframes.containsKey("volume") || keyframes.get("volume").isEmpty())) {
+            audioSegment.setVolume(volume);
+        }
+        if (layer != null) {
+            audioSegment.setLayer(layer);
+            timelineChanged = true;
+        }
+        if (timelineStartTime != null) {
+            timelineStartTime = roundToThreeDecimals(timelineStartTime);
+            audioSegment.setTimelineStartTime(timelineStartTime);
+            timelineChanged = true;
+        }
+        if (timelineEndTime != null) {
+            timelineEndTime = roundToThreeDecimals(timelineEndTime);
+            audioSegment.setTimelineEndTime(timelineEndTime);
+            timelineChanged = true;
+        }
+        if (startTime != null) {
+            startTime = roundToThreeDecimals(startTime);
+            audioSegment.setStartTime(startTime);
+        }
+        if (endTime != null) {
+            endTime = roundToThreeDecimals(endTime);
+            audioSegment.setEndTime(endTime);
+        }
+
+        // Adjust timeline times based on audio clip duration
+        if (startTime != null || endTime != null || timelineChanged) {
+            double newStartTime = startTime != null ? startTime : audioSegment.getStartTime();
+            double newEndTime = endTime != null ? endTime : audioSegment.getEndTime();
+            double clipDuration = roundToThreeDecimals(newEndTime - newStartTime);
+
+            if (timelineChanged) {
+                double providedTimelineDuration = roundToThreeDecimals(audioSegment.getTimelineEndTime() - audioSegment.getTimelineStartTime());
+                if (Math.abs(providedTimelineDuration - clipDuration) > 0.001) {
+                    audioSegment.setTimelineEndTime(roundToThreeDecimals(audioSegment.getTimelineStartTime() + clipDuration));
+                }
+            } else {
+                if (startTime != null) {
+                    double startTimeShift = newStartTime - originalStartTime;
+                    audioSegment.setTimelineStartTime(roundToThreeDecimals(originalTimelineStartTime + startTimeShift));
+                }
+                audioSegment.setTimelineEndTime(roundToThreeDecimals(audioSegment.getTimelineStartTime() + clipDuration));
+            }
+        }
+
+        // Final validation
+        double newTimelineDuration = roundToThreeDecimals(audioSegment.getTimelineEndTime() - audioSegment.getTimelineStartTime());
+        double newClipDuration = roundToThreeDecimals(audioSegment.getEndTime() - audioSegment.getStartTime());
+        if (Math.abs(newTimelineDuration - newClipDuration) > 0.001) {
+            throw new RuntimeException("Timeline duration (" + newTimelineDuration + ") does not match clip duration (" + newClipDuration + ")");
+        }
+        if (newTimelineDuration <= 0) {
+            throw new RuntimeException("Invalid timeline duration: " + newTimelineDuration);
+        }
+
+        // Validate timeline position
+        timelineState.getAudioSegments().remove(audioSegment);
+        boolean positionAvailable = timelineState.isTimelinePositionAvailable(
+                audioSegment.getTimelineStartTime(),
+                audioSegment.getTimelineEndTime(),
+                audioSegment.getLayer());
+        timelineState.getAudioSegments().add(audioSegment);
+
+        if (!positionAvailable) {
+            audioSegment.setStartTime(originalStartTime);
+            audioSegment.setEndTime(originalEndTime);
+            audioSegment.setTimelineStartTime(originalTimelineStartTime);
+            audioSegment.setTimelineEndTime(originalTimelineEndTime);
+            audioSegment.setLayer(originalLayer);
+            throw new RuntimeException("Timeline position overlaps with an existing segment in layer " + audioSegment.getLayer());
+        }
+
+        saveTimelineState(sessionId, timelineState);
+    }
 
     public void removeAudioSegment(String sessionId, String audioSegmentId) throws JsonProcessingException {
         Project project = getProjectBySession(sessionId);
@@ -1601,10 +1875,8 @@ public class VideoEditingService {
             throw new RuntimeException("Unauthorized to modify this project");
         }
 
-        // Get existing images
         List<Map<String, String>> imageList = getImages(project);
 
-        // Add new images
         for (int i = 0; i < imageFiles.length; i++) {
             MultipartFile imageFile = imageFiles[i];
             if (imageFile.isEmpty()) {
@@ -1631,11 +1903,16 @@ public class VideoEditingService {
             Map<String, String> imageData = new HashMap<>();
             imageData.put("imagePath", r2Path);
             imageData.put("imageFileName", uniqueFileName);
-            imageData.put("cdnUrl", cloudflareR2Service.generateDownloadUrl(r2Path, 3600));
+            imageData.put("originalFileName", originalFileName);
+
+            // Generate both CDN and presigned URLs
+            Map<String, String> urls = cloudflareR2Service.generateUrls(r2Path, 3600);
+            imageData.put("cdnUrl", urls.get("cdnUrl"));
+            imageData.put("presignedUrl", urls.get("presignedUrl"));
+
             imageList.add(imageData);
         }
 
-        // Save updated image list
         project.setImagesJson(objectMapper.writeValueAsString(imageList));
         project.setLastModified(LocalDateTime.now());
         return projectRepository.save(project);
@@ -1656,22 +1933,18 @@ public class VideoEditingService {
         String imagePath;
 
         if (isElement) {
-            // Handle global element
             GlobalElement globalElement = globalElementRepository.findByFileName(imageFileName)
                     .orElseThrow(() -> new RuntimeException("Global element not found with filename: " + imageFileName));
-
-            // Parse globalElement_json to get imagePath
             Map<String, String> jsonData = objectMapper.readValue(
                     globalElement.getGlobalElementJson(),
                     new TypeReference<Map<String, String>>() {}
             );
-            String imagePathFromJson = jsonData.get("imagePath"); // e.g., elements/filename.png
+            imagePath = jsonData.get("imagePath"); // e.g., elements/filename.png
+            logger.info("Global element found: imagePath={}", imagePath);
 
-            // Construct absolute path for file access
-            imagePath = globalElementsDirectory + imageFileName; // e.g., /Users/nimitpatel/Desktop/VideoEditor 2/elements/filename.png
-            File imageFile = new File(imagePath);
-            if (!imageFile.exists()) {
-                throw new RuntimeException("Image file does not exist: " + imageFile.getAbsolutePath());
+            if (!cloudflareR2Service.fileExists(imagePath)) {
+                logger.error("Global element not found in R2: {}", imagePath);
+                throw new IOException("Global element not found in R2: " + imagePath);
             }
 
             Project project = projectRepository.findById(projectId)
@@ -1679,8 +1952,8 @@ public class VideoEditingService {
             if (!project.getUser().getId().equals(user.getId())) {
                 throw new RuntimeException("Unauthorized to modify this project");
             }
-            addElement(project, imagePathFromJson, imageFileName); // Store in element_json
-        } else {
+            addElement(project, imagePath, imageFileName);
+        }  else {
             // Handle project image
             Project project = projectRepository.findById(projectId)
                     .orElseThrow(() -> new RuntimeException("Project not found with ID: " + projectId));
@@ -1816,7 +2089,6 @@ public class VideoEditingService {
         }
     }
 
-    @Transactional(isolation = Isolation.SERIALIZABLE)
     public void updateImageSegment(
             String sessionId,
             String imageSegmentId,
@@ -1834,31 +2106,28 @@ public class VideoEditingService {
             Double cropR,
             Double cropT,
             Double cropB,
-            Double rotation, // New parameter
+            Double rotation,
             Map<String, List<Keyframe>> keyframes
     ) throws IOException {
-        logger.debug("Updating ImageSegment {}: positionX={}, positionY={}, layer={}",
-                imageSegmentId, positionX, positionY, layer);
-        Project project = getProjectBySession(sessionId);
-        TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
-
-        ImageSegment targetSegment = timelineState.getImageSegments().stream()
-                .filter(segment -> segment.getId().equals(imageSegmentId))
-                .findFirst()
-                .orElseThrow(() -> new RuntimeException("Image segment not found: " + imageSegmentId));
-
-        double originalTimelineStartTime = targetSegment.getTimelineStartTime();
-        double originalTimelineEndTime = targetSegment.getTimelineEndTime();
-        int originalLayer = targetSegment.getLayer();
-        Double originalCropL = targetSegment.getCropL();
-        Double originalCropR = targetSegment.getCropR();
-        Double originalCropT = targetSegment.getCropT();
-        Double originalCropB = targetSegment.getCropB();
-        Double originalRotation = targetSegment.getRotation(); // Store original rotation
-
-        boolean timelineOrLayerChanged = false;
-
-        // Validate crop parameters
+        // Validate inputs early
+        if (opacity != null && (opacity < 0 || opacity > 1)) {
+            throw new IllegalArgumentException("Opacity must be between 0 and 1");
+        }
+        if (scale != null && scale <= 0) {
+            throw new IllegalArgumentException("Scale must be positive");
+        }
+        if (timelineStartTime != null && timelineStartTime < 0) {
+            throw new IllegalArgumentException("Timeline start time must be non-negative");
+        }
+        if (timelineEndTime != null && timelineEndTime <= (timelineStartTime != null ? timelineStartTime : 0)) {
+            throw new IllegalArgumentException("Timeline end time must be greater than start time");
+        }
+        if (customWidth != null && customWidth <= 0) {
+            throw new IllegalArgumentException("Custom width must be positive");
+        }
+        if (customHeight != null && customHeight <= 0) {
+            throw new IllegalArgumentException("Custom height must be positive");
+        }
         if (cropL != null && (cropL < 0 || cropL > 100)) {
             throw new IllegalArgumentException("cropL must be between 0 and 100");
         }
@@ -1871,10 +2140,20 @@ public class VideoEditingService {
         if (cropB != null && (cropB < 0 || cropB > 100)) {
             throw new IllegalArgumentException("cropB must be between 0 and 100");
         }
-        double effectiveCropL = cropL != null ? cropL : targetSegment.getCropL();
-        double effectiveCropR = cropR != null ? cropR : targetSegment.getCropR();
-        double effectiveCropT = cropT != null ? cropT : targetSegment.getCropT();
-        double effectiveCropB = cropB != null ? cropB : targetSegment.getCropB();
+
+        // Non-transactional: Load project and validate
+        Project project = getProjectBySession(sessionId);
+        TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
+        ImageSegment imageSegment = timelineState.getImageSegments().stream()
+                .filter(segment -> segment.getId().equals(imageSegmentId))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("Image segment not found: " + imageSegmentId));
+
+        // Validate crop parameters
+        double effectiveCropL = cropL != null ? cropL : imageSegment.getCropL();
+        double effectiveCropR = cropR != null ? cropR : imageSegment.getCropR();
+        double effectiveCropT = cropT != null ? cropT : imageSegment.getCropT();
+        double effectiveCropB = cropB != null ? cropB : imageSegment.getCropB();
         if (effectiveCropL + effectiveCropR >= 100) {
             throw new IllegalArgumentException("Total crop percentage (left + right) must be less than 100");
         }
@@ -1882,119 +2161,212 @@ public class VideoEditingService {
             throw new IllegalArgumentException("Total crop percentage (top + bottom) must be less than 100");
         }
 
+        // Validate keyframes
+        if (keyframes != null && !keyframes.isEmpty()) {
+            double segmentDuration = imageSegment.getTimelineEndTime() - imageSegment.getTimelineStartTime();
+            for (Map.Entry<String, List<Keyframe>> entry : keyframes.entrySet()) {
+                String property = entry.getKey();
+                for (Keyframe kf : entry.getValue()) {
+                    if (kf.getTime() < 0 || kf.getTime() > segmentDuration) {
+                        throw new IllegalArgumentException("Keyframe time out of segment bounds for property " + property);
+                    }
+                }
+            }
+        }
+
+        // Validate image file (non-transactional)
+        String imagePath = imageSegment.getImagePath();
+        if (!imageSegment.isElement() && !cloudflareR2Service.fileExists(imagePath)) {
+            logger.error("Image file not found in R2: {}", imagePath);
+            throw new IOException("Image file not found in R2: " + imagePath);
+        }
+
+        // Transactional update with retries
+        int maxRetries = 3;
+        int attempt = 0;
+        while (attempt < maxRetries) {
+            try {
+                doUpdateImageSegment(
+                        sessionId,
+                        imageSegmentId,
+                        positionX,
+                        positionY,
+                        scale,
+                        opacity,
+                        layer,
+                        customWidth,
+                        customHeight,
+                        maintainAspectRatio,
+                        timelineStartTime,
+                        timelineEndTime,
+                        cropL,
+                        cropR,
+                        cropT,
+                        cropB,
+                        rotation,
+                        keyframes
+                );
+                return;
+            } catch (OptimisticLockException e) {
+                attempt++;
+                if (attempt >= maxRetries) {
+                    logger.error("Failed to update image segment after {} retries: sessionId={}, segmentId={}", maxRetries, sessionId, imageSegmentId, e);
+                    throw new RuntimeException("Failed to update image segment due to concurrent modification", e);
+                }
+                logger.warn("Optimistic lock exception on attempt {}/{} for sessionId={}, segmentId={}. Retrying...", attempt, maxRetries, sessionId, imageSegmentId);
+                try {
+                    Thread.sleep(100 * attempt); // Backoff
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted during retry", ie);
+                }
+            }
+        }
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    private void doUpdateImageSegment(
+            String sessionId,
+            String imageSegmentId,
+            Integer positionX,
+            Integer positionY,
+            Double scale,
+            Double opacity,
+            Integer layer,
+            Integer customWidth,
+            Integer customHeight,
+            Boolean maintainAspectRatio,
+            Double timelineStartTime,
+            Double timelineEndTime,
+            Double cropL,
+            Double cropR,
+            Double cropT,
+            Double cropB,
+            Double rotation,
+            Map<String, List<Keyframe>> keyframes
+    ) throws IOException {
+        Project project = getProjectBySession(sessionId);
+        TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
+        ImageSegment imageSegment = timelineState.getImageSegments().stream()
+                .filter(segment -> segment.getId().equals(imageSegmentId))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("Image segment not found: " + imageSegmentId));
+
+        double originalTimelineStartTime = imageSegment.getTimelineStartTime();
+        double originalTimelineEndTime = imageSegment.getTimelineEndTime();
+        int originalLayer = imageSegment.getLayer();
+        Double originalCropL = imageSegment.getCropL();
+        Double originalCropR = imageSegment.getCropR();
+        Double originalCropT = imageSegment.getCropT();
+        Double originalCropB = imageSegment.getCropB();
+        Double originalRotation = imageSegment.getRotation();
+        boolean timelineOrLayerChanged = false;
+
+        // Handle keyframes
         if (keyframes != null && !keyframes.isEmpty()) {
             for (Map.Entry<String, List<Keyframe>> entry : keyframes.entrySet()) {
                 String property = entry.getKey();
                 List<Keyframe> kfs = entry.getValue();
-                // Clear existing keyframes for this property
-                targetSegment.getKeyframes().remove(property);
+                imageSegment.getKeyframes().remove(property);
                 if (!kfs.isEmpty()) {
-                    // Add new keyframes if provided
                     for (Keyframe kf : kfs) {
-                        if (kf.getTime() < 0 || kf.getTime() > (targetSegment.getTimelineEndTime() - targetSegment.getTimelineStartTime())) {
-                            throw new IllegalArgumentException("Keyframe time out of segment bounds for property " + property);
-                        }
                         kf.setTime(roundToThreeDecimals(kf.getTime()));
-                        targetSegment.addKeyframe(property, kf);
+                        imageSegment.addKeyframe(property, kf);
                     }
                 }
-                // Restore static property if keyframes are empty
                 switch (property) {
                     case "positionX":
-                        if (kfs.isEmpty()) targetSegment.setPositionX(positionX);
-                        else targetSegment.setPositionX(null);
+                        if (kfs.isEmpty()) imageSegment.setPositionX(positionX);
+                        else imageSegment.setPositionX(null);
                         break;
                     case "positionY":
-                        if (kfs.isEmpty()) targetSegment.setPositionY(positionY);
-                        else targetSegment.setPositionY(null);
+                        if (kfs.isEmpty()) imageSegment.setPositionY(positionY);
+                        else imageSegment.setPositionY(null);
                         break;
                     case "scale":
-                        if (kfs.isEmpty()) targetSegment.setScale(scale);
-                        else targetSegment.setScale(null);
+                        if (kfs.isEmpty()) imageSegment.setScale(scale);
+                        else imageSegment.setScale(null);
                         break;
                     case "opacity":
-                        if (kfs.isEmpty()) targetSegment.setOpacity(opacity);
-                        else targetSegment.setOpacity(null);
+                        if (kfs.isEmpty()) imageSegment.setOpacity(opacity);
+                        else imageSegment.setOpacity(null);
                         break;
                 }
             }
         } else {
-            // If no keyframes are provided, clear all keyframes and restore static properties
-            targetSegment.getKeyframes().clear();
-            if (positionX != null) targetSegment.setPositionX(positionX);
-            if (positionY != null) targetSegment.setPositionY(positionY);
-            if (scale != null) targetSegment.setScale(scale);
-            if (opacity != null) targetSegment.setOpacity(opacity);
-            if (rotation != null) targetSegment.setRotation(rotation);
+            imageSegment.getKeyframes().clear();
+            if (positionX != null) imageSegment.setPositionX(positionX);
+            if (positionY != null) imageSegment.setPositionY(positionY);
+            if (scale != null) imageSegment.setScale(scale);
+            if (opacity != null) imageSegment.setOpacity(opacity);
+            if (rotation != null) imageSegment.setRotation(rotation);
         }
 
         // Update non-keyframed properties
         if (positionX != null && (keyframes == null || !keyframes.containsKey("positionX") || keyframes.get("positionX").isEmpty())) {
-            targetSegment.setPositionX(positionX);
+            imageSegment.setPositionX(positionX);
         }
         if (positionY != null && (keyframes == null || !keyframes.containsKey("positionY") || keyframes.get("positionY").isEmpty())) {
-            targetSegment.setPositionY(positionY);
+            imageSegment.setPositionY(positionY);
         }
         if (scale != null && (keyframes == null || !keyframes.containsKey("scale") || keyframes.get("scale").isEmpty())) {
-            targetSegment.setScale(scale);
+            imageSegment.setScale(scale);
         }
         if (opacity != null && (keyframes == null || !keyframes.containsKey("opacity") || keyframes.get("opacity").isEmpty())) {
-            targetSegment.setOpacity(opacity);
+            imageSegment.setOpacity(opacity);
         }
         if (rotation != null) {
-            targetSegment.setRotation(rotation); // Always update static rotation
+            imageSegment.setRotation(rotation);
         }
         if (layer != null) {
-            targetSegment.setLayer(layer);
+            imageSegment.setLayer(layer);
             timelineOrLayerChanged = true;
         }
-        if (customWidth != null) targetSegment.setCustomWidth(customWidth);
-        if (customHeight != null) targetSegment.setCustomHeight(customHeight);
-        if (maintainAspectRatio != null) targetSegment.setMaintainAspectRatio(maintainAspectRatio);
+        if (customWidth != null) imageSegment.setCustomWidth(customWidth);
+        if (customHeight != null) imageSegment.setCustomHeight(customHeight);
+        if (maintainAspectRatio != null) imageSegment.setMaintainAspectRatio(maintainAspectRatio);
         if (timelineStartTime != null) {
             timelineStartTime = roundToThreeDecimals(timelineStartTime);
-            targetSegment.setTimelineStartTime(timelineStartTime);
+            imageSegment.setTimelineStartTime(timelineStartTime);
             timelineOrLayerChanged = true;
         }
         if (timelineEndTime != null) {
             timelineEndTime = roundToThreeDecimals(timelineEndTime);
-            targetSegment.setTimelineEndTime(timelineEndTime);
+            imageSegment.setTimelineEndTime(timelineEndTime);
             timelineOrLayerChanged = true;
         }
-        // Update crop fields
-        if (cropL != null) targetSegment.setCropL(cropL);
-        if (cropR != null) targetSegment.setCropR(cropR);
-        if (cropT != null) targetSegment.setCropT(cropT);
-        if (cropB != null) targetSegment.setCropB(cropB);
+        if (cropL != null) imageSegment.setCropL(cropL);
+        if (cropR != null) imageSegment.setCropR(cropR);
+        if (cropT != null) imageSegment.setCropT(cropT);
+        if (cropB != null) imageSegment.setCropB(cropB);
 
         // Validate timeline position
-        timelineState.getImageSegments().remove(targetSegment);
+        timelineState.getImageSegments().remove(imageSegment);
         boolean positionAvailable = timelineState.isTimelinePositionAvailable(
-                targetSegment.getTimelineStartTime(),
-                targetSegment.getTimelineEndTime(),
-                targetSegment.getLayer());
-        timelineState.getImageSegments().add(targetSegment);
+                imageSegment.getTimelineStartTime(),
+                imageSegment.getTimelineEndTime(),
+                imageSegment.getLayer());
+        timelineState.getImageSegments().add(imageSegment);
 
         if (!positionAvailable) {
-            targetSegment.setTimelineStartTime(originalTimelineStartTime);
-            targetSegment.setTimelineEndTime(originalTimelineEndTime);
-            targetSegment.setLayer(originalLayer);
-            targetSegment.setCropL(originalCropL);
-            targetSegment.setCropR(originalCropR);
-            targetSegment.setCropT(originalCropT);
-            targetSegment.setCropB(originalCropB);
-            targetSegment.setRotation(originalRotation); // Restore original rotation
-            throw new RuntimeException("Timeline position overlaps with an existing segment in layer " + targetSegment.getLayer());
+            imageSegment.setTimelineStartTime(originalTimelineStartTime);
+            imageSegment.setTimelineEndTime(originalTimelineEndTime);
+            imageSegment.setLayer(originalLayer);
+            imageSegment.setCropL(originalCropL);
+            imageSegment.setCropR(originalCropR);
+            imageSegment.setCropT(originalCropT);
+            imageSegment.setCropB(originalCropB);
+            imageSegment.setRotation(originalRotation);
+            throw new RuntimeException("Timeline position overlaps with an existing segment in layer " + imageSegment.getLayer());
         }
 
-        // Update associated transitions if timelineStartTime or layer changed
         if (timelineOrLayerChanged) {
             updateAssociatedTransitions(
                     sessionId,
                     imageSegmentId,
-                    targetSegment.getLayer(),
-                    targetSegment.getTimelineStartTime(),
-                    targetSegment.getTimelineEndTime()
+                    imageSegment.getLayer(),
+                    imageSegment.getTimelineStartTime(),
+                    imageSegment.getTimelineEndTime()
             );
         }
 
@@ -2016,7 +2388,7 @@ public class VideoEditingService {
         saveTimelineState(sessionId, timelineState);
     }
 
-    @Transactional(isolation = Isolation.SERIALIZABLE)
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public void saveTimelineState(String sessionId, TimelineState timelineState) throws JsonProcessingException {
         logger.debug("Saving TimelineState for sessionId: {}", sessionId);
         Project project = getProjectBySession(sessionId);
@@ -2026,6 +2398,11 @@ public class VideoEditingService {
         project.setLastModified(LocalDateTime.now());
         projectRepository.save(project);
         logger.info("Saved timeline state for sessionId: {}", sessionId);
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED, propagation = Propagation.REQUIRES_NEW)
+    private void saveTimelineStateNewTransaction(String sessionId, TimelineState timelineState) throws JsonProcessingException {
+        saveTimelineState(sessionId, timelineState);
     }
 
     public TimelineState getTimelineState(String sessionId) throws JsonProcessingException {
@@ -2879,13 +3256,13 @@ public class VideoEditingService {
                                     if (cssBrightnessMultiplier == 1.0) {
                                         break;
                                     }
-                                    filterComplex.append("format=rgb24,");
+                                    filterComplex.append("format=rgba,");
                                     String lut = String.format(
                                             "lutrgb=r='val*%f':g='val*%f':b='val*%f',",
                                             cssBrightnessMultiplier, cssBrightnessMultiplier, cssBrightnessMultiplier
                                     );
                                     filterComplex.append(lut);
-                                    filterComplex.append("format=yuv420p,");
+                                    filterComplex.append("format=rgba,");
                                 }
                                 break;
                             case "contrast":
@@ -2894,14 +3271,14 @@ public class VideoEditingService {
                                     if (contrast == 1.0) {
                                         break;
                                     }
-                                    filterComplex.append("format=rgb24,");
+                                    filterComplex.append("format=rgba,");
                                     double offset = 128 * (1 - contrast);
                                     String lut = String.format(
                                             "lutrgb=r='clip(val*%f+%f,0,255)':g='clip(val*%f+%f,0,255)':b='clip(val*%f+%f,0,255)',",
                                             contrast, offset, contrast, offset, contrast, offset
                                     );
                                     filterComplex.append(lut);
-                                    filterComplex.append("format=yuv420p,");
+                                    filterComplex.append("format=rgba,");
                                 }
                                 break;
                             case "saturation":
@@ -2972,7 +3349,7 @@ public class VideoEditingService {
                     }
                 }
 
-                filterComplex.append("format=rgb24,");
+                filterComplex.append("format=rgba,");
 
                 if (hasVignette) {
                     double intensity = vignetteValue;
@@ -3184,363 +3561,373 @@ public class VideoEditingService {
                 System.out.println("Video segment filter chain for " + vs.getId() + ": " +
                         filterComplex.substring(Math.max(0, filterComplex.length() - 200)));
                 lastOutput = "ov" + outputLabel;
-            } else if (segment instanceof ImageSegment) {
-                ImageSegment is = (ImageSegment) segment;
-                String inputIdx = videoInputIndices.get(is.getId());
-                double segmentDuration = is.getTimelineEndTime() - is.getTimelineStartTime();
+            }  else if (segment instanceof ImageSegment) {
+            ImageSegment is = (ImageSegment) segment;
+            String inputIdx = videoInputIndices.get(is.getId());
+            double segmentDuration = is.getTimelineEndTime() - is.getTimelineStartTime();
 
-                filterComplex.append("[").append(inputIdx).append(":v]");
-                filterComplex.append("trim=0:").append(String.format("%.6f", segmentDuration)).append(",");
-                filterComplex.append("setpts=PTS-STARTPTS+").append(is.getTimelineStartTime()).append("/TB,");
+            filterComplex.append("[").append(inputIdx).append(":v]");
+            filterComplex.append("trim=0:").append(String.format("%.6f", segmentDuration)).append(",");
+            filterComplex.append("setpts=PTS-STARTPTS+").append(is.getTimelineStartTime()).append("/TB,");
 
-                // Store crop values
-                double cropL = is.getCropL() != null ? is.getCropL() : 0.0;
-                double cropR = is.getCropR() != null ? is.getCropR() : 0.0;
-                double cropT = is.getCropT() != null ? is.getCropT() : 0.0;
-                double cropB = is.getCropB() != null ? is.getCropB() : 0.0;
+            // Store crop values
+            double cropL = is.getCropL() != null ? is.getCropL() : 0.0;
+            double cropR = is.getCropR() != null ? is.getCropR() : 0.0;
+            double cropT = is.getCropT() != null ? is.getCropT() : 0.0;
+            double cropB = is.getCropB() != null ? is.getCropB() : 0.0;
 
-                // Validate crop percentages
-                if (cropL < 0 || cropL > 100 || cropR < 0 || cropR > 100 || cropT < 0 || cropT > 100 || cropB < 0 || cropB > 100) {
-                    throw new IllegalArgumentException("Crop percentages must be between 0 and 100 for segment " + is.getId());
+            // Validate crop percentages
+            if (cropL < 0 || cropL > 100 || cropR < 0 || cropR > 100 || cropT < 0 || cropT > 100 || cropB < 0 || cropB > 100) {
+                throw new IllegalArgumentException("Crop percentages must be between 0 and 100 for segment " + is.getId());
+            }
+            if (cropL + cropR >= 100 || cropT + cropB >= 100) {
+                throw new IllegalArgumentException("Total crop percentages (left+right or top+bottom) must be less than 100 for segment " + is.getId());
+            }
+
+            // Apply filters (excluding rotate and flip, which are handled separately)
+            List<Filter> segmentFilters = timelineState.getFilters().stream()
+                    .filter(f -> f.getSegmentId().equals(is.getId()))
+                    .collect(Collectors.toList());
+            boolean hasVignette = false;
+            double vignetteValue = 0.0;
+
+            for (Filter filter : segmentFilters) {
+                if (filter == null || filter.getFilterName() == null || filter.getFilterName().trim().isEmpty()) {
+                    System.err.println("Skipping invalid filter for segment " + is.getId() + ": null or empty filter name");
+                    continue;
                 }
-                if (cropL + cropR >= 100 || cropT + cropB >= 100) {
-                    throw new IllegalArgumentException("Total crop percentages (left+right or top+bottom) must be less than 100 for segment " + is.getId());
+                String filterName = filter.getFilterName().toLowerCase().trim();
+                String filterValue = filter.getFilterValue() != null ? String.valueOf(filter.getFilterValue()) : "";
+                if (filterValue.isEmpty() && !Arrays.asList("grayscale", "sepia", "invert").contains(filterName)) {
+                    System.err.println("Skipping filter " + filterName + " for segment " + is.getId() + ": empty filter value");
+                    continue;
                 }
-
-                // Apply filters (excluding rotate)
-                List<Filter> segmentFilters = timelineState.getFilters().stream()
-                        .filter(f -> f.getSegmentId().equals(is.getId()))
-                        .collect(Collectors.toList());
-                boolean hasVignette = false;
-                double vignetteValue = 0.0;
-
-                for (Filter filter : segmentFilters) {
-                    if (filter == null || filter.getFilterName() == null || filter.getFilterName().trim().isEmpty()) {
-                        System.err.println("Skipping invalid filter for segment " + is.getId() + ": null or empty filter name");
-                        continue;
+                try {
+                    switch (filterName) {
+                        case "brightness":
+                            double brightness = Double.parseDouble(filterValue);
+                            if (brightness >= -1 && brightness <= 1) {
+                                double cssBrightnessMultiplier = 1 + brightness;
+                                if (cssBrightnessMultiplier <= 0) {
+                                    filterComplex.append("lutrgb=r=0:g=0:b=0,");
+                                    break;
+                                }
+                                if (cssBrightnessMultiplier == 1.0) {
+                                    break;
+                                }
+                                filterComplex.append("format=rgba,");
+                                String lut = String.format(
+                                        "lutrgb=r='val*%f':g='val*%f':b='val*%f':a='val',",
+                                        cssBrightnessMultiplier, cssBrightnessMultiplier, cssBrightnessMultiplier
+                                );
+                                filterComplex.append(lut);
+                                filterComplex.append("format=rgba,");
+                            }
+                            break;
+                        case "contrast":
+                            double contrast = Double.parseDouble(filterValue);
+                            if (contrast >= 0 && contrast <= 2) {
+                                if (contrast == 1.0) {
+                                    break;
+                                }
+                                filterComplex.append("format=rgba,");
+                                double offset = 128 * (1 - contrast);
+                                String lut = String.format(
+                                        "lutrgb=r='clip(val*%f+%f,0,255)':g='clip(val*%f+%f,0,255)':b='clip(val*%f+%f,0,255)':a='val',",
+                                        contrast, offset, contrast, offset, contrast, offset
+                                );
+                                filterComplex.append(lut);
+                                filterComplex.append("format=rgba,");
+                            }
+                            break;
+                        case "saturation":
+                            double saturation = Double.parseDouble(filterValue);
+                            if (saturation >= 0 && saturation <= 2) {
+                                if (Math.abs(saturation - 1.0) < 0.01) {
+                                    System.out.println("Skipping saturation filter for segment " + is.getId() + ": value ≈ 1 (" + saturation + ")");
+                                    break;
+                                }
+                                System.out.println("Applying saturation filter for segment " + is.getId() + ": frontend=" + saturation);
+                                filterComplex.append("eq=saturation=").append(String.format("%.2f", saturation)).append(",");
+                            }
+                            break;
+                        case "hue":
+                            double hue = Double.parseDouble(filterValue);
+                            if (hue >= -180 && hue <= 180) {
+                                if (hue == 0.0) {
+                                    break;
+                                }
+                                filterComplex.append("hue=h=").append(String.format("%.1f", hue)).append(",");
+                            }
+                            break;
+                        case "grayscale":
+                            if (!filterValue.isEmpty() && Double.parseDouble(filterValue) > 0) {
+                                filterComplex.append("hue=s=0,");
+                            }
+                            break;
+                        case "invert":
+                            if (!filterValue.isEmpty() && Double.parseDouble(filterValue) > 0) {
+                                filterComplex.append("negate,");
+                            }
+                            break;
+                        case "vignette":
+                            double vignette = Double.parseDouble(filterValue);
+                            if (vignette >= 0 && vignette <= 1 && vignette > 0.01) {
+                                hasVignette = true;
+                                vignetteValue = vignette;
+                            }
+                            break;
+                        case "blur":
+                            double blurValue = Double.parseDouble(filterValue);
+                            if (blurValue >= 0 && blurValue <= 1) {
+                                if (blurValue > 0) {
+                                    double radius = blurValue * 10.0;
+                                    filterComplex.append("boxblur=").append(String.format("%.2f", radius)).append(",");
+                                    System.out.println("Blur filter applied to image segment " + is.getId() + ": blurValue=" + blurValue + ", radius=" + radius);
+                                }
+                            } else {
+                                System.err.println("Invalid blur value for segment " + is.getId() + ": " + blurValue + ", must be between 0 and 1");
+                            }
+                            break;
+                        case "rotate":
+                        case "flip":
+                            // Handled separately below to match frontend transform order
+                            break;
+                        default:
+                            System.err.println("Unsupported filter: " + filterName + " for segment " + is.getId());
+                            break;
                     }
-                    String filterName = filter.getFilterName().toLowerCase().trim();
-                    String filterValue = filter.getFilterValue() != null ? String.valueOf(filter.getFilterValue()) : "";
-                    if (filterValue.isEmpty() && !Arrays.asList("grayscale", "sepia", "invert").contains(filterName)) {
-                        System.err.println("Skipping filter " + filterName + " for segment " + is.getId() + ": empty filter value");
-                        continue;
-                    }
-                    try {
-                        switch (filterName) {
-                            case "brightness":
-                                double brightness = Double.parseDouble(filterValue);
-                                if (brightness >= -1 && brightness <= 1) {
-                                    double cssBrightnessMultiplier = 1 + brightness;
-                                    if (cssBrightnessMultiplier <= 0) {
-                                        filterComplex.append("lutrgb=r=0:g=0:b=0,");
-                                        break;
-                                    }
-                                    if (cssBrightnessMultiplier == 1.0) {
-                                        break;
-                                    }
-                                    filterComplex.append("format=rgb24,");
-                                    String lut = String.format(
-                                            "lutrgb=r='val*%f':g='val*%f':b='val*%f',",
-                                            cssBrightnessMultiplier, cssBrightnessMultiplier, cssBrightnessMultiplier
-                                    );
-                                    filterComplex.append(lut);
-                                    filterComplex.append("format=yuv420p,");
-                                }
-                                break;
-                            case "contrast":
-                                double contrast = Double.parseDouble(filterValue);
-                                if (contrast >= 0 && contrast <= 2) {
-                                    if (contrast == 1.0) {
-                                        break;
-                                    }
-                                    filterComplex.append("format=rgb24,");
-                                    double offset = 128 * (1 - contrast);
-                                    String lut = String.format(
-                                            "lutrgb=r='clip(val*%f+%f,0,255)':g='clip(val*%f+%f,0,255)':b='clip(val*%f+%f,0,255)',",
-                                            contrast, offset, contrast, offset, contrast, offset
-                                    );
-                                    filterComplex.append(lut);
-                                    filterComplex.append("format=yuv420p,");
-                                }
-                                break;
-                            case "saturation":
-                                double saturation = Double.parseDouble(filterValue);
-                                if (saturation >= 0 && saturation <= 2) {
-                                    if (Math.abs(saturation - 1.0) < 0.01) {
-                                        System.out.println("Skipping saturation filter for segment " + is.getId() + ": value ≈ 1 (" + saturation + ")");
-                                        break;
-                                    }
-                                    System.out.println("Applying saturation filter for segment " + is.getId() + ": frontend=" + saturation);
-                                    filterComplex.append("eq=saturation=").append(String.format("%.2f", saturation)).append(",");
-                                }
-                                break;
-                            case "hue":
-                                double hue = Double.parseDouble(filterValue);
-                                if (hue >= -180 && hue <= 180) {
-                                    if (hue == 0.0) {
-                                        break;
-                                    }
-                                    filterComplex.append("hue=h=").append(String.format("%.1f", hue)).append(",");
-                                }
-                                break;
-                            case "grayscale":
-                                if (!filterValue.isEmpty() && Double.parseDouble(filterValue) > 0) {
-                                    filterComplex.append("hue=s=0,");
-                                }
-                                break;
-                            case "invert":
-                                if (!filterValue.isEmpty() && Double.parseDouble(filterValue) > 0) {
-                                    filterComplex.append("negate,");
-                                }
-                                break;
-                            case "flip":
-                                if (filterValue.equals("horizontal")) {
-                                    filterComplex.append("hflip,");
-                                } else if (filterValue.equals("vertical")) {
-                                    filterComplex.append("vflip,");
-                                } else if (filterValue.equals("both")) {
-                                    filterComplex.append("hflip,vflip,");
-                                }
-                                break;
-                            case "vignette":
-                                double vignette = Double.parseDouble(filterValue);
-                                if (vignette >= 0 && vignette <= 1 && vignette > 0.01) {
-                                    hasVignette = true;
-                                    vignetteValue = vignette;
-                                }
-                                break;
-                            case "blur":
-                                double blurValue = Double.parseDouble(filterValue);
-                                if (blurValue >= 0 && blurValue <= 1) {
-                                    if (blurValue > 0) {
-                                        // Map 0-1 range to luma_radius 0-10 for boxblur
-                                        double radius = blurValue * 10.0;
-                                        filterComplex.append("boxblur=").append(String.format("%.2f", radius)).append(",");
-                                        System.out.println("Blur filter applied to image segment " + is.getId() + ": blurValue=" + blurValue + ", radius=" + radius);
-                                    }
-                                } else {
-                                    System.err.println("Invalid blur value for segment " + is.getId() + ": " + blurValue + ", must be between 0 and 1");
-                                }
-                                break;
-                            default:
-                                System.err.println("Unsupported filter: " + filterName + " for segment " + is.getId());
-                                break;
-                        }
-                    } catch (NumberFormatException e) {
-                        System.err.println("Invalid filter value for " + filterName + " in segment " + is.getId() + ": " + filterValue);
-                    }
+                } catch (NumberFormatException e) {
+                    System.err.println("Invalid filter value for " + filterName + " in segment " + is.getId() + ": " + filterValue);
                 }
+            }
 
-                filterComplex.append("format=rgb24,");
+            if (hasVignette) {
+                double intensity = vignetteValue;
+                double angle = intensity * (Math.PI / 2);
+                filterComplex.append("vignette=angle=").append(String.format("%.6f", angle))
+                        .append(":mode=forward,");
+                System.out.println("Vignette filter applied to image segment " + is.getId() +
+                        ": intensity=" + intensity + ", angle=" + angle);
+            }
 
-                if (hasVignette) {
-                    double intensity = vignetteValue;
-                    double angle = intensity * (Math.PI / 2);
-                    filterComplex.append("vignette=angle=").append(String.format("%.6f", angle))
-                            .append(":mode=forward,");
-                    System.out.println("Vignette filter applied to image segment " + is.getId() +
-                            ": intensity=" + intensity + ", angle=" + angle);
+            filterComplex.append("format=rgba,");
+
+            // Apply flip filter to match frontend transform
+            Filter flipFilter = segmentFilters.stream()
+                    .filter(f -> "flip".equalsIgnoreCase(f.getFilterName()))
+                    .findFirst()
+                    .orElse(null);
+            if (flipFilter != null) {
+                String flipValue = flipFilter.getFilterValue();
+                if (flipValue.equals("horizontal")) {
+                    filterComplex.append("hflip,");
+                } else if (flipValue.equals("vertical")) {
+                    filterComplex.append("vflip,");
+                } else if (flipValue.equals("both")) {
+                    filterComplex.append("hflip,vflip,");
                 }
+            }
+
+            // Apply rotation with keyframes (copied from VideoSegment)
+            StringBuilder rotationExpr = new StringBuilder();
+            Double defaultRotation = is.getRotation() != null ? is.getRotation() : 0.0;
+
+            // No keyframes, just use the default rotation
+            rotationExpr.append(String.format("%.6f", Math.toRadians(defaultRotation)));
+
+            // Apply rotation if non-zero
+            if (!rotationExpr.toString().equals("0.000000")) {
+                // Use FFmpeg-supported expressions for rotate filter
+                filterComplex.append("rotate=a=").append(rotationExpr)
+                        .append(":ow='hypot(iw,ih)'")
+                        .append(":oh='hypot(iw,ih)'")
+                        .append(":c=0x00000000,");
+                System.out.println("Rotation applied to segment " + is.getId() + ": expr=" + rotationExpr);
+            }
+
+            filterComplex.append("format=rgba,");
+
+            // Apply opacity
+            double opacity = is.getOpacity() != null ? is.getOpacity() : 1.0;
+            if (opacity < 1.0) {
+                filterComplex.append("lutrgb=a='val*").append(String.format("%.6f", opacity)).append("',");
+                filterComplex.append("format=rgba,");
+                System.out.println("Opacity applied to image segment " + is.getId() + ": " + opacity);
+            }
+
+            // Apply crop and pad (copied from VideoSegment)
+            if (cropL > 0 || cropR > 0 || cropT > 0 || cropB > 0) {
+                String cropWidth = String.format("iw*(1-%.6f-%.6f)", cropL / 100.0, cropR / 100.0);
+                String cropHeight = String.format("ih*(1-%.6f-%.6f)", cropT / 100.0, cropB / 100.0);
+                String cropX = String.format("iw*%.6f", cropL / 100.0);
+                String cropY = String.format("ih*%.6f", cropT / 100.0);
+
+                filterComplex.append("crop=").append(cropWidth).append(":")
+                        .append(cropHeight).append(":")
+                        .append(cropX).append(":")
+                        .append(cropY).append(",");
+                System.out.println("Crop filter for image segment " + is.getId() + ": w=" + cropWidth +
+                        ", h=" + cropHeight + ", x=" + cropX + ", y=" + cropY);
 
                 filterComplex.append("format=rgba,");
+                filterComplex.append("pad=iw/(1-").append(String.format("%.6f", (cropL + cropR) / 100.0)).append("):")
+                        .append("ih/(1-").append(String.format("%.6f", (cropT + cropB) / 100.0)).append("):")
+                        .append("iw*").append(String.format("%.6f", cropL / (100.0 - cropL - cropR))).append(":")
+                        .append("ih*").append(String.format("%.6f", cropT / (100.0 - cropT - cropB))).append(":")
+                        .append("color=0x00000000,");
+                System.out.println("Pad filter to restore original dimensions for segment " + is.getId());
+            }
 
-                // Apply transitions
-                List<Transition> relevantTransitions = timelineState.getTransitions().stream()
-                        .filter(t -> t.getSegmentId() != null && t.getSegmentId().equals(is.getId()))
-                        .filter(t -> t.getLayer() == is.getLayer())
-                        .collect(Collectors.toList());
+            // Apply transitions
+            List<Transition> relevantTransitions = timelineState.getTransitions().stream()
+                    .filter(t -> t.getSegmentId() != null && t.getSegmentId().equals(is.getId()))
+                    .filter(t -> t.getLayer() == is.getLayer())
+                    .collect(Collectors.toList());
 
-                Map<String, String> transitionOffsets = applyTransitionFilters(filterComplex, relevantTransitions, is.getTimelineStartTime(), is.getTimelineEndTime(), canvasWidth, canvasHeight);
+            Map<String, String> transitionOffsets = applyTransitionFilters(filterComplex, relevantTransitions, is.getTimelineStartTime(), is.getTimelineEndTime(), canvasWidth, canvasHeight);
 
-                // Apply crop filter for wipe transition
-                boolean hasCrop = !transitionOffsets.get("cropWidth").equals("iw") || !transitionOffsets.get("cropHeight").equals("ih") ||
-                        !transitionOffsets.get("cropX").equals("0") || !transitionOffsets.get("cropY").equals("0");
-                if (hasCrop) {
-                    double transStart = is.getTimelineStartTime();
-                    double transEnd = Math.min(is.getTimelineStartTime() + 1.0, is.getTimelineEndTime());
-                    filterComplex.append("crop=")
-                            .append("w='if(between(t,").append(String.format("%.6f", transStart)).append(",")
-                            .append(String.format("%.6f", transEnd)).append("),").append(transitionOffsets.get("cropWidth")).append(",iw)':")
-                            .append("h='if(between(t,").append(String.format("%.6f", transStart)).append(",")
-                            .append(String.format("%.6f", transEnd)).append("),").append(transitionOffsets.get("cropHeight")).append(",ih)':")
-                            .append("x='if(between(t,").append(String.format("%.6f", transStart)).append(",")
-                            .append(String.format("%.6f", transEnd)).append("),").append(transitionOffsets.get("cropX")).append(",0)':")
-                            .append("y='if(between(t,").append(String.format("%.6f", transStart)).append(",")
-                            .append(String.format("%.6f", transEnd)).append("),").append(transitionOffsets.get("cropY")).append(",0)'")
-                            .append(",");
-                    System.out.println("Crop filter for segment " + is.getId() + ": w=" + transitionOffsets.get("cropWidth") +
-                            ", h=" + transitionOffsets.get("cropHeight") + ", x=" + transitionOffsets.get("cropX") + ", y=" + transitionOffsets.get("cropY") +
-                            ", enabled between t=" + transStart + " and t=" + transEnd);
-                }
+            // Apply transition crop (e.g., for wipe transitions)
+            boolean hasTransitionCrop = !transitionOffsets.get("cropWidth").equals("iw") || !transitionOffsets.get("cropHeight").equals("ih") ||
+                    !transitionOffsets.get("cropX").equals("0") || !transitionOffsets.get("cropY").equals("0");
+            if (hasTransitionCrop) {
+                double transStart = is.getTimelineStartTime();
+                double transEnd = Math.min(is.getTimelineStartTime() + 1.0, is.getTimelineEndTime());
+                filterComplex.append("crop=")
+                        .append("w='if(between(t,").append(String.format("%.6f", transStart)).append(",")
+                        .append(String.format("%.6f", transEnd)).append("),").append(transitionOffsets.get("cropWidth")).append(",iw)':")
+                        .append("h='if(between(t,").append(String.format("%.6f", transStart)).append(",")
+                        .append(String.format("%.6f", transEnd)).append("),").append(transitionOffsets.get("cropHeight")).append(",ih)':")
+                        .append("x='if(between(t,").append(String.format("%.6f", transStart)).append(",")
+                        .append(String.format("%.6f", transEnd)).append("),").append(transitionOffsets.get("cropX")).append(",0)':")
+                        .append("y='if(between(t,").append(String.format("%.6f", transStart)).append(",")
+                        .append(String.format("%.6f", transEnd)).append("),").append(transitionOffsets.get("cropY")).append(",0)'")
+                        .append(",");
+                System.out.println("Transition crop for segment " + is.getId() + ": w=" + transitionOffsets.get("cropWidth") +
+                        ", h=" + transitionOffsets.get("cropHeight") + ", x=" + transitionOffsets.get("cropX") + ", y=" + transitionOffsets.get("cropY") +
+                        ", enabled between t=" + transStart + " and t=" + transEnd);
+            }
 
-                // Apply rotation with keyframes
-                StringBuilder rotationExpr = new StringBuilder();
-                Double defaultRotation = is.getRotation() != null ? is.getRotation() : 0.0;
+            // Handle scaling with keyframes
+            StringBuilder scaleExpr = new StringBuilder();
+            List<Keyframe> scaleKeyframes = is.getKeyframes().getOrDefault("scale", new ArrayList<>());
+            double defaultScale = is.getScale() != null ? is.getScale() : 1.0;
 
-                rotationExpr.append(String.format("%.6f", Math.toRadians(defaultRotation)));
+            if (!scaleKeyframes.isEmpty()) {
+                Collections.sort(scaleKeyframes, Comparator.comparingDouble(Keyframe::getTime));
+                double firstKfValue = ((Number) scaleKeyframes.get(0).getValue()).doubleValue();
+                scaleExpr.append(String.format("%.6f", firstKfValue));
+                for (int j = 1; j < scaleKeyframes.size(); j++) {
+                    Keyframe prevKf = scaleKeyframes.get(j - 1);
+                    Keyframe kf = scaleKeyframes.get(j);
+                    double prevTime = prevKf.getTime();
+                    double kfTime = kf.getTime();
+                    double prevValue = ((Number) prevKf.getValue()).doubleValue();
+                    double kfValue = ((Number) kf.getValue()).doubleValue();
 
-                // Apply rotation if non-zero
-                if (!rotationExpr.toString().equals("0.000000")) {
-                    filterComplex.append("rotate=").append(rotationExpr)
-                            .append(":ow='hypot(iw,ih)'")
-                            .append(":oh='hypot(iw,ih)'")
-                            .append(":c=0x00000000,");
-                    System.out.println("Rotation applied to segment " + is.getId() + ": expr=" + rotationExpr);
-                }
-
-                filterComplex.append("format=rgba,");
-
-                // Apply opacity
-                double opacity = is.getOpacity() != null ? is.getOpacity() : 1.0;
-                if (opacity < 1.0) {
-                    filterComplex.append("lutrgb=a='val*").append(String.format("%.6f", opacity)).append("',");
-                    filterComplex.append("format=rgba,");
-                    System.out.println("Opacity applied to image segment " + is.getId() + ": " + opacity);
-                }
-
-                // Apply crop and pad
-                if (cropL > 0 || cropR > 0 || cropT > 0 || cropB > 0) {
-                    String cropWidth = String.format("iw*(1-%.6f-%.6f)", cropL / 100.0, cropR / 100.0);
-                    String cropHeight = String.format("ih*(1-%.6f-%.6f)", cropT / 100.0, cropB / 100.0);
-                    String cropX = String.format("iw*%.6f", cropL / 100.0);
-                    String cropY = String.format("ih*%.6f", cropT / 100.0);
-
-                    filterComplex.append("crop=").append(cropWidth).append(":")
-                            .append(cropHeight).append(":")
-                            .append(cropX).append(":")
-                            .append(cropY).append(",");
-                    System.out.println("Crop filter for image segment " + is.getId() + ": w=" + cropWidth +
-                            ", h=" + cropHeight + ", x=" + cropX + ", y=" + cropY);
-
-                    filterComplex.append("format=rgba,");
-                    filterComplex.append("pad=iw/(1-").append(String.format("%.6f", (cropL + cropR) / 100.0)).append("):")
-                            .append("ih/(1-").append(String.format("%.6f", (cropT + cropB) / 100.0)).append("):")
-                            .append("iw*").append(String.format("%.6f", cropL / (100.0 - cropL - cropR))).append(":")
-                            .append("ih*").append(String.format("%.6f", cropT / (100.0 - cropT - cropB))).append(":")
-                            .append("color=0x00000000,");
-                    System.out.println("Pad filter to restore original dimensions for segment " + is.getId());
-                }
-
-                // Handle scaling with keyframes
-                StringBuilder scaleExpr = new StringBuilder();
-                List<Keyframe> scaleKeyframes = is.getKeyframes().getOrDefault("scale", new ArrayList<>());
-                double defaultScale = is.getScale() != null ? is.getScale() : 1.0;
-
-                if (!scaleKeyframes.isEmpty()) {
-                    Collections.sort(scaleKeyframes, Comparator.comparingDouble(Keyframe::getTime));
-                    double firstKfValue = ((Number) scaleKeyframes.get(0).getValue()).doubleValue();
-                    scaleExpr.append(String.format("%.6f", firstKfValue));
-                    for (int j = 1; j < scaleKeyframes.size(); j++) {
-                        Keyframe prevKf = scaleKeyframes.get(j - 1);
-                        Keyframe kf = scaleKeyframes.get(j);
-                        double prevTime = prevKf.getTime();
-                        double kfTime = kf.getTime();
-                        double prevValue = ((Number) prevKf.getValue()).doubleValue();
-                        double kfValue = ((Number) kf.getValue()).doubleValue();
-
-                        if (kfTime > prevTime) {
-                            double timelinePrevTime = is.getTimelineStartTime() + prevTime;
-                            double timelineKfTime = is.getTimelineStartTime() + kfTime;
-                            scaleExpr.insert(0, "lerp(").append(",").append(String.format("%.6f", kfValue))
-                                    .append(",min(1,max(0,(t-").append(String.format("%.6f", timelinePrevTime)).append(")/(")
-                                    .append(String.format("%.6f", timelineKfTime)).append("-").append(String.format("%.6f", timelinePrevTime)).append("))))");
-                        }
+                    if (kfTime > prevTime) {
+                        double timelinePrevTime = is.getTimelineStartTime() + prevTime;
+                        double timelineKfTime = is.getTimelineStartTime() + kfTime;
+                        scaleExpr.insert(0, "lerp(").append(",").append(String.format("%.6f", kfValue))
+                                .append(",min(1,max(0,(t-").append(String.format("%.6f", timelinePrevTime)).append(")/(")
+                                .append(String.format("%.6f", timelineKfTime)).append("-").append(String.format("%.6f", timelinePrevTime)).append("))))");
                     }
-                } else {
-                    scaleExpr.append(String.format("%.6f", defaultScale));
                 }
+            } else {
+                scaleExpr.append(String.format("%.6f", defaultScale));
+            }
 
-                // Apply transition scale multiplier
-                String transitionScale = transitionOffsets.get("scale");
-                if (!transitionScale.equals("1")) {
-                    scaleExpr.insert(0, "(").append(")*(").append(transitionScale).append(")");
-                }
+            // Apply transition scale multiplier
+            String transitionScale = transitionOffsets.get("scale");
+            if (!transitionScale.equals("1")) {
+                scaleExpr.insert(0, "(").append(")*(").append(transitionScale).append(")");
+            }
 
-                filterComplex.append("scale=w='iw*").append(scaleExpr).append("':h='ih*").append(scaleExpr).append("':eval=frame[scaled").append(outputLabel).append("];");
+            filterComplex.append("scale=w='iw*").append(scaleExpr).append("':h='ih*").append(scaleExpr).append("':eval=frame[scaled").append(outputLabel).append("];");
 
-                // Handle position X with keyframes
-                StringBuilder xExpr = new StringBuilder();
-                List<Keyframe> posXKeyframes = is.getKeyframes().getOrDefault("positionX", new ArrayList<>());
-                Integer defaultPosX = is.getPositionX();
-                double baseX = defaultPosX != null ? defaultPosX : 0;
+            // Handle position X with keyframes
+            StringBuilder xExpr = new StringBuilder();
+            List<Keyframe> posXKeyframes = is.getKeyframes().getOrDefault("positionX", new ArrayList<>());
+            Integer defaultPosX = is.getPositionX();
+            double baseX = defaultPosX != null ? defaultPosX : 0;
 
-                if (!posXKeyframes.isEmpty()) {
-                    Collections.sort(posXKeyframes, Comparator.comparingDouble(Keyframe::getTime));
-                    double firstKfValue = ((Number) posXKeyframes.get(0).getValue()).doubleValue();
-                    xExpr.append(String.format("%.6f", firstKfValue));
-                    for (int j = 1; j < posXKeyframes.size(); j++) {
-                        Keyframe prevKf = posXKeyframes.get(j - 1);
-                        Keyframe kf = posXKeyframes.get(j);
-                        double prevTime = prevKf.getTime();
-                        double kfTime = kf.getTime();
-                        double prevValue = ((Number) prevKf.getValue()).doubleValue();
-                        double kfValue = ((Number) kf.getValue()).doubleValue();
+            if (!posXKeyframes.isEmpty()) {
+                Collections.sort(posXKeyframes, Comparator.comparingDouble(Keyframe::getTime));
+                double firstKfValue = ((Number) posXKeyframes.get(0).getValue()).doubleValue();
+                xExpr.append(String.format("%.6f", firstKfValue));
+                for (int j = 1; j < posXKeyframes.size(); j++) {
+                    Keyframe prevKf = posXKeyframes.get(j - 1);
+                    Keyframe kf = posXKeyframes.get(j);
+                    double prevTime = prevKf.getTime();
+                    double kfTime = kf.getTime();
+                    double prevValue = ((Number) prevKf.getValue()).doubleValue();
+                    double kfValue = ((Number) kf.getValue()).doubleValue();
 
-                        if (kfTime > prevTime) {
-                            double timelinePrevTime = is.getTimelineStartTime() + prevTime;
-                            double timelineKfTime = is.getTimelineStartTime() + kfTime;
-                            xExpr.insert(0, "lerp(").append(",").append(String.format("%.6f", kfValue))
-                                    .append(",min(1,max(0,(t-").append(String.format("%.6f", timelinePrevTime)).append(")/(")
-                                    .append(String.format("%.6f", timelineKfTime)).append("-").append(String.format("%.6f", timelinePrevTime)).append("))))");
-                        }
+                    if (kfTime > prevTime) {
+                        double timelinePrevTime = is.getTimelineStartTime() + prevTime;
+                        double timelineKfTime = is.getTimelineStartTime() + kfTime;
+                        xExpr.insert(0, "lerp(").append(",").append(String.format("%.6f", kfValue))
+                                .append(",min(1,max(0,(t-").append(String.format("%.6f", timelinePrevTime)).append(")/(")
+                                .append(String.format("%.6f", timelineKfTime)).append("-").append(String.format("%.6f", timelinePrevTime)).append("))))");
                     }
-                } else {
-                    xExpr.append(String.format("%.6f", baseX));
                 }
+            } else {
+                xExpr.append(String.format("%.6f", baseX));
+            }
 
-                // Add transition offset for x
-                String xTransitionOffset = transitionOffsets.get("x");
-                if (!xTransitionOffset.equals("0")) {
-                    xExpr.append("+").append(xTransitionOffset);
-                }
-                xExpr.insert(0, "(W/2)+(").append(")-(w/2)");
+            // Add transition offset for x
+            String xTransitionOffset = transitionOffsets.get("x");
+            if (!xTransitionOffset.equals("0")) {
+                xExpr.append("+").append(xTransitionOffset);
+            }
+            xExpr.insert(0, "(W/2)+(").append(")-(w/2)");
 
-                // Handle position Y with keyframes
-                StringBuilder yExpr = new StringBuilder();
-                List<Keyframe> posYKeyframes = is.getKeyframes().getOrDefault("positionY", new ArrayList<>());
-                Integer defaultPosY = is.getPositionY();
-                double baseY = defaultPosY != null ? defaultPosY : 0;
+            // Handle position Y with keyframes
+            StringBuilder yExpr = new StringBuilder();
+            List<Keyframe> posYKeyframes = is.getKeyframes().getOrDefault("positionY", new ArrayList<>());
+            Integer defaultPosY = is.getPositionY();
+            double baseY = defaultPosY != null ? defaultPosY : 0;
 
-                if (!posYKeyframes.isEmpty()) {
-                    Collections.sort(posYKeyframes, Comparator.comparingDouble(Keyframe::getTime));
-                    double firstKfValue = ((Number) posYKeyframes.get(0).getValue()).doubleValue();
-                    yExpr.append(String.format("%.6f", firstKfValue));
-                    for (int j = 1; j < posYKeyframes.size(); j++) {
-                        Keyframe prevKf = posYKeyframes.get(j - 1);
-                        Keyframe kf = posYKeyframes.get(j);
-                        double prevTime = prevKf.getTime();
-                        double kfTime = kf.getTime();
-                        double prevValue = ((Number) prevKf.getValue()).doubleValue();
-                        double kfValue = ((Number) kf.getValue()).doubleValue();
+            if (!posYKeyframes.isEmpty()) {
+                Collections.sort(posYKeyframes, Comparator.comparingDouble(Keyframe::getTime));
+                double firstKfValue = ((Number) posYKeyframes.get(0).getValue()).doubleValue();
+                yExpr.append(String.format("%.6f", firstKfValue));
+                for (int j = 1; j < posYKeyframes.size(); j++) {
+                    Keyframe prevKf = posYKeyframes.get(j - 1);
+                    Keyframe kf = posYKeyframes.get(j);
+                    double prevTime = prevKf.getTime();
+                    double kfTime = kf.getTime();
+                    double prevValue = ((Number) prevKf.getValue()).doubleValue();
+                    double kfValue = ((Number) kf.getValue()).doubleValue();
 
-                        if (kfTime > prevTime) {
-                            double timelinePrevTime = is.getTimelineStartTime() + prevTime;
-                            double timelineKfTime = is.getTimelineStartTime() + kfTime;
-                            yExpr.insert(0, "lerp(").append(",").append(String.format("%.6f", kfValue))
-                                    .append(",min(1,max(0,(t-").append(String.format("%.6f", timelinePrevTime)).append(")/(")
-                                    .append(String.format("%.6f", timelineKfTime)).append("-").append(String.format("%.6f", timelinePrevTime)).append("))))");
-                        }
+                    if (kfTime > prevTime) {
+                        double timelinePrevTime = is.getTimelineStartTime() + prevTime;
+                        double timelineKfTime = is.getTimelineStartTime() + kfTime;
+                        yExpr.insert(0, "lerp(").append(",").append(String.format("%.6f", kfValue))
+                                .append(",min(1,max(0,(t-").append(String.format("%.6f", timelinePrevTime)).append(")/(")
+                                .append(String.format("%.6f", timelineKfTime)).append("-").append(String.format("%.6f", timelinePrevTime)).append("))))");
                     }
-                } else {
-                    yExpr.append(String.format("%.6f", baseY));
                 }
+            } else {
+                yExpr.append(String.format("%.6f", baseY));
+            }
 
-                // Add transition offset for y
-                String yTransitionOffset = transitionOffsets.get("y");
-                if (!yTransitionOffset.equals("0")) {
-                    yExpr.append("+").append(yTransitionOffset);
-                }
-                yExpr.insert(0, "(H/2)+(").append(")-(h/2)");
+            // Add transition offset for y
+            String yTransitionOffset = transitionOffsets.get("y");
+            if (!yTransitionOffset.equals("0")) {
+                yExpr.append("+").append(yTransitionOffset);
+            }
+            yExpr.insert(0, "(H/2)+(").append(")-(h/2)");
 
-                // Overlay the scaled image
-                filterComplex.append("[").append(lastOutput).append("][scaled").append(outputLabel).append("]");
-                filterComplex.append("overlay=x='").append(xExpr).append("':y='").append(yExpr).append("':format=auto");
-                filterComplex.append(":enable='between(t,").append(is.getTimelineStartTime()).append(",").append(is.getTimelineEndTime()).append(")'");
-                filterComplex.append("[ov").append(outputLabel).append("];");
-                System.out.println("Image segment filter chain for " + is.getId() + ": " +
-                        filterComplex.substring(Math.max(0, filterComplex.length() - 200)));
-                lastOutput = "ov" + outputLabel;
-            } else if (segment instanceof TextSegment) {
+            // Overlay the scaled image
+            filterComplex.append("[").append(lastOutput).append("][scaled").append(outputLabel).append("]");
+            filterComplex.append("overlay=x='").append(xExpr).append("':y='").append(yExpr).append("':format=auto");
+            filterComplex.append(":enable='between(t,").append(is.getTimelineStartTime()).append(",").append(is.getTimelineEndTime()).append(")'");
+            filterComplex.append("[ov").append(outputLabel).append("];");
+            System.out.println("Image segment filter chain for " + is.getId() + ": " +
+                    filterComplex.substring(Math.max(0, filterComplex.length() - 200)));
+            lastOutput = "ov" + outputLabel;
+        } else if (segment instanceof TextSegment) {
                 TextSegment ts = (TextSegment) segment;
                 String inputIdx = textInputIndices.get(ts.getId());
                 if (inputIdx == null) {
@@ -4847,7 +5234,75 @@ public class VideoEditingService {
 
             saveTimelineState(sessionId, timelineState);
         }
+    public void deleteMultipleSegments(String sessionId, List<String> segmentIds) throws JsonProcessingException {
+        Project project = getProjectBySession(sessionId);
+        TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
 
+        // Track whether any segments were removed
+        boolean segmentsRemoved = false;
+
+        // Iterate through each segment ID
+        for (String segmentId : segmentIds) {
+            // Try removing from VideoSegments
+            boolean removed = timelineState.getSegments().removeIf(
+                    segment -> segment.getId().equals(segmentId)
+            );
+            if (removed) {
+                segmentsRemoved = true;
+                // Remove associated transitions
+                timelineState.getTransitions().removeIf(
+                        transition -> transition.getSegmentId().equals(segmentId)
+                );
+                continue;
+            }
+
+            // Try removing from ImageSegments
+            removed = timelineState.getImageSegments().removeIf(
+                    segment -> segment.getId().equals(segmentId)
+            );
+            if (removed) {
+                segmentsRemoved = true;
+                // Remove associated transitions and filters
+                timelineState.getTransitions().removeIf(
+                        transition -> transition.getSegmentId().equals(segmentId)
+                );
+                timelineState.getFilters().removeIf(
+                        filter -> filter.getSegmentId().equals(segmentId)
+                );
+                continue;
+            }
+
+            // Try removing from AudioSegments
+            removed = timelineState.getAudioSegments().removeIf(
+                    segment -> segment.getId().equals(segmentId)
+            );
+            if (removed) {
+                segmentsRemoved = true;
+                continue;
+            }
+
+            // Try removing from TextSegments
+            removed = timelineState.getTextSegments().removeIf(
+                    segment -> segment.getId().equals(segmentId)
+            );
+            if (removed) {
+                segmentsRemoved = true;
+                // Remove associated transitions
+                timelineState.getTransitions().removeIf(
+                        transition -> transition.getSegmentId().equals(segmentId)
+                );
+                continue;
+            }
+        }
+
+        // If no segments were removed, throw an exception
+        if (!segmentsRemoved) {
+            throw new RuntimeException("No segments found with the provided IDs: " + segmentIds);
+        }
+
+        saveTimelineState(sessionId, timelineState);
+
+    }
 
         // Helper method to convert Element to ElementDto
         private ElementDto toElementDto(Element element) {

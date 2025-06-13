@@ -70,11 +70,11 @@ public class EmailService {
                             - Start new projects with presets for YouTube, Instagram Reels, TikTok, and more.<br>
                             - Explore our comprehensive toolkit for audio, video, and keyframe editing.<br>
                             - Join a community passionate about visual storytelling.</p>
-                        <p>If you didn’t sign up for Scenith or have any questions, please contact us at <a href="mailto:support@scenith.com">support@scenith.com</a> or call +91 123-456-7890.</p>
+                        <p>If you didn’t sign up for Scenith or have any questions, please contact us at <a href="mailto:scenith.spprt@gmail.com">scenith.spprt@gmail.com</a> </p>
                     </div>
                     <div class="footer">
                         <p><strong>Scenith</strong> – Elevating Visual Storytelling<br>
-                        <a href="https://www.scenith.com">www.scenith.com</a> | <a href="mailto:support@scenith.com">support@scenith.com</a></p>
+                        <a href="https://www.scenith.com">www.scenith.com</a> | <a href="mailto:sscenith.spprt@gmail.com">scenith.spprt@gmail.com</a></p>
                     </div>
                 </div>
             </body>

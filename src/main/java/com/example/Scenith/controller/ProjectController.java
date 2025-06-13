@@ -411,8 +411,10 @@ public class ProjectController {
                         Map<String, String> videoData = new HashMap<>();
                         videoData.put("videoFileName", video.get("videoFileName"));
                         videoData.put("videoPath", video.get("videoPath"));
-                        videoData.put("downloadUrl", video.get("cdnUrl")); // Updated to match field name from VideoEditingService
+                        videoData.put("cdnUrl", video.get("cdnUrl")); // CDN URL
+                        videoData.put("presignedUrl", video.get("presignedUrl")); // Presigned URL
                         videoData.put("audioPath", video.getOrDefault("audioPath", null));
+                        videoData.put("originalFileName", video.getOrDefault("originalFileName", null));
                         return videoData;
                     })
                     .collect(Collectors.toList());
@@ -422,13 +424,14 @@ public class ProjectController {
             response.put("project", updatedProject);
             response.put("videoFiles", responseVideoFiles);
 
+            logger.info("Successfully uploaded videos for projectId={}: {}", projectId, responseVideoFiles);
             return ResponseEntity.ok(response);
-        } catch (IOException e) { // Removed B2Exception
-            logger.error("Error uploading video: {}", e.getMessage(), e);
+        } catch (IOException e) {
+            logger.error("Error uploading video for projectId={}: {}", projectId, e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body("Error uploading video: " + e.getMessage());
         } catch (RuntimeException e) {
-            logger.warn("Forbidden action: {}", e.getMessage());
+            logger.warn("Forbidden action for projectId={}: {}", projectId, e.getMessage());
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
                     .body(e.getMessage());
         }
@@ -2312,5 +2315,59 @@ public class ProjectController {
         if (filename.endsWith(".ogg")) return "audio/ogg";
         return "application/octet-stream"; // Default fallback
     }
+    @GetMapping("/check-cdn-availability")
+    public ResponseEntity<Boolean> checkCdnAvailability(@RequestParam String cdnUrl) {
+        try {
+            boolean isAvailable = cloudflareR2Service.isCdnUrlAvailable(cdnUrl);
+            logger.debug("CDN availability check for URL {}: {}", cdnUrl, isAvailable);
+            return ResponseEntity.ok(isAvailable);
+        } catch (Exception e) {
+            logger.error("Error checking CDN availability for URL {}: {}", cdnUrl, e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(false);
+        }
+    }
 
+    @DeleteMapping("/{projectId}/remove-segments")
+    public ResponseEntity<?> removeMultipleSegments(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long projectId,
+            @RequestParam String sessionId,
+            @RequestBody Map<String, Object> request) {
+        try {
+            User user = getUserFromToken(token);
+
+            // Extract segmentIds from request body
+            @SuppressWarnings("unchecked")
+            List<String> segmentIds = (List<String>) request.get("segmentIds");
+
+            // Validate input
+            if (segmentIds == null || segmentIds.isEmpty()) {
+                return ResponseEntity.badRequest().body("Missing or empty required parameter: segmentIds");
+            }
+            if (sessionId == null || sessionId.isEmpty()) {
+                return ResponseEntity.badRequest().body("Missing required parameter: sessionId");
+            }
+
+            // Verify project exists and user has access
+            Project project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new RuntimeException("Project not found with ID: " + projectId));
+            if (!project.getUser().getId().equals(user.getId())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                        .body("Unauthorized to modify this project");
+            }
+
+            // Call service method to delete segments
+            videoEditingService.deleteMultipleSegments(sessionId, segmentIds);
+
+            return ResponseEntity.ok().body("Segments deleted successfully");
+        } catch (ClassCastException e) {
+            return ResponseEntity.badRequest().body("Invalid segmentIds format: must be a list of strings");
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body("Error removing segments: " + e.getMessage());
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error removing segments: " + e.getMessage());
+        }
+    }
 }

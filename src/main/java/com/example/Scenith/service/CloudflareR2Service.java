@@ -7,6 +7,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.HashMap;
+import java.util.Map;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
@@ -335,6 +339,56 @@ public class CloudflareR2Service {
         } catch (Exception e) {
             logger.error("Failed to generate presigned URL for path: {}, error: {}", r2Path, e.getMessage());
             throw new IOException("Failed to generate presigned URL", e);
+        }
+    }
+
+    /**
+     * Generates both CDN and presigned URLs for a file.
+     * @param r2Path The R2 path of the file.
+     * @param expirationSeconds Duration for presigned URL validity.
+     * @return Map containing "cdnUrl" and "presignedUrl".
+     * @throws IOException If the file doesn't exist or URL generation fails.
+     */
+    public Map<String, String> generateUrls(String r2Path, long expirationSeconds) throws IOException {
+        Map<String, String> urls = new HashMap<>();
+        if (!fileExists(r2Path)) {
+            logger.error("File does not exist in R2 for URL generation: {}/{}", bucketName, r2Path);
+            throw new IOException("File not found in R2: " + r2Path);
+        }
+
+        // Generate CDN URL
+        String cleanCdnDomain = cdnDomain.replaceFirst("^(https?://)", "");
+        String cdnUrl = String.format("https://%s/%s", cleanCdnDomain, r2Path);
+        urls.put("cdnUrl", cdnUrl);
+
+        // Generate presigned URL
+        String presignedUrl = generatePresignedUrl(r2Path, expirationSeconds);
+        urls.put("presignedUrl", presignedUrl);
+
+        logger.info("Generated URLs for R2 path: {} - CDN: {}, Presigned: {}", r2Path, cdnUrl, presignedUrl);
+        return urls;
+    }
+
+    /**
+     * Checks if a file is available via its CDN URL.
+     * @param cdnUrl The CDN URL to check.
+     * @return true if the file is accessible, false otherwise.
+     */
+    public boolean isCdnUrlAvailable(String cdnUrl) {
+        try {
+            URL url = new URL(cdnUrl);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("HEAD");
+            connection.setConnectTimeout(2000); // 2 seconds timeout
+            connection.setReadTimeout(2000);
+            int responseCode = connection.getResponseCode();
+            connection.disconnect();
+            boolean available = responseCode == 200;
+            logger.debug("CDN URL availability check: {} - Available: {}", cdnUrl, available);
+            return available;
+        } catch (Exception e) {
+            logger.warn("Failed to check CDN URL availability: {}, error: {}", cdnUrl, e.getMessage());
+            return false;
         }
     }
 }
