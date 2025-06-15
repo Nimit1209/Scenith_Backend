@@ -132,15 +132,97 @@ public class CloudflareR2Service {
                     .build();
 
             s3Client.getObject(getObjectRequest, destinationPathObj);
-            logger.info("Downloaded file from R2: {}/{} to {}", bucketName, r2Path, destinationPath);
+
+            // Verify the downloaded file
+            if (!destinationFile.exists() || !destinationFile.isFile() || destinationFile.length() == 0) {
+                logger.error("Downloaded file is invalid: path={}, exists={}, isFile={}, size={}",
+                        destinationPath, destinationFile.exists(), destinationFile.isFile(), destinationFile.length());
+                throw new IOException("Downloaded file is invalid: " + destinationPath);
+            }
+
+            logger.info("Downloaded file from R2: {}/{} to {} (size: {} bytes)",
+                    bucketName, r2Path, destinationPath, destinationFile.length());
             return destinationFile;
         } catch (S3Exception e) {
-            logger.error("S3 error downloading file from R2: {}/{}, code: {}, message: {}", bucketName, r2Path, e.awsErrorDetails().errorCode(), e.getMessage());
+            logger.error("S3 error downloading file from R2: {}/{}, code: {}, message: {}",
+                    bucketName, r2Path, e.awsErrorDetails().errorCode(), e.getMessage());
             throw new IOException("Failed to download file from R2: " + e.getMessage(), e);
         } catch (Exception e) {
-            logger.error("Unexpected error downloading file from R2: {}/{}, message: {}", bucketName, r2Path, e.getMessage());
+            logger.error("Unexpected error downloading file from R2: {}/{}, message: {}",
+                    bucketName, r2Path, e.getMessage());
             throw new IOException("Failed to download file from R2", e);
         }
+    }
+
+    /**
+     * Enhanced method to wait for file availability with better retry logic
+     */
+    public boolean waitForFileAvailability(String r2Path, int maxRetries, int initialDelayMs) {
+        int attempt = 0;
+        int delay = initialDelayMs;
+
+        while (attempt < maxRetries) {
+            try {
+                if (fileExists(r2Path)) {
+                    // Double-check by trying to get object metadata
+                    HeadObjectRequest headRequest = HeadObjectRequest.builder()
+                            .bucket(bucketName)
+                            .key(r2Path)
+                            .build();
+                    HeadObjectResponse response = s3Client.headObject(headRequest);
+
+                    if (response.contentLength() > 0) {
+                        logger.info("File is available in R2: {}, size: {} bytes", r2Path, response.contentLength());
+                        return true;
+                    }
+                }
+            } catch (Exception e) {
+                logger.debug("File availability check failed on attempt {}: {}", attempt + 1, e.getMessage());
+            }
+
+            attempt++;
+            if (attempt < maxRetries) {
+                try {
+                    logger.debug("Waiting {}ms before retry {}/{} for file: {}", delay, attempt + 1, maxRetries, r2Path);
+                    Thread.sleep(delay);
+                    delay = Math.min(delay * 2, 10000); // Exponential backoff, max 10 seconds
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    logger.warn("Interrupted while waiting for file availability: {}", r2Path);
+                    return false;
+                }
+            }
+        }
+
+        logger.warn("File not available after {} retries: {}", maxRetries, r2Path);
+        return false;
+    }
+
+    /**
+     * Enhanced download with retry logic
+     */
+    public File downloadFileWithRetry(String r2Path, String destinationPath, int maxRetries) throws IOException {
+        IOException lastException = null;
+
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                return downloadFile(r2Path, destinationPath);
+            } catch (IOException e) {
+                lastException = e;
+                logger.warn("Download attempt {}/{} failed for {}: {}", attempt, maxRetries, r2Path, e.getMessage());
+
+                if (attempt < maxRetries) {
+                    try {
+                        Thread.sleep(1000 * attempt); // Progressive delay
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Download interrupted", ie);
+                    }
+                }
+            }
+        }
+
+        throw new IOException("Failed to download after " + maxRetries + " attempts: " + r2Path, lastException);
     }
 
     public File saveMultipartFileToTemp(MultipartFile file, String tempPath) throws IOException {

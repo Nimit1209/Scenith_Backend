@@ -27,6 +27,7 @@ import java.awt.*;
 import java.awt.font.FontRenderContext;
 import java.awt.font.TextLayout;
 import java.awt.geom.AffineTransform;
+import java.awt.geom.Area;
 import java.awt.image.BufferedImage;
 import java.io.*;
 import java.nio.file.Files;
@@ -246,7 +247,6 @@ public class VideoEditingService {
                 .orElseThrow(() -> new SessionNotFoundException("Edit session not found: " + sessionId));
     }
 
-    @Transactional
     public Project uploadVideoToProject(User user, Long projectId, MultipartFile[] videoFiles, String[] videoFileNames) throws IOException {
         Project project = projectRepository.findById(projectId)
                 .orElseThrow(() -> new RuntimeException("Project not found with ID: " + projectId));
@@ -276,16 +276,26 @@ public class VideoEditingService {
             String uploadedPath = cloudflareR2Service.uploadFile(videoFile, r2Path);
 
             // Wait for file to be available in R2
-            int maxRetries = 10;
+            int maxRetries = 15; // Increase retries for robustness
             int attempt = 0;
             boolean fileExists = false;
+            boolean cdnAvailable = false;
+            String cdnUrl = null;
+
             while (attempt < maxRetries) {
+                // Check if file exists in R2
                 if (cloudflareR2Service.fileExists(r2Path)) {
                     fileExists = true;
-                    break;
+                    // Generate URLs and check CDN availability
+                    Map<String, String> urls = cloudflareR2Service.generateUrls(r2Path, 3600);
+                    cdnUrl = urls.get("cdnUrl");
+                    if (cloudflareR2Service.isCdnUrlAvailable(cdnUrl)) {
+                        cdnAvailable = true;
+                        break;
+                    }
                 }
                 attempt++;
-                logger.warn("Video not found in R2 on attempt {}/{}: r2Path={}, projectId={}", attempt, maxRetries, r2Path, projectId);
+                logger.warn("Video not found or CDN not available on attempt {}/{}: r2Path={}, cdnUrl={}, projectId={}", attempt, maxRetries, r2Path, cdnUrl, projectId);
                 try {
                     Thread.sleep(1000 * (long) Math.pow(2, attempt)); // Exponential backoff
                 } catch (InterruptedException e) {
@@ -295,8 +305,12 @@ public class VideoEditingService {
             }
 
             if (!fileExists) {
-                logger.error("Uploaded video not found in R2 after {} retries: r2Path = {}, projectId={}", maxRetries, r2Path, projectId);
+                logger.error("Uploaded video not found in R2 after {} retries: r2Path={}, projectId={}", maxRetries, r2Path, projectId);
                 throw new IOException("Failed to verify uploaded video in R2: " + r2Path);
+            }
+            if (!cdnAvailable) {
+                logger.error("CDN URL not available after {} retries: r2Path={}, cdnUrl={}, projectId={}", maxRetries, r2Path, cdnUrl, projectId);
+                throw new IOException("Failed to verify CDN availability for video: " + r2Path);
             }
 
             Map<String, String> videoData = new HashMap<>();
@@ -304,7 +318,7 @@ public class VideoEditingService {
             videoData.put("videoFileName", uniqueFileName);
             videoData.put("originalFileName", originalFileName);
 
-            // Generate both CDN and presigned URLs
+            // Include URLs in metadata
             Map<String, String> urls = cloudflareR2Service.generateUrls(r2Path, 3600);
             videoData.put("cdnUrl", urls.get("cdnUrl"));
             videoData.put("presignedUrl", urls.get("presignedUrl"));
@@ -320,7 +334,6 @@ public class VideoEditingService {
         logger.info("Saved videosJson for projectId={}: {}", projectId, videosJsonStr);
         return savedProject;
     }
-
     public void addVideoToTimeline(
             String sessionId,
             String videoPath,
@@ -342,8 +355,10 @@ public class VideoEditingService {
         logger.debug("Extracted filename={} from videoPath={}, normalized to={}", filename, videoPath, normalizedVideoPath);
 
         String r2Path = null;
-        String accessUrl = null; // URL to use for immediate access
-        int maxMetadataRetries = 10;
+        String accessUrl = null;
+
+        // Enhanced metadata resolution with retry logic
+        int maxMetadataRetries = 15;
         int metadataAttempt = 0;
         while (metadataAttempt < maxMetadataRetries) {
             final int currentAttempt = metadataAttempt;
@@ -351,7 +366,14 @@ public class VideoEditingService {
                 if (videoPath.startsWith("videos/projects/")) {
                     r2Path = videoPath;
                 } else {
+                    // Refresh project data to get latest video metadata
+                    project = projectRepository.findById(project.getId())
+                            .orElseThrow(() -> new RuntimeException("Project not found"));
+
                     List<Map<String, String>> videos = getVideos(project);
+                    logger.debug("Available videos in project {}: {}", project.getId(),
+                            videos.stream().map(v -> v.get("videoFileName")).collect(Collectors.toList()));
+
                     Map<String, String> targetVideo = videos.stream()
                             .filter(video -> {
                                 String videoFileName = video.get("videoFileName").toLowerCase();
@@ -370,7 +392,7 @@ public class VideoEditingService {
                             .findFirst()
                             .orElseThrow(() -> new IOException("Video file not found in project metadata: " + videoPath + ", attempt=" + (currentAttempt + 1)));
                     r2Path = targetVideo.get("videoPath");
-                    accessUrl = targetVideo.get("presignedUrl"); // Use presigned URL initially
+                    accessUrl = targetVideo.get("presignedUrl");
                 }
                 break;
             } catch (IOException e) {
@@ -381,8 +403,7 @@ public class VideoEditingService {
                     throw e;
                 }
                 logger.warn("Video metadata not found on attempt {}/{}: videoPath={}. Retrying...", metadataAttempt, maxMetadataRetries, videoPath);
-                Thread.sleep(1000 * (long) Math.pow(2, metadataAttempt));
-                project = getProjectBySession(sessionId);
+                Thread.sleep(Math.min(1000 * (long) Math.pow(2, metadataAttempt), 5000));
             }
         }
 
@@ -391,65 +412,68 @@ public class VideoEditingService {
             throw new IOException("Unable to resolve video path: " + videoPath);
         }
 
-        if (accessUrl == null) {
-            // Fallback to generating URLs if not found in metadata
-            Map<String, String> urls = cloudflareR2Service.generateUrls(r2Path, 3600);
-            accessUrl = urls.get("presignedUrl");
-        }
-
         logger.info("Resolved videoPath={} to R2 path={} for projectId={}", videoPath, r2Path, project.getId());
 
-        // Verify file existence in R2
-        int maxFileRetries = 10;
-        int fileAttempt = 0;
-        boolean fileExists = false;
-        while (fileAttempt < maxFileRetries) {
+        // Enhanced file availability check
+        logger.info("Checking file availability in R2: {}", r2Path);
+        if (!cloudflareR2Service.waitForFileAvailability(r2Path, 20, 500)) {
+            logger.error("Video file not available in R2 after waiting: r2Path={}, projectId={}", r2Path, project.getId());
+            throw new IOException("Video file not available in R2: " + r2Path);
+        }
+
+        // Generate fresh URLs if not available
+        if (accessUrl == null) {
             try {
-                if (cloudflareR2Service.fileExists(r2Path)) {
-                    fileExists = true;
-                    break;
-                }
+                Map<String, String> urls = cloudflareR2Service.generateUrls(r2Path, 3600);
+                accessUrl = urls.get("presignedUrl");
+                logger.info("Generated fresh presigned URL for R2 path: {}", r2Path);
             } catch (Exception e) {
-                logger.warn("Error checking file existence on attempt {}/{}: r2Path={}, error={}", fileAttempt + 1, maxFileRetries, r2Path, e.getMessage());
-            }
-            fileAttempt++;
-            if (fileAttempt < maxFileRetries) {
-                logger.warn("Video not found in R2 on attempt {}/{}: r2Path={}, projectId={}", fileAttempt, maxFileRetries, r2Path, project.getId());
-                Thread.sleep(1000 * (long) Math.pow(2, fileAttempt));
+                logger.error("Failed to generate URLs for R2 path: {}", r2Path, e);
+                throw new IOException("Failed to generate access URL for video: " + r2Path, e);
             }
         }
 
-        if (!fileExists) {
-            logger.error("Video file does not exist in R2 after {} retries: r2Path={}, projectId={}", maxFileRetries, r2Path, project.getId());
-            throw new IOException("Video file not found in R2: " + r2Path);
-        }
-
-        // Download video using presigned URL
+        // Enhanced local file handling
         String localFileName = project.getId() + "_" + System.currentTimeMillis() + "_" + new File(r2Path).getName();
         String localRelativePath = "temp/videos/" + localFileName;
         File localFile = new File(baseDir, localRelativePath);
 
-        logger.info("Downloading video from URL: {} to localPath={}", accessUrl, localFile.getAbsolutePath());
+        logger.info("Downloading video from R2: {} to localPath={}", r2Path, localFile.getAbsolutePath());
         try {
-            localFile.getParentFile().mkdirs();
-            cloudflareR2Service.downloadFile(r2Path, localFile.getAbsolutePath());
+            // Ensure parent directory exists
+            File parentDir = localFile.getParentFile();
+            if (!parentDir.exists() && !parentDir.mkdirs()) {
+                throw new IOException("Failed to create directory: " + parentDir.getAbsolutePath());
+            }
+
+            // Use enhanced download with retry
+            localFile = cloudflareR2Service.downloadFileWithRetry(r2Path, localFile.getAbsolutePath(), 3);
+
+            // Validate downloaded file
             if (!localFile.exists() || !localFile.isFile() || localFile.length() == 0) {
                 logger.error("Downloaded file is invalid: localPath={}, exists={}, isFile={}, size={}",
                         localFile.getAbsolutePath(), localFile.exists(), localFile.isFile(), localFile.length());
                 throw new IOException("Downloaded video file is invalid: " + localFile.getAbsolutePath());
             }
-            logger.info("Successfully downloaded video to: {}", localFile.getAbsolutePath());
+
+            logger.info("Successfully downloaded video to: {} (size: {} bytes)", localFile.getAbsolutePath(), localFile.length());
         } catch (IOException e) {
             logger.error("Failed to download video from R2: r2Path={}, error={}", r2Path, e.getMessage(), e);
             throw new IOException("Failed to download video from R2: " + r2Path, e);
         }
 
         try {
-            // Get video duration
-            double fullDuration = getVideoDuration(r2Path);
-            logger.info("Video duration for {}: {} seconds for projectId={}", r2Path, fullDuration, project.getId());
+            // Get video duration with proper error handling
+            double fullDuration;
+            try {
+                fullDuration = getVideoDuration(r2Path);
+                logger.info("Video duration for {}: {} seconds for projectId={}", r2Path, fullDuration, project.getId());
+            } catch (Exception e) {
+                logger.error("Failed to get video duration for {}: {}", r2Path, e.getMessage());
+                throw new IOException("Failed to get video duration: " + r2Path, e);
+            }
 
-            // Validate inputs
+            // Validate inputs with better error messages
             layer = layer != null ? layer : 0;
             timelineStartTime = timelineStartTime != null ? roundToThreeDecimals(timelineStartTime) : getLastSegmentEndTime(timelineState, layer);
             startTime = startTime != null ? roundToThreeDecimals(startTime) : 0.0;
@@ -459,55 +483,105 @@ public class VideoEditingService {
             timelineEndTime = timelineEndTime != null ? roundToThreeDecimals(timelineEndTime) :
                     roundToThreeDecimals(timelineStartTime + (clipDuration / (speed != null ? speed : 1.0)));
 
+            // Validate timeline position
             if (!timelineState.isTimelinePositionAvailable(timelineStartTime, timelineEndTime, layer)) {
-                logger.warn("Timeline position overlap at layer={} for projectId={}", layer, project.getId());
+                logger.warn("Timeline position overlap at layer={} for projectId={}, timelineStart={}, timelineEnd={}",
+                        layer, project.getId(), timelineStartTime, timelineEndTime);
                 throw new IOException("Timeline position overlaps with an existing segment in layer " + layer);
             }
 
+            // Validate time bounds
             if (startTime < 0 || endTime > fullDuration || startTime >= endTime) {
-                logger.warn("Invalid startTime={} or endTime={} for video duration={} for projectId={}",
+                logger.warn("Invalid time bounds: startTime={}, endTime={}, fullDuration={} for projectId={}",
                         startTime, endTime, fullDuration, project.getId());
-                throw new IOException("Invalid startTime or endTime for video segment");
+                throw new IOException(String.format("Invalid time bounds: startTime=%.3f, endTime=%.3f, duration=%.3f",
+                        startTime, endTime, fullDuration));
             }
 
-            // Handle audio extraction
+            // FIXED: Handle audio extraction BEFORE creating video segment
             String audioPath = null;
+            String audioFileName = null; // Add variable for audioFileName
             AudioSegment audioSegment = null;
 
             if (createAudioSegment) {
-                String videoFileName = new File(r2Path).getName();
-                String audioFileName = "extracted_" + videoFileName.replaceAll("[^a-zA-Z0-9.]", "_") + ".mp3";
-                String audioR2Path = "audio/projects/" + project.getId() + "/extracted/" + audioFileName;
+                try {
+                    // Properly generate audio filename without double extensions
+                    String videoFileName = new File(r2Path).getName();
 
-                List<Map<String, String>> extractedAudio = getExtractedAudio(project);
-                final String finalR2Path = r2Path;
-                Map<String, String> existingAudio = extractedAudio.stream()
-                        .filter(audio -> audio.get("sourceVideoPath").equals(finalR2Path) && audio.get("audioFileName").equals(audioFileName))
-                        .findFirst()
-                        .orElse(null);
-
-                String waveformJsonPath = null;
-                if (existingAudio != null) {
-                    logger.info("Reusing existing audio: {} for projectId={}", audioR2Path, project.getId());
-                    audioPath = existingAudio.get("audioPath");
-                    waveformJsonPath = existingAudio.get("waveformJsonPath");
-                } else {
-                    Map<String, String> extractionResult = extractAudioFromVideo(r2Path, project.getId(), audioFileName);
-                    audioPath = extractionResult.get("audioPath");
-                    waveformJsonPath = extractionResult.get("waveformJsonPath");
-                    if (audioPath != null) {
-                        cloudflareR2Service.uploadFile(new File(audioPath), audioR2Path);
-                        audioPath = audioR2Path;
+                    // Remove extension from video filename first
+                    String baseVideoName = videoFileName;
+                    if (baseVideoName.contains(".")) {
+                        baseVideoName = baseVideoName.substring(0, baseVideoName.lastIndexOf("."));
                     }
-                }
 
-                if (audioPath != null) {
-                    updateVideoMetadata(project, r2Path, videoFileName, audioPath);
-                    audioSegment = createAudioSegment(audioPath, waveformJsonPath, startTime, endTime,
-                            timelineStartTime, timelineEndTime, timelineState);
+                    // Create clean audio filename (extension will be added in extractAudioFromVideo)
+                    String baseAudioFileName = baseVideoName.replaceAll("[^a-zA-Z0-9_-]", "_");
+                    String audioR2Path = "audio/projects/" + project.getId() + "/extracted/extracted_" + baseAudioFileName;
+
+                    logger.info("Processing audio extraction for video: {} -> audio: {} for projectId={}",
+                            videoFileName, baseAudioFileName, project.getId());
+
+                    // Refresh project to get latest extracted audio metadata
+                    project = projectRepository.findById(project.getId())
+                            .orElseThrow(() -> new RuntimeException("Project not found"));
+
+                    List<Map<String, String>> extractedAudio = getExtractedAudio(project);
+                    final String finalR2Path = r2Path;
+
+                    // Look for existing audio by source video path
+                    Map<String, String> existingAudio = extractedAudio.stream()
+                            .filter(audio -> audio.get("sourceVideoPath").equals(finalR2Path))
+                            .findFirst()
+                            .orElse(null);
+
+                    String waveformJsonPath = null;
+                    if (existingAudio != null) {
+                        logger.info("Reusing existing audio: {} for projectId={}", existingAudio.get("audioPath"), project.getId());
+                        audioPath = existingAudio.get("audioPath");
+                        audioFileName = existingAudio.get("audioFileName"); // Retrieve audioFileName
+                        waveformJsonPath = existingAudio.get("waveformJsonPath");
+                    } else {
+                        logger.info("Extracting new audio from video: {} for projectId={}", r2Path, project.getId());
+
+                        // CRITICAL FIX: Wait for audio extraction to complete fully
+                        Map<String, String> extractionResult = extractAudioFromVideoWithRetry(r2Path, project.getId(), baseAudioFileName);
+                        audioPath = extractionResult.get("audioPath");
+                        audioFileName = extractionResult.get("audioFileName"); // Get audioFileName from result
+                        waveformJsonPath = extractionResult.get("waveformJsonPath");
+
+                        // Ensure audio is uploaded and metadata is updated before proceeding
+                        if (audioPath != null) {
+                            logger.info("Audio extraction completed successfully: {} for projectId={}", audioPath, project.getId());
+
+                            // Wait for audio to be available in R2
+                            if (!cloudflareR2Service.waitForFileAvailability(audioPath, 20, 500)) {
+                                logger.error("Extracted audio file not available in R2: audioPath={}, projectId={}", audioPath, project.getId());
+                                throw new IOException("Extracted audio file not available in R2: " + audioPath);
+                            }
+
+                            // Update project metadata with audio path and file name
+                            updateVideoMetadata(project, r2Path, videoFileName, audioPath);
+                            addExtractedAudio(project, audioPath, audioFileName, r2Path, waveformJsonPath);
+                            projectRepository.saveAndFlush(project); // Ensure immediate persistence
+
+                            logger.info("Audio metadata updated successfully for projectId={}", project.getId());
+                        }
+                    }
+
+                    // Create audio segment only if audio extraction was successful
+                    if (audioPath != null && waveformJsonPath != null) {
+                        audioSegment = createAudioSegment(audioPath, waveformJsonPath, startTime, endTime,
+                                timelineStartTime, timelineEndTime, timelineState);
+                        logger.info("Audio segment created successfully for projectId={}", project.getId());
+                    } else {
+                        logger.warn("Audio segment not created - missing audioPath or waveformJsonPath for projectId={}", project.getId());
+                    }
+
+                } catch (Exception e) {
+                    logger.error("Audio extraction failed for projectId={}: {}", project.getId(), e.getMessage(), e);
+                    throw new IOException("Failed to extract audio from video: " + r2Path, e);
                 }
             }
-
             // Create video segment
             VideoSegment segment = new VideoSegment();
             segment.setSourceVideoPath(r2Path);
@@ -527,26 +601,71 @@ public class VideoEditingService {
             segment.setSpeed(speed != null ? speed : 1.0);
             segment.setRotation(rotation != null ? rotation : 0.0);
 
+            // Link audio segment to video segment
             if (audioSegment != null) {
                 segment.setAudioId(audioSegment.getId());
                 timelineState.getAudioSegments().add(audioSegment);
+                logger.info("Audio segment linked to video segment for projectId={}", project.getId());
             }
 
             timelineState.getSegments().add(segment);
             saveTimelineStateNewTransaction(sessionId, timelineState);
-            logger.info("Successfully added video segment to timeline: projectId={}, r2Path={}", project.getId(), r2Path);
+            logger.info("Successfully added video segment to timeline: projectId={}, r2Path={}, layer={}, timelineStart={}, timelineEnd={}, hasAudio={}",
+                    project.getId(), r2Path, layer, timelineStartTime, timelineEndTime, audioSegment != null);
+
         } finally {
+            // Cleanup temporary file
             try {
-                if (localFile.exists()) {
+                if (localFile != null && localFile.exists()) {
                     Files.delete(localFile.toPath());
                     logger.debug("Deleted temporary video file: {}", localFile.getAbsolutePath());
                 }
             } catch (IOException e) {
-                logger.warn("Failed to delete temporary video file: {}, error: {}", localFile.getAbsolutePath(), e.getMessage());
+                logger.warn("Failed to delete temporary video file: {}, error: {}",
+                        localFile != null ? localFile.getAbsolutePath() : "null", e.getMessage());
             }
         }
     }
 
+    // NEW: Enhanced audio extraction with retry logic
+    private Map<String, String> extractAudioFromVideoWithRetry(String videoPath, Long projectId, String audioFileName) throws IOException, InterruptedException {
+        int maxRetries = 3;
+        int attempt = 0;
+
+        while (attempt < maxRetries) {
+            try {
+                Map<String, String> result = extractAudioFromVideo(videoPath, projectId, audioFileName);
+
+                // Verify the extraction was successful
+                String audioPath = result.get("audioPath");
+                if (audioPath != null) {
+                    // Wait a bit for the file to be fully processed
+                    Thread.sleep(1000);
+
+                    // Verify file exists in R2
+                    if (cloudflareR2Service.fileExists(audioPath)) {
+                        logger.info("Audio extraction successful on attempt {}: {}", attempt + 1, audioPath);
+                        return result;
+                    } else {
+                        logger.warn("Audio file not found in R2 after extraction on attempt {}: {}", attempt + 1, audioPath);
+                    }
+                }
+
+            } catch (Exception e) {
+                logger.warn("Audio extraction failed on attempt {}/{}: {}", attempt + 1, maxRetries, e.getMessage());
+                if (attempt == maxRetries - 1) {
+                    throw new IOException("Audio extraction failed after " + maxRetries + " attempts", e);
+                }
+            }
+
+            attempt++;
+            if (attempt < maxRetries) {
+                Thread.sleep(2000 * attempt); // Progressive delay
+            }
+        }
+
+        throw new IOException("Audio extraction failed after " + maxRetries + " attempts");
+    }
     private double getLastSegmentEndTime(TimelineState timelineState, int layer) {
         return timelineState.getSegments().stream()
                 .filter(segment -> segment.getLayer() == layer)
@@ -630,9 +749,19 @@ public class VideoEditingService {
                     videoFile.getAbsolutePath(), videoFile.exists(), videoFile.isFile(), videoFile.canRead(),
                     videoFile.exists() ? videoFile.length() : 0, projectId);
 
-            // Construct audio path
-            String cleanAudioFileName = audioFileName.startsWith("extracted_") ? audioFileName : "extracted_" + audioFileName.replaceAll("[^a-zA-Z0-9.]", "_");
+            // Generate unique audio file name with timestamp
+            String baseFileName = audioFileName;
+            if (baseFileName.contains(".")) {
+                baseFileName = baseFileName.substring(0, baseFileName.lastIndexOf("."));
+            }
+            if (!baseFileName.startsWith("extracted_")) {
+                baseFileName = "extracted_" + baseFileName;
+            }
+            String timestamp = String.valueOf(System.currentTimeMillis());
+            String cleanAudioFileName = baseFileName.replaceAll("[^a-zA-Z0-9_-]", "_") + "_" + timestamp + ".mp3";
             String audioR2Path = "audio/projects/" + projectId + "/extracted/" + cleanAudioFileName;
+
+            logger.info("Generated audio file name: {} with path: {} for projectId={}", cleanAudioFileName, audioR2Path, projectId);
 
             File audioDir = new File(baseDir, "temp/audio/" + projectId + "/extracted");
             if (!audioDir.exists() && !audioDir.mkdirs()) {
@@ -681,27 +810,41 @@ public class VideoEditingService {
                 return result;
             }
 
-            // Extract audio
+            // Extract audio with improved FFmpeg command
             List<String> command = new ArrayList<>();
             command.add(ffmpegPath);
             command.add("-i");
             command.add(videoFile.getAbsolutePath());
-            command.add("-vn");
+            command.add("-vn"); // No video
             command.add("-acodec");
-            command.add("mp3");
+            command.add("libmp3lame");
+            command.add("-b:a");
+            command.add("128k");
+            command.add("-ar");
+            command.add("44100");
             command.add("-y");
             command.add(audioFile.getAbsolutePath());
 
+            logger.info("Executing FFmpeg command: {} for projectId={}", String.join(" ", command), projectId);
+
             try {
                 executeFFmpegCommand(command);
+                logger.info("Audio extraction completed successfully: {} for projectId={}", audioFile.getAbsolutePath(), projectId);
             } catch (RuntimeException e) {
                 logger.error("Audio extraction failed for video: {} for projectId={}", r2VideoPath, projectId, e);
                 throw new IOException("Failed to extract audio from video: " + r2VideoPath, e);
             }
 
             // Upload audio and generate waveform
-            if (audioFile.exists()) {
+            if (audioFile.exists() && audioFile.length() > 0) {
+                logger.info("Uploading audio file to R2: {} -> {} for projectId={}", audioFile.getAbsolutePath(), audioR2Path, projectId);
                 cloudflareR2Service.uploadFile(audioFile, audioR2Path);
+
+                // Verify upload was successful
+                if (!cloudflareR2Service.waitForFileAvailability(audioR2Path, 10, 1000)) {
+                    throw new IOException("Failed to upload audio file to R2: " + audioR2Path);
+                }
+
                 Files.deleteIfExists(audioFile.toPath());
                 waveformJsonPath = generateAndSaveWaveformJson(audioR2Path, projectId);
 
@@ -709,9 +852,11 @@ public class VideoEditingService {
                 Project project = projectRepository.findById(projectId)
                         .orElseThrow(() -> new RuntimeException("Project not found"));
                 addExtractedAudio(project, audioR2Path, cleanAudioFileName, r2VideoPath, waveformJsonPath);
-                projectRepository.save(project);
+                projectRepository.saveAndFlush(project); // Use saveAndFlush to ensure immediate persistence
+
+                logger.info("Audio extraction and upload completed successfully: {} for projectId={}", audioR2Path, projectId);
             } else {
-                logger.warn("No audio file created for: {} for projectId={}", audioFile.getAbsolutePath(), projectId);
+                logger.warn("No audio file created or file is empty: {} for projectId={}", audioFile.getAbsolutePath(), projectId);
                 Map<String, String> result = new HashMap<>();
                 result.put("audioPath", null);
                 result.put("waveformJsonPath", null);
@@ -720,11 +865,15 @@ public class VideoEditingService {
 
             Map<String, String> result = new HashMap<>();
             result.put("audioPath", audioR2Path);
+            result.put("audioFileName", cleanAudioFileName); // Explicitly return audioFileName
             result.put("waveformJsonPath", waveformJsonPath);
             return result;
         } finally {
-            // Optional: Keep file for caching
-            // if (videoFile.exists()) Files.deleteIfExists(videoFile.toPath());
+            // Cleanup temporary video file
+            if (videoFile.exists()) {
+                Files.deleteIfExists(videoFile.toPath());
+                logger.debug("Deleted temporary video file: {}", videoFile.getAbsolutePath());
+            }
         }
     }
     public double getVideoDuration(String videoPath) throws IOException, InterruptedException {
@@ -795,7 +944,6 @@ public class VideoEditingService {
         }
     }
 
-    @Transactional(isolation = Isolation.READ_COMMITTED)
     public void updateVideoSegment(
             String sessionId,
             String segmentId,
@@ -816,242 +964,325 @@ public class VideoEditingService {
             Double rotation,
             Map<String, List<Keyframe>> keyframes
     ) throws IOException, InterruptedException {
+        // Validate inputs early
+        if (opacity != null && (opacity < 0 || opacity > 1)) {
+            logger.error("Invalid opacity: {}", opacity);
+            throw new IllegalArgumentException("Opacity must be between 0 and 1");
+        }
+        if (scale != null && scale <= 0) {
+            logger.error("Invalid scale: {}", scale);
+            throw new IllegalArgumentException("Scale must be positive");
+        }
+        if (timelineStartTime != null && timelineStartTime < 0) {
+            logger.error("Invalid timelineStartTime: {}", timelineStartTime);
+            throw new IllegalArgumentException("Timeline start time must be non-negative");
+        }
+        if (timelineEndTime != null && timelineEndTime <= (timelineStartTime != null ? timelineStartTime : 0)) {
+            logger.error("Invalid timelineEndTime: {}", timelineEndTime);
+            throw new IllegalArgumentException("Timeline end time must be greater than start time");
+        }
+        if (startTime != null && startTime < 0) {
+            logger.error("Invalid startTime: {}", startTime);
+            throw new IllegalArgumentException("Start time must be non-negative");
+        }
+        if (speed != null && (speed < 0.1 || speed > 5.0)) {
+            logger.error("Invalid speed: {}", speed);
+            throw new IllegalArgumentException("Speed must be between 0.1 and 5.0");
+        }
+        if (cropL != null && (cropL < 0 || cropL > 100)) {
+            logger.error("Invalid cropL: {}", cropL);
+            throw new IllegalArgumentException("cropL must be between 0 and 100");
+        }
+        if (cropR != null && (cropR < 0 || cropR > 100)) {
+            logger.error("Invalid cropR: {}", cropR);
+            throw new IllegalArgumentException("cropR must be between 0 and 100");
+        }
+        if (cropT != null && (cropT < 0 || cropT > 100)) {
+            logger.error("Invalid cropT: {}", cropT);
+            throw new IllegalArgumentException("cropT must be between 0 and 100");
+        }
+        if (cropB != null && (cropB < 0 || cropB > 100)) {
+            logger.error("Invalid cropB: {}", cropB);
+            throw new IllegalArgumentException("cropB must be between 0 and 100");
+        }
+
+        // Non-transactional: Load project and validate
+        Project project = getProjectBySession(sessionId);
+        TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
+        VideoSegment segmentToUpdate = timelineState.getSegments().stream()
+                .filter(segment -> segment.getId().equals(segmentId))
+                .findFirst()
+                .orElseThrow(() -> {
+                    logger.error("Video segment not found: segmentId={}", segmentId);
+                    return new RuntimeException("No segment found with ID: " + segmentId);
+                });
+
+        // Validate crop parameters
+        double effectiveCropL = cropL != null ? cropL : (segmentToUpdate.getCropL() != null ? segmentToUpdate.getCropL() : 0.0);
+        double effectiveCropR = cropR != null ? cropR : (segmentToUpdate.getCropR() != null ? segmentToUpdate.getCropR() : 0.0);
+        double effectiveCropT = cropT != null ? cropT : (segmentToUpdate.getCropT() != null ? segmentToUpdate.getCropT() : 0.0);
+        double effectiveCropB = cropB != null ? cropB : (segmentToUpdate.getCropB() != null ? segmentToUpdate.getCropB() : 0.0);
+        if (effectiveCropL + effectiveCropR >= 100) {
+            logger.error("Invalid crop: cropL={} + cropR={} >= 100", effectiveCropL, effectiveCropR);
+            throw new IllegalArgumentException("Total crop percentage (left + right) must be less than 100");
+        }
+        if (effectiveCropT + effectiveCropB >= 100) {
+            logger.error("Invalid crop: cropT={} + cropB={} >= 100", effectiveCropT, effectiveCropB);
+            throw new IllegalArgumentException("Total crop percentage (top + bottom) must be less than 100");
+        }
+
+        // Validate video duration
+        String videoPath = segmentToUpdate.getSourceVideoPath();
+        String r2Path = videoPath.startsWith("videos/projects/") ? videoPath : "videos/projects/" + project.getId() + "/" + videoPath;
+        if (!cloudflareR2Service.fileExists(r2Path)) {
+            logger.error("Video file not found in R2: {}", r2Path);
+            throw new IOException("Video file not found in R2: " + r2Path);
+        }
+        double videoDuration = getVideoDuration(r2Path);
+        if (endTime != null && endTime > videoDuration) {
+            logger.error("End time {} exceeds video duration {}", endTime, videoDuration);
+            throw new IllegalArgumentException("End time exceeds video duration");
+        }
+        if (startTime != null && endTime != null && startTime >= endTime) {
+            logger.error("Invalid time bounds: startTime={} >= endTime={}", startTime, endTime);
+            throw new IllegalArgumentException("Start time must be less than end time");
+        }
+
+        // Validate keyframes
+        if (keyframes != null && !keyframes.isEmpty()) {
+            double segmentDuration = segmentToUpdate.getTimelineEndTime() - segmentToUpdate.getTimelineStartTime();
+            for (Map.Entry<String, List<Keyframe>> entry : keyframes.entrySet()) {
+                String property = entry.getKey();
+                for (Keyframe kf : entry.getValue()) {
+                    if (kf.getTime() < 0 || kf.getTime() > segmentDuration) {
+                        logger.error("Keyframe time {} out of bounds for property {}", kf.getTime(), property);
+                        throw new IllegalArgumentException("Keyframe time out of segment bounds for property " + property);
+                    }
+                }
+            }
+        }
+
+        // Transactional update with retries
         int maxRetries = 3;
         int attempt = 0;
-        try {
-            logger.debug("Updating VideoSegment {}: positionX={}, positionY={}, layer={}",
-                    segmentId, positionX, positionY);
-
-            Project project = getProjectBySession(sessionId);
-            TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
-
-            VideoSegment segmentToUpdate = timelineState.getSegments().stream()
-                    .filter(segment -> segment.getId().equals(segmentId))
-                    .findFirst()
-                    .orElseThrow(() -> new RuntimeException("No segment found with ID: " + segmentId));
-
-            double originalTimelineStartTime = segmentToUpdate.getTimelineStartTime();
-            double originalTimelineEndTime = segmentToUpdate.getTimelineEndTime();
-            double originalStartTime = segmentToUpdate.getStartTime();
-            double originalEndTime = segmentToUpdate.getEndTime();
-            int originalLayer = segmentToUpdate.getLayer();
-            Double originalCropL = segmentToUpdate.getCropL();
-            Double originalCropR = segmentToUpdate.getCropR();
-            Double originalCropT = segmentToUpdate.getCropT();
-            Double originalCropB = segmentToUpdate.getCropB();
-            Double originalSpeed = segmentToUpdate.getSpeed();
-            Double originalRotation = segmentToUpdate.getRotation();
-
-            boolean timelineOrLayerChanged = false;
-
-            String videoPath = segmentToUpdate.getSourceVideoPath();
-            String r2Path = videoPath.startsWith("videos/projects/") ? videoPath : "videos/projects/" + project.getId() + "/" + videoPath;
-
-            String localFileName = new File(r2Path).getName();
-            String localRelativePath = "temp/videos/" + localFileName;
-            File localFile = new File(baseDir, localRelativePath);
-
-            if (!localFile.exists()) {
-                logger.info("Local video not found, downloading from R2: {}", r2Path);
-                localFile.getParentFile().mkdirs();
-                cloudflareR2Service.downloadFile(r2Path, localFile.getAbsolutePath());
-                logger.info("Downloaded video to: {}", localFile.getAbsolutePath());
-            }
-
-            // Validate crop parameters
-            if (cropL != null && (cropL < 0 || cropL > 100)) {
-                throw new IllegalArgumentException("cropL must be between 0 and 100");
-            }
-            if (cropR != null && (cropR < 0 || cropR > 100)) {
-                throw new IllegalArgumentException("cropR must be between 0 and 100");
-            }
-            if (cropT != null && (cropT < 0 || cropT > 100)) {
-                throw new IllegalArgumentException("cropT must be between 0 and 100");
-            }
-            if (cropB != null && (cropB < 0 || cropB > 100)) {
-                throw new IllegalArgumentException("cropB must be between 0 and 100");
-            }
-            double effectiveCropL = cropL != null ? cropL : (segmentToUpdate.getCropL() != null ? segmentToUpdate.getCropL() : 0.0);
-            double effectiveCropR = cropR != null ? cropR : (segmentToUpdate.getCropR() != null ? segmentToUpdate.getCropR() : 0.0);
-            double effectiveCropT = cropT != null ? cropT : (segmentToUpdate.getCropT() != null ? segmentToUpdate.getCropT() : 0.0);
-            double effectiveCropB = cropB != null ? cropB : (segmentToUpdate.getCropB() != null ? segmentToUpdate.getCropB() : 0.0);
-            if (effectiveCropL + effectiveCropR >= 100) {
-                throw new IllegalArgumentException("Total crop percentage (left + right) must be less than 100");
-            }
-            if (effectiveCropT + effectiveCropB >= 100) {
-                throw new IllegalArgumentException("Total crop percentage (top + bottom) must be less than 100");
-            }
-
-            // Validate speed
-            if (speed != null) {
-                if (speed < 0.1 || speed > 5.0) {
-                    throw new IllegalArgumentException("Speed must be between 0.1 and 5.0");
-                }
-                segmentToUpdate.setSpeed(speed);
-            }
-
-            // Handle keyframes
-            if (keyframes != null && !keyframes.isEmpty()) {
-                for (Map.Entry<String, List<Keyframe>> entry : keyframes.entrySet()) {
-                    String property = entry.getKey();
-                    List<Keyframe> kfs = entry.getValue();
-                    segmentToUpdate.getKeyframes().remove(property);
-                    if (!kfs.isEmpty()) {
-                        for (Keyframe kf : kfs) {
-                            if (kf.getTime() < 0 || kf.getTime() > (segmentToUpdate.getTimelineEndTime() - segmentToUpdate.getTimelineStartTime())) {
-                                throw new IllegalArgumentException("Keyframe time out of segment bounds for property " + property);
-                            }
-                            kf.setTime(roundToThreeDecimals(kf.getTime()));
-                            segmentToUpdate.addKeyframe(property, kf);
-                        }
-                    }
-                    switch (property) {
-                        case "positionX":
-                            if (kfs.isEmpty()) segmentToUpdate.setPositionX(positionX);
-                            else segmentToUpdate.setPositionX(null);
-                            break;
-                        case "positionY":
-                            if (kfs.isEmpty()) segmentToUpdate.setPositionY(positionY);
-                            else segmentToUpdate.setPositionY(null);
-                            break;
-                        case "scale":
-                            if (kfs.isEmpty()) segmentToUpdate.setScale(scale);
-                            else segmentToUpdate.setScale(null);
-                            break;
-                        case "opacity":
-                            if (kfs.isEmpty()) segmentToUpdate.setOpacity(opacity);
-                            else segmentToUpdate.setOpacity(null);
-                            break;
-                    }
-                }
-            } else {
-                segmentToUpdate.getKeyframes().clear();
-                if (positionX != null) segmentToUpdate.setPositionX(positionX);
-                if (positionY != null) segmentToUpdate.setPositionY(positionY);
-                if (scale != null) segmentToUpdate.setScale(scale);
-                if (opacity != null) segmentToUpdate.setOpacity(opacity);
-                if (rotation != null) segmentToUpdate.setRotation(rotation);
-            }
-
-            // Update non-keyframed properties
-            if (positionX != null && (keyframes == null || !keyframes.containsKey("positionX") || keyframes.get("positionX").isEmpty())) {
-                segmentToUpdate.setPositionX(positionX);
-            }
-            if (positionY != null && (keyframes == null || !keyframes.containsKey("positionY") || keyframes.get("positionY").isEmpty())) {
-                segmentToUpdate.setPositionY(positionY);
-            }
-            if (scale != null && (keyframes == null || !keyframes.containsKey("scale") || keyframes.get("scale").isEmpty())) {
-                segmentToUpdate.setScale(scale);
-            }
-            if (opacity != null && (keyframes == null || !keyframes.containsKey("opacity") || keyframes.get("opacity").isEmpty())) {
-                segmentToUpdate.setOpacity(opacity);
-            }
-            if (rotation != null) {
-                segmentToUpdate.setRotation(rotation);
-            }
-            if (layer != null) {
-                segmentToUpdate.setLayer(layer);
-                timelineOrLayerChanged = true;
-            }
-            if (timelineStartTime != null) {
-                timelineStartTime = roundToThreeDecimals(timelineStartTime);
-                segmentToUpdate.setTimelineStartTime(timelineStartTime);
-                timelineOrLayerChanged = true;
-            }
-            if (timelineEndTime != null) {
-                timelineEndTime = roundToThreeDecimals(timelineEndTime);
-                segmentToUpdate.setTimelineEndTime(timelineEndTime);
-                timelineOrLayerChanged = true;
-            }
-            if (startTime != null) {
-                startTime = roundToThreeDecimals(startTime);
-                segmentToUpdate.setStartTime(Math.max(0, startTime));
-            }
-            if (endTime != null) {
-                endTime = roundToThreeDecimals(endTime);
-                segmentToUpdate.setEndTime(endTime);
-                double originalVideoDuration = getVideoDuration(r2Path); // Use B2 path
-                if (endTime > originalVideoDuration) {
-                    segmentToUpdate.setEndTime(roundToThreeDecimals(originalVideoDuration));
-                }
-            }
-            if (cropL != null) segmentToUpdate.setCropL(cropL);
-            if (cropR != null) segmentToUpdate.setCropR(cropR);
-            if (cropT != null) segmentToUpdate.setCropT(cropT);
-            if (cropB != null) segmentToUpdate.setCropB(cropB);
-
-            // Adjust timelineEndTime based on speed
-            double newStartTime = startTime != null ? startTime : segmentToUpdate.getStartTime();
-            double newEndTime = endTime != null ? endTime : segmentToUpdate.getEndTime();
-            double newClipDuration = roundToThreeDecimals(newEndTime - newStartTime);
-            double effectiveSpeed = speed != null ? speed : (originalSpeed != null ? originalSpeed : 1.0);
-
-            if (speed != null && speed > originalSpeed && originalSpeed >= 1.0) {
-                double newTimelineDuration = roundToThreeDecimals(newClipDuration / effectiveSpeed);
-                if (timelineEndTime == null) {
-                    segmentToUpdate.setTimelineEndTime(roundToThreeDecimals(segmentToUpdate.getTimelineStartTime() + newTimelineDuration));
-                } else {
-                    double providedTimelineDuration = roundToThreeDecimals(timelineEndTime - segmentToUpdate.getTimelineStartTime());
-                    if (Math.abs(providedTimelineDuration - newTimelineDuration) > 0.001) {
-                        segmentToUpdate.setTimelineEndTime(roundToThreeDecimals(segmentToUpdate.getTimelineStartTime() + newTimelineDuration));
-                    }
-                }
-            } else {
-                if (timelineEndTime == null && (startTime != null || endTime != null)) {
-                    double newTimelineDuration = roundToThreeDecimals(newClipDuration / effectiveSpeed);
-                    segmentToUpdate.setTimelineEndTime(roundToThreeDecimals(segmentToUpdate.getTimelineStartTime() + newTimelineDuration));
-                }
-            }
-
-            // Validate timeline position
-            timelineState.getSegments().remove(segmentToUpdate);
-            boolean positionAvailable = timelineState.isTimelinePositionAvailable(
-                    segmentToUpdate.getTimelineStartTime(),
-                    segmentToUpdate.getTimelineEndTime(),
-                    segmentToUpdate.getLayer());
-            timelineState.getSegments().add(segmentToUpdate);
-
-            if (!positionAvailable) {
-                segmentToUpdate.setTimelineStartTime(originalTimelineStartTime);
-                segmentToUpdate.setTimelineEndTime(originalTimelineEndTime);
-                segmentToUpdate.setStartTime(originalStartTime);
-                segmentToUpdate.setEndTime(originalEndTime);
-                segmentToUpdate.setLayer(originalLayer);
-                segmentToUpdate.setCropL(originalCropL);
-                segmentToUpdate.setCropR(originalCropR);
-                segmentToUpdate.setCropT(originalCropT);
-                segmentToUpdate.setCropB(originalCropB);
-                segmentToUpdate.setSpeed(originalSpeed);
-                segmentToUpdate.setRotation(originalRotation);
-                throw new RuntimeException("Timeline position overlaps with an existing segment in layer " + segmentToUpdate.getLayer());
-            }
-
-            if (timelineOrLayerChanged) {
-                updateAssociatedTransitions(
+        while (attempt < maxRetries) {
+            try {
+                doUpdateVideoSegment(
                         sessionId,
                         segmentId,
-                        segmentToUpdate.getLayer(),
-                        segmentToUpdate.getTimelineStartTime(),
-                        segmentToUpdate.getTimelineEndTime()
+                        positionX,
+                        positionY,
+                        scale,
+                        opacity,
+                        timelineStartTime,
+                        layer,
+                        timelineEndTime,
+                        startTime,
+                        endTime,
+                        cropL,
+                        cropR,
+                        cropT,
+                        cropB,
+                        speed,
+                        rotation,
+                        keyframes
                 );
+                logger.info("Successfully updated video segment: sessionId={}, segmentId={}", sessionId, segmentId);
+                return;
+            } catch (OptimisticLockException e) {
+                attempt++;
+                if (attempt >= maxRetries) {
+                    logger.error("Failed to update video segment after {} retries: sessionId={}, segmentId={}", maxRetries, sessionId, segmentId, e);
+                    throw new RuntimeException("Failed to update video segment due to concurrent modification", e);
+                }
+                logger.warn("Optimistic lock exception on attempt {}/{} for sessionId={}, segmentId={}. Retrying...", attempt, maxRetries, sessionId, segmentId);
+                try {
+                    Thread.sleep(100 * attempt); // Backoff
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted during retry", ie);
+                }
             }
+        }
+    }
 
-            saveTimelineState(sessionId, timelineState);
-        }
-        catch (OptimisticLockException e) {
-            attempt++;
-            if (attempt >= maxRetries) {
-                logger.error("Failed to update video segment after {} retries: sessionId={}, segmentId={}", maxRetries, sessionId, segmentId, e);
-                throw new RuntimeException("Failed to update segment due to concurrent modification", e);
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    private void doUpdateVideoSegment(
+            String sessionId,
+            String segmentId,
+            Integer positionX,
+            Integer positionY,
+            Double scale,
+            Double opacity,
+            Double timelineStartTime,
+            Integer layer,
+            Double timelineEndTime,
+            Double startTime,
+            Double endTime,
+            Double cropL,
+            Double cropR,
+            Double cropT,
+            Double cropB,
+            Double speed,
+            Double rotation,
+            Map<String, List<Keyframe>> keyframes
+    ) throws IOException, InterruptedException {
+        Project project = getProjectBySession(sessionId);
+        TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
+        VideoSegment segmentToUpdate = timelineState.getSegments().stream()
+                .filter(segment -> segment.getId().equals(segmentId))
+                .findFirst()
+                .orElseThrow(() -> {
+                    logger.error("Video segment not found in transaction: segmentId={}", segmentId);
+                    return new RuntimeException("No segment found with ID: " + segmentId);
+                });
+
+        double originalTimelineStartTime = segmentToUpdate.getTimelineStartTime();
+        double originalTimelineEndTime = segmentToUpdate.getTimelineEndTime();
+        double originalStartTime = segmentToUpdate.getStartTime();
+        double originalEndTime = segmentToUpdate.getEndTime();
+        int originalLayer = segmentToUpdate.getLayer();
+        Double originalCropL = segmentToUpdate.getCropL();
+        Double originalCropR = segmentToUpdate.getCropR();
+        Double originalCropT = segmentToUpdate.getCropT();
+        Double originalCropB = segmentToUpdate.getCropB();
+        Double originalSpeed = segmentToUpdate.getSpeed();
+        Double originalRotation = segmentToUpdate.getRotation();
+        boolean timelineOrLayerChanged = false;
+
+        // Handle keyframes
+        if (keyframes != null && !keyframes.isEmpty()) {
+            for (Map.Entry<String, List<Keyframe>> entry : keyframes.entrySet()) {
+                String property = entry.getKey();
+                List<Keyframe> kfs = entry.getValue();
+                segmentToUpdate.getKeyframes().remove(property);
+                if (!kfs.isEmpty()) {
+                    for (Keyframe kf : kfs) {
+                        kf.setTime(roundToThreeDecimals(kf.getTime()));
+                        segmentToUpdate.addKeyframe(property, kf);
+                    }
+                }
+                switch (property) {
+                    case "positionX":
+                        if (kfs.isEmpty()) segmentToUpdate.setPositionX(positionX);
+                        else segmentToUpdate.setPositionX(null);
+                        break;
+                    case "positionY":
+                        if (kfs.isEmpty()) segmentToUpdate.setPositionY(positionY);
+                        else segmentToUpdate.setPositionY(null);
+                        break;
+                    case "scale":
+                        if (kfs.isEmpty()) segmentToUpdate.setScale(scale);
+                        else segmentToUpdate.setScale(null);
+                        break;
+                    case "opacity":
+                        if (kfs.isEmpty()) segmentToUpdate.setOpacity(opacity);
+                        else segmentToUpdate.setOpacity(null);
+                        break;
+                }
             }
-            logger.warn("Optimistic lock exception on attempt {}/{} for sessionId={}, segmentId={}. Retrying...", attempt, maxRetries, sessionId, segmentId);
-            try {
-                Thread.sleep(100 * attempt); // Backoff to reduce contention
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("Interrupted during retry", ie);
-            }
+        } else {
+            segmentToUpdate.getKeyframes().clear();
+            if (positionX != null) segmentToUpdate.setPositionX(positionX);
+            if (positionY != null) segmentToUpdate.setPositionY(positionY);
+            if (scale != null) segmentToUpdate.setScale(scale);
+            if (opacity != null) segmentToUpdate.setOpacity(opacity);
+            if (rotation != null) segmentToUpdate.setRotation(rotation);
         }
+
+        // Update non-keyframed properties
+        if (positionX != null && (keyframes == null || !keyframes.containsKey("positionX") || keyframes.get("positionX").isEmpty())) {
+            segmentToUpdate.setPositionX(positionX);
+        }
+        if (positionY != null && (keyframes == null || !keyframes.containsKey("positionY") || keyframes.get("positionY").isEmpty())) {
+            segmentToUpdate.setPositionY(positionY);
+        }
+        if (scale != null && (keyframes == null || !keyframes.containsKey("scale") || keyframes.get("scale").isEmpty())) {
+            segmentToUpdate.setScale(scale);
+        }
+        if (opacity != null && (keyframes == null || !keyframes.containsKey("opacity") || keyframes.get("opacity").isEmpty())) {
+            segmentToUpdate.setOpacity(opacity);
+        }
+        if (rotation != null) {
+            segmentToUpdate.setRotation(rotation);
+        }
+        if (layer != null) {
+            segmentToUpdate.setLayer(layer);
+            timelineOrLayerChanged = true;
+        }
+        if (timelineStartTime != null) {
+            timelineStartTime = roundToThreeDecimals(timelineStartTime);
+            segmentToUpdate.setTimelineStartTime(timelineStartTime);
+            timelineOrLayerChanged = true;
+        }
+        if (startTime != null) {
+            startTime = roundToThreeDecimals(startTime);
+            segmentToUpdate.setStartTime(Math.max(0, startTime));
+        }
+        if (endTime != null) {
+            endTime = roundToThreeDecimals(endTime);
+            segmentToUpdate.setEndTime(endTime);
+        }
+        if (cropL != null) segmentToUpdate.setCropL(cropL);
+        if (cropR != null) segmentToUpdate.setCropR(cropR);
+        if (cropT != null) segmentToUpdate.setCropT(cropT);
+        if (cropB != null) segmentToUpdate.setCropB(cropB);
+        if (speed != null) {
+            segmentToUpdate.setSpeed(speed);
+        }
+
+        // Adjust timelineEndTime based on speed and clip duration
+        double newStartTime = startTime != null ? startTime : segmentToUpdate.getStartTime();
+        double newEndTime = endTime != null ? endTime : segmentToUpdate.getEndTime();
+        double newClipDuration = roundToThreeDecimals(newEndTime - newStartTime);
+        double effectiveSpeed = speed != null ? speed : (originalSpeed != null ? originalSpeed : 1.0);
+
+        if (timelineEndTime != null) {
+            timelineEndTime = roundToThreeDecimals(timelineEndTime);
+            segmentToUpdate.setTimelineEndTime(timelineEndTime);
+            timelineOrLayerChanged = true;
+        } else if (startTime != null || endTime != null || speed != null) {
+            double newTimelineDuration = roundToThreeDecimals(newClipDuration / effectiveSpeed);
+            segmentToUpdate.setTimelineEndTime(roundToThreeDecimals(segmentToUpdate.getTimelineStartTime() + newTimelineDuration));
+            timelineOrLayerChanged = true;
+        }
+
+        // Validate timeline position
+        timelineState.getSegments().remove(segmentToUpdate);
+        boolean positionAvailable = timelineState.isTimelinePositionAvailable(
+                segmentToUpdate.getTimelineStartTime(),
+                segmentToUpdate.getTimelineEndTime(),
+                segmentToUpdate.getLayer());
+        timelineState.getSegments().add(segmentToUpdate);
+
+        if (!positionAvailable) {
+            logger.warn("Timeline position overlap: segmentId={}, layer={}, timelineStart={}, timelineEnd={}",
+                    segmentId, segmentToUpdate.getLayer(), segmentToUpdate.getTimelineStartTime(), segmentToUpdate.getTimelineEndTime());
+            segmentToUpdate.setTimelineStartTime(originalTimelineStartTime);
+            segmentToUpdate.setTimelineEndTime(originalTimelineEndTime);
+            segmentToUpdate.setStartTime(originalStartTime);
+            segmentToUpdate.setEndTime(originalEndTime);
+            segmentToUpdate.setLayer(originalLayer);
+            segmentToUpdate.setCropL(originalCropL);
+            segmentToUpdate.setCropR(originalCropR);
+            segmentToUpdate.setCropT(originalCropT);
+            segmentToUpdate.setCropB(originalCropB);
+            segmentToUpdate.setSpeed(originalSpeed);
+            segmentToUpdate.setRotation(originalRotation);
+            throw new RuntimeException("Timeline position overlaps with an existing segment in layer " + segmentToUpdate.getLayer());
+        }
+
+        if (timelineOrLayerChanged) {
+            updateAssociatedTransitions(
+                    sessionId,
+                    segmentId,
+                    segmentToUpdate.getLayer(),
+                    segmentToUpdate.getTimelineStartTime(),
+                    segmentToUpdate.getTimelineEndTime()
+            );
+        }
+
+        saveTimelineState(sessionId, timelineState);
     }
 
     // Private method for internal use with B2 paths
@@ -1933,27 +2164,38 @@ public class VideoEditingService {
         String imagePath;
 
         if (isElement) {
-            GlobalElement globalElement = globalElementRepository.findByFileName(imageFileName)
-                    .orElseThrow(() -> new RuntimeException("Global element not found with filename: " + imageFileName));
-            Map<String, String> jsonData = objectMapper.readValue(
-                    globalElement.getGlobalElementJson(),
-                    new TypeReference<Map<String, String>>() {}
-            );
-            imagePath = jsonData.get("imagePath"); // e.g., elements/filename.png
-            logger.info("Global element found: imagePath={}", imagePath);
+            logger.debug("Searching for global element: imageFileName={}", imageFileName);
+            try {
+                GlobalElement globalElement = globalElementRepository.findByFileName(imageFileName)
+                        .orElseThrow(() -> new RuntimeException("Global element not found with filename: " + imageFileName));
+                logger.info("Global element found: id={}, globalElementJson={}", globalElement.getId(), globalElement.getGlobalElementJson());
 
-            if (!cloudflareR2Service.fileExists(imagePath)) {
-                logger.error("Global element not found in R2: {}", imagePath);
-                throw new IOException("Global element not found in R2: " + imagePath);
-            }
+                Map<String, String> jsonData = objectMapper.readValue(
+                        globalElement.getGlobalElementJson(),
+                        new TypeReference<Map<String, String>>() {}
+                );
+                imagePath = jsonData.get("imagePath");
+                logger.info("Extracted imagePath: {}", imagePath);
 
-            Project project = projectRepository.findById(projectId)
-                    .orElseThrow(() -> new RuntimeException("Project not found with ID: " + projectId));
-            if (!project.getUser().getId().equals(user.getId())) {
-                throw new RuntimeException("Unauthorized to modify this project");
+                if (!cloudflareR2Service.fileExists(imagePath)) {
+                    logger.error("Global element not found in R2: imagePath={}", imagePath);
+                    throw new IOException("Global element not found in R2: " + imagePath);
+                }
+
+                Project project = projectRepository.findById(projectId)
+                        .orElseThrow(() -> new RuntimeException("Project not found with ID: " + projectId));
+                if (!project.getUser().getId().equals(user.getId())) {
+                    throw new RuntimeException("Unauthorized to modify this project");
+                }
+                addElement(project, imagePath, imageFileName);
+            } catch (RuntimeException e) {
+                logger.error("Failed to process global element: imageFileName={}, error={}", imageFileName, e.getMessage(), e);
+                throw e;
+            } catch (IOException e) {
+                logger.error("JSON parsing or R2 error for global element: imageFileName={}, error={}", imageFileName, e.getMessage(), e);
+                throw e;
             }
-            addElement(project, imagePath, imageFileName);
-        }  else {
+        } else {
             // Handle project image
             Project project = projectRepository.findById(projectId)
                     .orElseThrow(() -> new RuntimeException("Project not found with ID: " + projectId));
@@ -1982,7 +2224,7 @@ public class VideoEditingService {
     }
     public void addImageToTimeline(
             String sessionId,
-            String imagePath, // This is the R2 path, e.g., image/projects/19/...
+            String imagePath, // This is the R2 path, e.g., elements/filename.png or image/projects/19/...
             int layer,
             double timelineStartTime,
             Double timelineEndTime,
@@ -1993,13 +2235,13 @@ public class VideoEditingService {
             Map<String, String> filters,
             boolean isElement,
             Double rotation
-    ) throws IOException { // Changed to throw IOException for consistency
+    ) throws IOException {
         Project project = getProjectBySession(sessionId);
         TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
 
         // Validate R2 path
-        if (!isElement && !cloudflareR2Service.fileExists(imagePath)) {
-            logger.error("Image file not found in R2: bucket={}, path={}", imagePath);
+        if (!cloudflareR2Service.fileExists(imagePath)) {
+            logger.error("Image file not found in R2: path={}", imagePath);
             throw new IOException("Image file not found in R2: " + imagePath);
         }
 
@@ -2008,23 +2250,24 @@ public class VideoEditingService {
         String localRelativePath = "temp/images/" + localFileName;
         File localFile = new File(baseDir, localRelativePath);
 
-        // Download from R2 if not a global element
-        if (!isElement) {
-            logger.info("Downloading image from R2: bucket={}, path={} to {}",  imagePath, localFile.getAbsolutePath());
-            try {
-                localFile.getParentFile().mkdirs();
-                cloudflareR2Service.downloadFile(imagePath, localFile.getAbsolutePath());
-                logger.info("Downloaded image to: {}", localFile.getAbsolutePath());
-            } catch (IOException e) {
-                logger.error("Failed to download image from R2: bucket={}, path={}, error={}",  imagePath, e.getMessage(), e);
-                throw new IOException("Failed to download image from R2: " + imagePath, e);
+        // Download from R2
+        logger.info("Downloading image from R2: path={} to localPath={}", imagePath, localFile.getAbsolutePath());
+        try {
+            // Ensure parent directory exists
+            localFile.getParentFile().mkdirs();
+            // Download file from R2
+            cloudflareR2Service.downloadFile(imagePath, localFile.getAbsolutePath());
+            logger.info("Successfully downloaded image to: {}", localFile.getAbsolutePath());
+
+            // Validate downloaded file
+            if (!localFile.exists() || !localFile.isFile() || localFile.length() == 0) {
+                logger.error("Downloaded file is invalid: localPath={}, exists={}, isFile={}, size={}",
+                        localFile.getAbsolutePath(), localFile.exists(), localFile.isFile(), localFile.length());
+                throw new IOException("Downloaded image file is invalid: " + localFile.getAbsolutePath());
             }
-        } else {
-            // For global elements, ensure the file exists locally
-            if (!localFile.exists()) {
-                logger.error("Global element file not found locally: {}", localFile.getAbsolutePath());
-                throw new IOException("Global element file not found: " + localFile.getAbsolutePath());
-            }
+        } catch (IOException e) {
+            logger.error("Failed to download image from R2: path={}, error={}", imagePath, e.getMessage(), e);
+            throw new IOException("Failed to download image from R2: " + imagePath, e);
         }
 
         // Round timeline times to three decimal places
@@ -2042,7 +2285,7 @@ public class VideoEditingService {
 
         ImageSegment imageSegment = new ImageSegment();
         imageSegment.setId(UUID.randomUUID().toString());
-        imageSegment.setImagePath(imagePath); // Store R2 path, not local path
+        imageSegment.setImagePath(imagePath); // Store R2 path
         imageSegment.setLayer(layer);
         imageSegment.setPositionX(positionX != null ? positionX : 0);
         imageSegment.setPositionY(positionY != null ? positionY : 0);
@@ -2055,7 +2298,7 @@ public class VideoEditingService {
         imageSegment.setCropL(0.0);
         imageSegment.setCropR(0.0);
         imageSegment.setCropT(0.0);
-        imageSegment.setRotation(rotation);
+        imageSegment.setRotation(rotation != null ? rotation : 0.0);
 
         try {
             BufferedImage img = ImageIO.read(localFile);
@@ -2078,7 +2321,7 @@ public class VideoEditingService {
 
         timelineState.getImageSegments().add(imageSegment);
         saveTimelineState(sessionId, timelineState);
-        logger.info("Added image segment to timeline: projectId={}, r2Path={}", project.getId(), imagePath);
+        logger.info("Added image segment to timeline: projectId={}, r2Path={}, isElement={}", project.getId(), imagePath, isElement);
 
         // Clean up temporary file
         try {
@@ -4515,9 +4758,12 @@ public class VideoEditingService {
 
         // Draw text with border (stroke) and letter spacing
         String alignment = ts.getAlignment() != null ? ts.getAlignment().toLowerCase() : "center";
-        // Center text vertically within contentHeight, accounting for background height
+// Center text vertically within contentHeight, accounting for background height
         int textYStart = bgBorderWidth + textBorderWidth + (contentHeight - textBlockHeight) / 2 + fm.getAscent();
         int y = textYStart;
+
+        FontRenderContext frc = g2d.getFontRenderContext();
+
         for (String line : lines) {
             // Calculate line width with letter spacing
             int lineWidth = 0;
@@ -4527,6 +4773,7 @@ public class VideoEditingService {
                     lineWidth += (int) scaledLetterSpacing;
                 }
             }
+
             // Calculate starting x position based on alignment
             int x;
             if (alignment.equals("left")) {
@@ -4536,26 +4783,40 @@ public class VideoEditingService {
             } else { // right
                 x = bgBorderWidth + textBorderWidth + contentWidth - lineWidth;
             }
-            // Draw each character with letter spacing
+
+            // Draw text border (stroke) and fill using the same positioning system
+            if (textBorderColor != null && textBorderWidth > 0) {
+                float textBorderOpacity = ts.getTextBorderOpacity() != null ? ts.getTextBorderOpacity().floatValue() : 1.0f;
+                g2d.setColor(new Color(textBorderColor.getRed(), textBorderColor.getGreen(), textBorderColor.getBlue(), (int) (textBorderOpacity * 255)));
+                g2d.setStroke(new BasicStroke((float) textBorderWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+
+                // Create combined area for all characters in the line
+                Area combinedArea = new Area();
+                int currentX = x;
+
+                for (int i = 0; i < line.length(); i++) {
+                    char c = line.charAt(i);
+                    TextLayout charLayout = new TextLayout(String.valueOf(c), font, frc);
+                    // Use the same baseline positioning as drawString
+                    Shape charShape = charLayout.getOutline(AffineTransform.getTranslateInstance(currentX, y));
+                    combinedArea.add(new Area(charShape));
+                    currentX += fm.charWidth(c) + (int) scaledLetterSpacing;
+                }
+
+                // Draw the stroke
+                g2d.draw(combinedArea);
+            }
+
+            // Draw text fill using exactly the same positioning
+            g2d.setColor(fontColor);
             int currentX = x;
             for (int i = 0; i < line.length(); i++) {
                 char c = line.charAt(i);
-                if (textBorderColor != null && textBorderWidth > 0) {
-                    // Draw text border (stroke)
-                    float textBorderOpacity = ts.getTextBorderOpacity() != null ? ts.getTextBorderOpacity().floatValue() : 1.0f;
-                    g2d.setColor(new Color(textBorderColor.getRed(), textBorderColor.getGreen(), textBorderColor.getBlue(), (int) (textBorderOpacity * 255)));
-                    g2d.setStroke(new BasicStroke((float) textBorderWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-                    FontRenderContext frc = g2d.getFontRenderContext();
-                    TextLayout textLayout = new TextLayout(String.valueOf(c), font, frc);
-                    Shape shape = textLayout.getOutline(AffineTransform.getTranslateInstance(currentX, y));
-                    g2d.draw(shape);
-                }
-                // Draw text fill
-                g2d.setColor(fontColor);
                 g2d.drawString(String.valueOf(c), currentX, y);
                 currentX += fm.charWidth(c) + (int) scaledLetterSpacing;
             }
-            y += lineHeight; // Use computed lineHeight for consistent spacing
+
+            y += lineHeight;
         }
 
         g2d.dispose();
@@ -4862,6 +5123,22 @@ public class VideoEditingService {
             fontMap.put("Comic Sans MS", "comic.ttf");
             fontMap.put("Impact", "impact.ttf");
             fontMap.put("Tahoma", "tahoma.ttf");
+
+            // Arial variants
+            fontMap.put("Arial Bold", "arialbd.ttf");
+            fontMap.put("Arial Italic", "ariali.ttf");
+            fontMap.put("Arial Bold Italic", "arialbi.ttf");
+            fontMap.put("Arial Black", "ariblk.ttf");
+
+            // Georgia variants
+            fontMap.put("Georgia Bold", "georgiab.ttf");
+            fontMap.put("Georgia Italic", "georgiai.ttf");
+            fontMap.put("Georgia Bold Italic", "georgiaz.ttf");
+
+            // Times New Roman variants
+            fontMap.put("Times New Roman Bold", "timesbd.ttf");
+            fontMap.put("Times New Roman Italic", "timesi.ttf");
+            fontMap.put("Times New Roman Bold Italic", "timesbi.ttf");
 
             // Alumni Sans Pinstripe
             fontMap.put("Alumni Sans Pinstripe", "AlumniSansPinstripe-Regular.ttf");

@@ -1221,7 +1221,7 @@ public class ProjectController {
             response.put("volume", addedAudioSegment.getVolume());
             response.put("audioPath", addedAudioSegment.getAudioPath());
             response.put("waveformJsonPath", addedAudioSegment.getWaveformJsonPath());
-            response.put("isExtracted", addedAudioSegment.isExtracted());
+            response.put("extracted", addedAudioSegment.isExtracted());
             response.put("keyframes", addedAudioSegment.getKeyframes() != null ? addedAudioSegment.getKeyframes() : new HashMap<>());
 
             return ResponseEntity.ok(response);
@@ -2370,4 +2370,30 @@ public class ProjectController {
                     .body("Error removing segments: " + e.getMessage());
         }
     }
+
+    // New endpoint to check both R2 file existence and CDN availability
+    @GetMapping("/check-file-availability")
+    public ResponseEntity<Map<String, Boolean>> checkFileAvailability(
+            @RequestHeader("Authorization") String token,
+            @RequestParam String r2Path,
+            @RequestParam String cdnUrl) throws IOException {
+        try {
+            User user = getUserFromToken(token);
+            // Check if file exists in R2
+            boolean fileExists = cloudflareR2Service.fileExists(r2Path);
+            // Check if CDN URL is available
+            boolean cdnAvailable = cloudflareR2Service.isCdnUrlAvailable(cdnUrl);
+            Map<String, Boolean> response = new HashMap<>();
+            response.put("fileExists", fileExists);
+            response.put("cdnAvailable", cdnAvailable);
+            logger.debug("File availability check: r2Path={}, cdnUrl={}, fileExists={}, cdnAvailable={}",
+                    r2Path, cdnUrl, fileExists, cdnAvailable);
+            return ResponseEntity.ok(response);
+        } catch (RuntimeException e) {
+            logger.warn("Unauthorized access for file availability check: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(Map.of("fileExists", false, "cdnAvailable", false));
+        }
+    }
+
 }
