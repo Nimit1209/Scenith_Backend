@@ -3315,12 +3315,6 @@ public class VideoEditingService {
             Files.createDirectories(baseDirPath);
         }
 
-        // Create temp directory
-        Path tempDir = baseDirPath.resolve("temp").toAbsolutePath().normalize();
-        if (!Files.exists(tempDir)) {
-            Files.createDirectories(tempDir);
-        }
-
         double totalDuration = Math.max(
                 timelineState.getSegments().stream().mapToDouble(VideoSegment::getTimelineEndTime).max().orElse(0.0),
                 Math.max(
@@ -3340,7 +3334,7 @@ public class VideoEditingService {
         Map<String, String> videoInputIndices = new HashMap<>();
         Map<String, String> audioInputIndices = new HashMap<>();
         Map<String, String> textInputIndices = new HashMap<>();
-        List<File> tempFiles = new ArrayList<>(); // Track all temp files for cleanup
+        List<File> tempTextFiles = new ArrayList<>(); // Track only text PNG temp files
         int inputCount = 0;
 
         filterComplex.append("color=c=black:s=").append(canvasWidth).append("x").append(canvasHeight)
@@ -3348,18 +3342,12 @@ public class VideoEditingService {
 
         // Handle Video Segments
         for (VideoSegment vs : timelineState.getSegments()) {
-            String r2Path = vs.getSourceVideoPath();
-            String localFileName = vs.getId() + "_" + System.currentTimeMillis() + "_" + new File(r2Path).getName();
-            Path localPath = tempDir.resolve("videos").resolve(localFileName).toAbsolutePath().normalize();
-            Files.createDirectories(localPath.getParent());
-            logger.info("Downloading video from R2: {} to {}", r2Path, localPath);
-            cloudflareR2Service.downloadFile(r2Path, localPath.toString());
-            if (!Files.exists(localPath)) {
-                throw new IOException("Video file not downloaded: " + localPath);
-            }
-            tempFiles.add(localPath.toFile());
+            String r2Path = vs.getSourceVideoPath(); // e.g., videos/projects/96/Cropping.mp4
+            // Generate presigned URL for secure access
+            String videoUrl = cloudflareR2Service.generatePresignedUrl(r2Path, 3600); // 1-hour expiration
+            logger.info("Using video presigned URL: {}", videoUrl);
             command.add("-i");
-            command.add(localPath.toString());
+            command.add(videoUrl);
             videoInputIndices.put(vs.getId(), String.valueOf(inputCount));
             audioInputIndices.put(vs.getId(), String.valueOf(inputCount));
             inputCount++;
@@ -3367,42 +3355,31 @@ public class VideoEditingService {
 
         // Handle Image Segments
         for (ImageSegment is : timelineState.getImageSegments()) {
-            String r2Path = is.getImagePath();
-            String localFileName = is.getId() + "_" + System.currentTimeMillis() + "_" + new File(r2Path).getName();
-            Path localPath = tempDir.resolve("images").resolve(localFileName).toAbsolutePath().normalize();
-            Files.createDirectories(localPath.getParent());
+            String imagePath;
             if (!is.isElement()) {
-                logger.info("Downloading image from R2: {} to {}", r2Path, localPath);
-                cloudflareR2Service.downloadFile(r2Path, localPath.toString());
+                String r2Path = is.getImagePath(); // Assume this is an R2 path
+                imagePath = cloudflareR2Service.generatePresignedUrl(r2Path, 3600);
+                logger.info("Using image presigned URL: {}", imagePath);
             } else {
-                Path globalPath = Paths.get(globalElementsDirectory, new File(r2Path).getName()).toAbsolutePath().normalize();
-                Files.copy(globalPath, localPath, StandardCopyOption.REPLACE_EXISTING);
+                // For elements, use local file path from globalElementsDirectory
+                imagePath = Paths.get(globalElementsDirectory, new File(is.getImagePath()).getName())
+                        .toAbsolutePath().normalize().toString();
+                logger.info("Using global element path: {}", imagePath);
             }
-            if (!Files.exists(localPath)) {
-                throw new IOException("Image file not available: " + localPath);
-            }
-            tempFiles.add(localPath.toFile());
             command.add("-loop");
             command.add("1");
             command.add("-i");
-            command.add(localPath.toString());
+            command.add(imagePath);
             videoInputIndices.put(is.getId(), String.valueOf(inputCount++));
         }
 
         // Handle Audio Segments
         for (AudioSegment as : timelineState.getAudioSegments()) {
-            String r2Path = as.getAudioPath();
-            String localFileName = as.getId() + "_" + System.currentTimeMillis() + "_" + new File(r2Path).getName();
-            Path localPath = tempDir.resolve("audio").resolve(localFileName).toAbsolutePath().normalize();
-            Files.createDirectories(localPath.getParent());
-            logger.info("Downloading audio from R2: {} to {}", r2Path, localPath);
-            cloudflareR2Service.downloadFile(r2Path, localPath.toString());
-            if (!Files.exists(localPath)) {
-                throw new IOException("Audio file not downloaded: " + localPath);
-            }
-            tempFiles.add(localPath.toFile());
+            String r2Path = as.getAudioPath(); // e.g., audio/projects/96/extracted/...
+            String audioUrl = cloudflareR2Service.generatePresignedUrl(r2Path, 3600);
+            logger.info("Using audio presigned URL: {}", audioUrl);
             command.add("-i");
-            command.add(localPath.toString());
+            command.add(audioUrl);
             audioInputIndices.put(as.getId(), String.valueOf(inputCount++));
         }
 
@@ -3412,18 +3389,21 @@ public class VideoEditingService {
                 System.err.println("Skipping text segment " + ts.getId() + ": empty text");
                 continue;
             }
-            String textPngPath = generateTextPng(ts, tempDir.toFile(), canvasWidth, canvasHeight);
+            // Generate text PNG and store in baseDir
+            String textPngPath = generateTextPng(ts, baseDirPath.toFile(), canvasWidth, canvasHeight);
             Path textPngFile = Paths.get(textPngPath).toAbsolutePath().normalize();
             if (!Files.exists(textPngFile)) {
                 throw new IOException("Text PNG file not generated: " + textPngFile);
             }
-            tempFiles.add(textPngFile.toFile());
+            tempTextFiles.add(textPngFile.toFile());
             command.add("-loop");
             command.add("1");
             command.add("-i");
             command.add(textPngFile.toString());
             textInputIndices.put(ts.getId(), String.valueOf(inputCount++));
         }
+
+
         List<Object> allSegments = new ArrayList<>();
         allSegments.addAll(timelineState.getSegments());
         allSegments.addAll(timelineState.getImageSegments());
@@ -4578,15 +4558,15 @@ public class VideoEditingService {
         try {
             executeFFmpegCommand(command);
         } finally {
-            // Clean up all temporary files
-            for (File tempFile : tempFiles) {
+            // Clean up text PNG files only
+            for (File tempFile : tempTextFiles) {
                 try {
                     if (tempFile.exists()) {
                         Files.delete(tempFile.toPath());
-                        System.out.println("Deleted temporary file: " + tempFile.getAbsolutePath());
+                        System.out.println("Deleted temporary text file: " + tempFile.getAbsolutePath());
                     }
                 } catch (IOException e) {
-                    System.err.println("Failed to delete temporary file " + tempFile.getAbsolutePath() + ": " + e.getMessage());
+                    System.err.println("Failed to delete temporary text file " + tempFile.getAbsolutePath() + ": " + e.getMessage());
                 }
             }
         }

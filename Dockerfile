@@ -1,12 +1,13 @@
 # Use Amazon Corretto 21 as the base image
 FROM amazoncorretto:21
 
-# Install build tools, dependencies for FFmpeg, and debugging tools
+# Install build tools, dependencies for FFmpeg, debugging tools, and OpenSSL
 RUN yum update -y && \
     yum groupinstall -y "Development Tools" && \
     yum install -y wget tar gzip bzip2-devel nasm pkg-config cmake3 unzip \
                    fribidi-devel fontconfig-devel freetype-devel \
-                   iputils bind-utils mysql && \
+                   iputils bind-utils mysql \
+                   openssl openssl-devel && \
     ln -sf /usr/bin/cmake3 /usr/bin/cmake && \
     yum clean all
 
@@ -76,7 +77,7 @@ RUN cd /tmp/ffmpeg_sources && \
 # Install pkg-config development files
 RUN yum install -y pkgconfig
 
-# Build FFmpeg with x264, x265, and additional codecs
+# Build FFmpeg with x264, x265, additional codecs, and HTTPS support
 RUN cd /tmp/ffmpeg_sources && \
     wget https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.gz && \
     tar -xzf ffmpeg-7.1.1.tar.gz && \
@@ -92,8 +93,9 @@ RUN cd /tmp/ffmpeg_sources && \
         --enable-libfreetype \
         --enable-libmp3lame \
         --enable-libopus \
-        --extra-ldflags="-L/usr/local/lib" \
-        --extra-cflags="-I/usr/local/include" && \
+        --enable-openssl \
+        --extra-ldflags="-L/usr/local/lib -L/usr/lib64" \
+        --extra-cflags="-I/usr/local/include -I/usr/include" && \
     make -j$(nproc) && \
     make install && \
     ldconfig
