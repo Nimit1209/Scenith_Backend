@@ -1364,7 +1364,7 @@ public class VideoEditingService {
                                   Integer backgroundH, Integer backgroundW,
                                   Integer backgroundBorderRadius,
                                   String textBorderColor, Integer textBorderWidth, Double textBorderOpacity,
-                                  Double letterSpacing, Double lineSpacing, Double rotation) throws JsonProcessingException { // Added lineSpacing parameter
+                                  Double letterSpacing, Double lineSpacing, Double rotation) throws IOException { // Added lineSpacing parameter
         Project project = getProjectBySession(sessionId);
         TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
         timelineStartTime = roundToThreeDecimals(timelineStartTime);
@@ -1375,6 +1375,7 @@ public class VideoEditingService {
         }
 
         TextSegment textSegment = new TextSegment();
+        textSegment.setId(UUID.randomUUID().toString()); // Ensure unique ID
         textSegment.setText(text);
         textSegment.setLayer(layer);
         textSegment.setTimelineStartTime(timelineStartTime);
@@ -1403,6 +1404,31 @@ public class VideoEditingService {
         // Set line spacing
         textSegment.setLineSpacing(lineSpacing);
         textSegment.setRotation(rotation);
+
+        // Generate text PNG and upload to R2
+        File tempDir = new File(baseDir);
+        if (!tempDir.exists()) {
+            tempDir.mkdirs();
+        }
+        String tempPngPath = generateTextPng(textSegment, tempDir,
+                timelineState.getCanvasWidth() != null ? timelineState.getCanvasWidth() : 1920,
+                timelineState.getCanvasHeight() != null ? timelineState.getCanvasHeight() : 1080);
+        File tempPngFile = new File(tempPngPath);
+        if (!tempPngFile.exists()) {
+            throw new IOException("Failed to generate text PNG: " + tempPngPath);
+        }
+
+        // Use projectId instead of sessionId
+        String r2Path = String.format("text/projects/%d/%s.png", project.getId(), textSegment.getId());
+        textSegment.setR2Path(r2Path);
+        cloudflareR2Service.uploadFile(r2Path, tempPngFile);
+
+        // Clean up temporary PNG file
+        try {
+            Files.deleteIfExists(tempPngFile.toPath());
+        } catch (IOException e) {
+            logger.warn("Failed to delete temporary text PNG: {}", tempPngPath, e);
+        }
 
         timelineState.getTextSegments().add(textSegment);
         project.setTimelineState(objectMapper.writeValueAsString(timelineState));
@@ -1556,6 +1582,15 @@ public class VideoEditingService {
         int originalLayer = textSegment.getLayer();
         Double originalRotation = textSegment.getRotation();
         boolean timelineOrLayerChanged = false;
+        boolean textAppearanceChanged = false;
+
+        // Check if properties affecting PNG appearance have changed
+        if (text != null || fontFamily != null || scale != null || fontColor != null || backgroundColor != null ||
+                alignment != null || backgroundOpacity != null || backgroundBorderWidth != null || backgroundBorderColor != null ||
+                backgroundH != null || backgroundW != null || backgroundBorderRadius != null || textBorderColor != null ||
+                textBorderWidth != null || textBorderOpacity != null || letterSpacing != null || lineSpacing != null) {
+            textAppearanceChanged = true;
+        }
 
         // Handle keyframes
         if (keyframes != null && !keyframes.isEmpty()) {
@@ -1584,7 +1619,11 @@ public class VideoEditingService {
                         break;
                     case "scale":
                         if (kfs.isEmpty()) textSegment.setScale(scale);
-                        else textSegment.setScale(null);
+                        else {
+                            textSegment.setScale(null);
+
+                            textAppearanceChanged = true; // Scale keyframes affect PNG size
+                        }
                         break;
                 }
             }
@@ -1593,7 +1632,10 @@ public class VideoEditingService {
             if (positionX != null) textSegment.setPositionX(positionX);
             if (positionY != null) textSegment.setPositionY(positionY);
             if (opacity != null) textSegment.setOpacity(opacity);
-            if (scale != null) textSegment.setScale(scale);
+            if (scale != null) {
+                textSegment.setScale(scale);
+                textAppearanceChanged = true; // Scale change requires PNG regeneration
+            }
             if (rotation != null) textSegment.setRotation(rotation);
         }
 
@@ -1641,6 +1683,36 @@ public class VideoEditingService {
         if (textBorderOpacity != null) textSegment.setTextBorderOpacity(textBorderOpacity);
         if (letterSpacing != null) textSegment.setLetterSpacing(letterSpacing);
         if (lineSpacing != null) textSegment.setLineSpacing(lineSpacing);
+
+        // Regenerate and upload text PNG if appearance changed
+        if (textAppearanceChanged) {
+            File tempDir = new File(baseDir);
+            if (!tempDir.exists()) {
+                tempDir.mkdirs();
+            }
+            String tempPngPath = generateTextPng(textSegment, tempDir,
+                    timelineState.getCanvasWidth() != null ? timelineState.getCanvasWidth() : 1920,
+                    timelineState.getCanvasHeight() != null ? timelineState.getCanvasHeight() : 1080);
+            File tempPngFile = new File(tempPngPath);
+            if (!tempPngFile.exists()) {
+                throw new IOException("Failed to generate text PNG: " + tempPngPath);
+            }
+
+            String r2Path = textSegment.getR2Path();
+            if (r2Path == null) {
+                // Use projectId instead of sessionId
+                r2Path = String.format("text/projects/%d/%s.png", project.getId(), segmentId);
+                textSegment.setR2Path(r2Path);
+            }
+            cloudflareR2Service.uploadFile(r2Path, tempPngFile);
+
+            // Clean up temporary PNG file
+            try {
+                Files.deleteIfExists(tempPngFile.toPath());
+            } catch (IOException e) {
+                logger.warn("Failed to delete temporary text PNG: {}", tempPngPath, e);
+            }
+        }
 
         // Validate timeline position
         timelineState.getTextSegments().remove(textSegment);
@@ -3334,7 +3406,6 @@ public class VideoEditingService {
         Map<String, String> videoInputIndices = new HashMap<>();
         Map<String, String> audioInputIndices = new HashMap<>();
         Map<String, String> textInputIndices = new HashMap<>();
-        List<File> tempTextFiles = new ArrayList<>(); // Track only text PNG temp files
         int inputCount = 0;
 
         filterComplex.append("color=c=black:s=").append(canvasWidth).append("x").append(canvasHeight)
@@ -3389,20 +3460,23 @@ public class VideoEditingService {
                 System.err.println("Skipping text segment " + ts.getId() + ": empty text");
                 continue;
             }
-            // Generate text PNG and store in baseDir
-            String textPngPath = generateTextPng(ts, baseDirPath.toFile(), canvasWidth, canvasHeight);
-            Path textPngFile = Paths.get(textPngPath).toAbsolutePath().normalize();
-            if (!Files.exists(textPngFile)) {
-                throw new IOException("Text PNG file not generated: " + textPngFile);
+            String r2Path = ts.getR2Path();
+            if (r2Path == null) {
+                System.err.println("Skipping text segment " + ts.getId() + ": no R2 path");
+                continue;
             }
-            tempTextFiles.add(textPngFile.toFile());
+            if (!cloudflareR2Service.fileExists(r2Path)) {
+                logger.error("Text PNG not found in R2: r2Path={}", r2Path);
+                throw new IOException("Text PNG not found in R2: " + r2Path);
+            }
+            String textUrl = cloudflareR2Service.generatePresignedUrl(r2Path, 3600);
+            logger.info("Using text PNG presigned URL: {}", textUrl);
             command.add("-loop");
             command.add("1");
             command.add("-i");
-            command.add(textPngFile.toString());
+            command.add(textUrl);
             textInputIndices.put(ts.getId(), String.valueOf(inputCount++));
         }
-
 
         List<Object> allSegments = new ArrayList<>();
         allSegments.addAll(timelineState.getSegments());
@@ -4559,16 +4633,16 @@ public class VideoEditingService {
             executeFFmpegCommand(command);
         } finally {
             // Clean up text PNG files only
-            for (File tempFile : tempTextFiles) {
-                try {
-                    if (tempFile.exists()) {
-                        Files.delete(tempFile.toPath());
-                        System.out.println("Deleted temporary text file: " + tempFile.getAbsolutePath());
-                    }
-                } catch (IOException e) {
-                    System.err.println("Failed to delete temporary text file " + tempFile.getAbsolutePath() + ": " + e.getMessage());
-                }
-            }
+//            for (File tempFile : tempTextFiles) {
+//                try {
+//                    if (tempFile.exists()) {
+//                        Files.delete(tempFile.toPath());
+//                        System.out.println("Deleted temporary text file: " + tempFile.getAbsolutePath());
+//                    }
+//                } catch (IOException e) {
+//                    System.err.println("Failed to delete temporary text file " + tempFile.getAbsolutePath() + ": " + e.getMessage());
+//                }
+//            }
         }
 
         return absoluteOutputPath.toString();

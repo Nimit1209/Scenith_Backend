@@ -177,6 +177,15 @@ public class TextSegment implements Segment {
             propertyKeyframes.removeIf(kf -> Math.abs(kf.getTime() - time) < 0.0001);
         }
     }
+    private String r2Path; // Store the Cloudflare R2 path for the JSON file
+
+    public String getR2Path() {
+        return r2Path;
+    }
+
+    public void setR2Path(String r2Path) {
+        this.r2Path = r2Path;
+    }
 
     @Override
     public String getId() {
