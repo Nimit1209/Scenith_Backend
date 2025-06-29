@@ -4667,7 +4667,9 @@ public class VideoEditingService {
 
             filterComplex.append("[").append(inputIdx).append(":a]");
             filterComplex.append("atrim=").append(String.format("%.6f", sourceStart)).append(":").append(String.format("%.6f", sourceEnd)).append(",");
-            filterComplex.append("asetpts=PTS-STARTPTS+").append(String.format("%.6f", segmentStart)).append("/TB");
+            // Apply delay to align audio with timelineStartTime within the batch
+            filterComplex.append("adelay=").append(String.format("%.0f", segmentStart * 1000)).append("|").append(String.format("%.0f", segmentStart * 1000)).append(",");
+            filterComplex.append("asetpts=PTS-STARTPTS");
 
             List<Keyframe> volumeKeyframes = as.getKeyframes().getOrDefault("volume", new ArrayList<>());
             double defaultVolume = as.getVolume() != null ? as.getVolume() : 1.0;
@@ -4706,8 +4708,8 @@ public class VideoEditingService {
                         }
 
                         if (startTime < endTime) {
-                            double adjustedStartTime = (startTime) + segmentStart;
-                            double adjustedEndTime = (endTime) + segmentStart;
+                            double adjustedStartTime = startTime + segmentStart;
+                            double adjustedEndTime = endTime + segmentStart;
                             if (adjustedStartTime < batchDuration && adjustedEndTime > 0) {
                                 adjustedStartTime = Math.max(0, adjustedStartTime);
                                 adjustedEndTime = Math.min(batchDuration, adjustedEndTime);
