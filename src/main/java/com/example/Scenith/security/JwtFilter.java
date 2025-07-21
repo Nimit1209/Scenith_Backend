@@ -4,6 +4,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.apache.http.HttpStatus;
 import org.springframework.context.annotation.Profile;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -22,13 +23,34 @@ public class JwtFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
         String path = request.getRequestURI();
-        // Skip filter for /auth/** and public endpoints
-        if (path.startsWith("/auth/") || path.startsWith("/api/global-elements") ||
-                path.startsWith("/actuator/") || path.startsWith("/login/oauth2/")) {
+        String method = request.getMethod();
+
+        // Skip filter for OPTIONS requests (CORS preflight)
+        if ("OPTIONS".equalsIgnoreCase(method)) {
             filterChain.doFilter(request, response);
             return;
         }
 
+        // Skip filter for public endpoints
+        if (path.startsWith("/auth/") ||
+                path.startsWith("/api/global-elements") ||
+                path.startsWith("/actuator/") ||
+                path.startsWith("/login/oauth2/") ||
+                path.matches("/projects/\\d+/export") ||
+                path.equals("/project/export-links") ||
+                path.matches("/projects/\\d+/waveforms/.*") ||
+                path.matches("/projects/\\d+/images/.*") ||
+                path.matches("/projects/\\d+/audio/.*") ||
+                path.matches("/projects/\\d+/videos/.*") ||
+                path.matches("/image/projects/\\d+/.*") ||
+                path.matches("/audio/projects/\\d+/.*") ||
+                path.matches("/videos/projects/\\d+/.*") ||
+                path.startsWith("/videos/")) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
+        // Process JWT for authenticated endpoints
         String authHeader = request.getHeader("Authorization");
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
             String token = authHeader.substring(7);
@@ -46,9 +68,17 @@ public class JwtFilter extends OncePerRequestFilter {
                 // Set authentication in context
                 UsernamePasswordAuthenticationToken authToken =
                         new UsernamePasswordAuthenticationToken(email, null, null);
-                authToken.setDetails(role); // Store role in details for potential use
+                authToken.setDetails(role);
                 SecurityContextHolder.getContext().setAuthentication(authToken);
+            } else {
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                response.getWriter().write("Invalid JWT token");
+                return;
             }
+        } else {
+            response.setStatus(HttpStatus.SC_UNAUTHORIZED);
+            response.getWriter().write("Authorization header missing or invalid");
+            return;
         }
 
         filterChain.doFilter(request, response);
