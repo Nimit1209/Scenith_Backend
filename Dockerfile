@@ -165,11 +165,27 @@ ENV SPRING_PROFILES_ACTIVE=prod
 ENV SSL_CERT_DIR=/etc/pki/tls/certs
 ENV SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
 
+# Quick verification of key components
+RUN echo "Verifying installations..." && \
+    /usr/local/bin/ffmpeg -version | head -1 && \
+    /usr/local/bin/python3.11 --version && \
+    /usr/local/bin/python3.11 -c "import ssl; print('SSL module available')" && \
+    echo "Setup verification complete."
+
 # Set working directory
 WORKDIR /app
 
-# Copy the Python script
+# Create the expected directory structure for the Python script
+RUN mkdir -p /temp/scripts
+
+# Copy the Python script to the expected location
+COPY scripts/whisper_subtitle.py /temp/scripts/whisper_subtitle.py
+
+# Also copy to /app/scripts for backup
 COPY scripts/whisper_subtitle.py /app/scripts/whisper_subtitle.py
+
+# Make the Python script executable
+RUN chmod +x /temp/scripts/whisper_subtitle.py
 
 # Copy the .env file
 COPY .env /app/.env
@@ -180,5 +196,5 @@ COPY target/Scenith-0.0.1-SNAPSHOT.jar app.jar
 # Expose port 1000 (align with application-prod.properties)
 EXPOSE 1000
 
-# Run the application
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
+# Run the application with proper environment setup
+ENTRYPOINT ["sh", "-c", "export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:/usr/lib:/lib && echo 'Starting application...' && echo 'Environment check:' && ls -la /usr/local/bin/ffmpeg && ls -la /usr/local/bin/python3.11 && ls -la /temp/scripts/ && java $JAVA_OPTS -jar app.jar"]

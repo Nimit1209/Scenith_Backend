@@ -2362,4 +2362,66 @@ public class ProjectController {
         }
     }
 
+    @PostMapping("/{projectId}/subtitles")
+    public ResponseEntity<?> addAutoSubtitlesToTimeline(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long projectId,
+            @RequestParam String sessionId) {
+        try {
+            User user = getUserFromToken(token);
+            Project project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new RuntimeException("Project not found with ID: " + projectId));
+
+            if (!project.getUser().getId().equals(user.getId())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                        .body("Unauthorized to modify this project");
+            }
+
+            // Call the service method to add subtitles
+            videoEditingService.addAutoSubtitlesToTimeline(sessionId, projectId);
+
+            // Retrieve the updated timeline state
+            TimelineState timelineState = videoEditingService.getTimelineState(sessionId);
+            List<TextSegment> addedSubtitles = timelineState.getTextSegments().stream()
+                    .filter(t -> t.getLayer() == videoEditingService.findTopmostLayer(timelineState))
+                    .collect(Collectors.toList());
+
+            // Prepare response
+            List<Map<String, Object>> subtitleData = addedSubtitles.stream().map(t -> {
+                Map<String, Object> data = new HashMap<>();
+                data.put("textSegmentId", t.getId());
+                data.put("text", t.getText());
+                data.put("timelineStartTime", t.getTimelineStartTime());
+                data.put("timelineEndTime", t.getTimelineEndTime());
+                data.put("layer", t.getLayer());
+                data.put("positionX", t.getPositionX());
+                data.put("positionY", t.getPositionY());
+                data.put("fontFamily", t.getFontFamily());
+                data.put("fontColor", t.getFontColor());
+                data.put("backgroundColor", t.getBackgroundColor());
+                data.put("backgroundOpacity", t.getBackgroundOpacity());
+                data.put("scale", t.getScale());
+                data.put("alignment", t.getAlignment());
+                data.put("backgroundH", t.getBackgroundH());
+                data.put("backgroundW", t.getBackgroundW());
+                data.put("backgroundBorderRadius", t.getBackgroundBorderRadius());
+                data.put("letterSpacing", t.getLetterSpacing());
+                data.put("lineSpacing", t.getLineSpacing());
+                data.put("rotation", t.getRotation());
+                return data;
+            }).collect(Collectors.toList());
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("message", "Subtitles added successfully");
+            response.put("subtitles", subtitleData);
+
+            return ResponseEntity.ok(response);
+        } catch (IOException | InterruptedException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error adding subtitles: " + e.getMessage());
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(e.getMessage());
+        }
+    }
 }

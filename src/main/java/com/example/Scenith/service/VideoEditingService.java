@@ -12,6 +12,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.OptimisticLockException;
+import lombok.Data;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -39,6 +40,8 @@ import java.text.DecimalFormat;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -61,6 +64,12 @@ public class VideoEditingService {
     @Value("${ffprobe.path:/usr/bin/ffprobe}")
     private String ffprobePath;
 
+    @Value("${python.path:/usr/local/bin/python3}")
+    private String pythonPath;
+
+    @Value("${whisper.script.path:/app/scripts/whisper_subtitle.py}")
+    private String pythonScriptPath;
+
     public VideoEditingService(
             ProjectRepository projectRepository,
             ObjectMapper objectMapper,
@@ -71,6 +80,12 @@ public class VideoEditingService {
         this.objectMapper = objectMapper;
         this.globalElementRepository = globalElementRepository;
         this.cloudflareR2Service = cloudflareR2Service; // Updated
+    }
+    @Data
+    private static class Subtitle {
+        private double startTime;
+        private double endTime;
+        private String text;
     }
 
         // NEW: Helper method to round doubles to three decimal places
@@ -1737,6 +1752,332 @@ public class VideoEditingService {
         saveTimelineState(sessionId, timelineState);
     }
 
+    public void addAutoSubtitlesToTimeline(String sessionId, Long projectId) throws IOException, InterruptedException {
+        Project project = getProjectBySession(sessionId);
+        TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
+
+        List<AudioSegment> audioSegments = timelineState.getAudioSegments();
+        if (audioSegments.isEmpty()) {
+            throw new IOException("No audio segments found in the timeline");
+        }
+
+        int subtitleLayer = findTopmostLayer(timelineState);
+
+        for (AudioSegment audioSegment : audioSegments) {
+            // Mix audio segment into a temporary file
+            String mixedAudioPath = mixAudioSegments(Collections.singletonList(audioSegment), projectId);
+
+            // Generate subtitles using Whisper
+            List<Subtitle> subtitles = generateSubtitles(mixedAudioPath);
+            if (subtitles.isEmpty()) {
+                System.out.println("No subtitles generated for audio segment at " + audioSegment.getTimelineStartTime());
+                // Clean up temporary file
+                File mixedAudioFile = new File(mixedAudioPath);
+                if (mixedAudioFile.exists()) {
+                    mixedAudioFile.delete();
+                }
+                continue;
+            }
+
+            // Get audio segment's timeline boundaries
+            double timelineStart = audioSegment.getTimelineStartTime();
+            double timelineEnd = audioSegment.getTimelineEndTime();
+            double audioDuration = timelineEnd - timelineStart;
+
+            // Find the first valid subtitle start time to determine leading silence offset
+            double firstSubtitleStart = subtitles.stream()
+                    .filter(s -> s.getText() != null && !s.getText().trim().isEmpty() && s.getEndTime() > s.getStartTime())
+                    .map(Subtitle::getStartTime)
+                    .min(Double::compare)
+                    .orElse(0.0);
+
+            // Calculate the offset to align subtitles with the start of spoken content
+            double timeOffset = timelineStart - firstSubtitleStart;
+
+            // Process subtitles
+            for (Subtitle subtitle : subtitles) {
+                // Adjust subtitle timings with the calculated offset
+                double startTime = subtitle.getStartTime() + timeOffset;
+                double endTime = subtitle.getEndTime() + timeOffset;
+
+                // Constrain timings to audio segment boundaries
+                startTime = Math.max(timelineStart, startTime);
+                endTime = Math.min(timelineEnd, endTime);
+
+                // Skip invalid subtitles
+                if (endTime <= startTime || Double.isNaN(startTime) || Double.isNaN(endTime)) {
+                    System.out.println("Skipping subtitle at " + startTime + "s due to invalid duration");
+                    continue;
+                }
+
+                // Check for timeline position availability
+                if (!timelineState.isTimelinePositionAvailable(startTime, endTime, subtitleLayer)) {
+                    System.out.println("Skipping subtitle at " + startTime + "s due to overlap in layer " + subtitleLayer);
+                    continue;
+                }
+
+                // Create TextSegment
+                TextSegment textSegment = new TextSegment();
+                textSegment.setId(UUID.randomUUID().toString());
+                textSegment.setText(subtitle.getText().trim());
+                textSegment.setLayer(subtitleLayer);
+                textSegment.setTimelineStartTime(startTime);
+                textSegment.setTimelineEndTime(endTime);
+                textSegment.setFontFamily("Montserrat Alternates Black");
+                textSegment.setFontColor("black");
+                textSegment.setBackgroundColor("white");
+                textSegment.setBackgroundOpacity(1.0);
+                textSegment.setPositionX(0);
+                textSegment.setPositionY(350);
+                textSegment.setOpacity(1.0);
+                textSegment.setScale(1.25);
+                textSegment.setAlignment("center");
+                textSegment.setBackgroundH(50);
+                textSegment.setBackgroundW(50);
+                textSegment.setBackgroundBorderRadius(15);
+                textSegment.setBackgroundBorderWidth(0);
+                textSegment.setTextBorderWidth(0);
+                textSegment.setLetterSpacing(0.0);
+                textSegment.setLineSpacing(1.2);
+                textSegment.setRotation(0.0);
+
+                timelineState.getTextSegments().add(textSegment);
+            }
+
+            // Clean up temporary file
+            File mixedAudioFile = new File(mixedAudioPath);
+            if (mixedAudioFile.exists()) {
+                mixedAudioFile.delete();
+            }
+        }
+
+        project.setTimelineState(objectMapper.writeValueAsString(timelineState));
+        project.setLastModified(LocalDateTime.now());
+        projectRepository.save(project);
+    }
+
+    // Mix multiple audio segments into a single audio file
+    private String mixAudioSegments(List<AudioSegment> audioSegments, Long projectId) throws IOException, InterruptedException {
+        if (audioSegments.isEmpty()) {
+            logger.error("No audio segments provided for mixing: projectId={}", projectId);
+            throw new IOException("No audio segments provided for mixing");
+        }
+
+        File tempDir = new File(baseDir, "audio/temp/" + projectId);
+        if (!tempDir.exists() && !tempDir.mkdirs()) {
+            logger.error("Failed to create temporary directory: {}, projectId={}", tempDir.getAbsolutePath(), projectId);
+            throw new IOException("Failed to create temporary directory: " + tempDir.getAbsolutePath());
+        }
+        String mixedAudioPath = tempDir.getAbsolutePath() + File.separator + "mixed_" + System.currentTimeMillis() + ".mp3";
+        File mixedAudioFile = new File(mixedAudioPath);
+
+        List<String> command = new ArrayList<>();
+        command.add(ffmpegPath);
+        List<File> localAudioFiles = new ArrayList<>();
+        for (AudioSegment segment : audioSegments) {
+            String r2Path = segment.getAudioPath();
+            if (!cloudflareR2Service.fileExists(r2Path)) {
+                logger.error("Audio file not found in R2: {}, projectId={}", r2Path, projectId);
+                throw new IOException("Audio file not found in R2: " + r2Path);
+            }
+            String localFileName = new File(r2Path).getName();
+            String localRelativePath = "audio/temp/" + projectId + "/" + localFileName;
+            File localFile = new File(baseDir, localRelativePath);
+            if (!localFile.exists()) {
+                logger.info("Downloading audio from R2: {}, projectId={}", r2Path, projectId);
+                localFile.getParentFile().mkdirs();
+                cloudflareR2Service.downloadFile(r2Path, localFile.getAbsolutePath());
+            }
+            localAudioFiles.add(localFile);
+            command.add("-i");
+            command.add(localFile.getAbsolutePath());
+        }
+        command.add("-filter_complex");
+        StringBuilder filterComplex = new StringBuilder();
+        for (int i = 0; i < audioSegments.size(); i++) {
+            AudioSegment segment = audioSegments.get(i);
+            double startTime = segment.getStartTime();
+            double duration = segment.getEndTime() - segment.getStartTime();
+            if (duration <= 0) {
+                logger.error("Invalid duration for audio segment: {}, projectId={}", duration, projectId);
+                throw new IOException("Invalid duration for audio segment: " + duration);
+            }
+            filterComplex.append("[").append(i).append(":a]atrim=start=").append(startTime)
+                    .append(":duration=").append(duration)
+                    .append(",asetpts=PTS-STARTPTS")
+                    .append(",volume=").append(segment.getVolume() != null ? segment.getVolume() : 1.0)
+                    .append("[a").append(i).append("];");
+        }
+        filterComplex.append("[a0]");
+        for (int i = 1; i < audioSegments.size(); i++) {
+            filterComplex.append("[a").append(i).append("]");
+        }
+        filterComplex.append("amix=inputs=").append(audioSegments.size()).append(":duration=longest");
+        command.add(filterComplex.toString());
+        command.add("-y");
+        command.add(mixedAudioFile.getAbsolutePath());
+
+        ProcessBuilder pb = new ProcessBuilder(command);
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+        StringBuilder output = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
+            }
+        }
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            logger.error("FFmpeg audio mixing failed with exit code: {}, output: {}, projectId={}", exitCode, output.toString(), projectId);
+            throw new IOException("FFmpeg audio mixing failed with exit code: " + exitCode + ", output: " + output.toString());
+        }
+
+        if (!mixedAudioFile.exists()) {
+            logger.error("Mixed audio file was not created: {}, projectId={}", mixedAudioFile.getAbsolutePath(), projectId);
+            throw new IOException("Mixed audio file was not created: " + mixedAudioFile.getAbsolutePath());
+        }
+
+        // Clean up downloaded audio files
+        for (File localFile : localAudioFiles) {
+            try {
+                Files.deleteIfExists(localFile.toPath());
+            } catch (IOException e) {
+                logger.warn("Failed to delete temporary audio file: {}", localFile.getAbsolutePath(), e);
+            }
+        }
+
+        return mixedAudioPath;
+    }
+    // Generate subtitles using Whisper (local Python script)
+    private List<Subtitle> generateSubtitles(String audioPath) throws IOException, InterruptedException {
+        List<Subtitle> subtitles = new ArrayList<>();
+        File audioFile = new File(audioPath);
+        File scriptFile = new File(pythonScriptPath);
+
+        if (!scriptFile.exists()) {
+            throw new IOException("Python script not found: " + scriptFile.getAbsolutePath());
+        }
+        if (!audioFile.exists()) {
+            throw new IOException("Audio file not found: " + audioFile.getAbsolutePath());
+        }
+
+        // Get audio duration using FFmpeg
+        double audioDuration = getAudioDuration(audioFile);
+
+        List<String> command = new ArrayList<>();
+        command.add(pythonPath);
+        command.add(scriptFile.getAbsolutePath());
+        command.add(audioFile.getAbsolutePath());
+
+        System.out.println("Executing command: " + String.join(" ", command));
+
+        ProcessBuilder pb = new ProcessBuilder(command);
+        Process process = pb.start();
+
+        StringBuilder output = new StringBuilder();
+        StringBuilder errorOutput = new StringBuilder();
+        try (BufferedReader stdoutReader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+             BufferedReader stderrReader = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
+            String line;
+            while ((line = stdoutReader.readLine()) != null) {
+                output.append(line);
+                System.out.println("stdout: " + line);
+            }
+            while ((line = stderrReader.readLine()) != null) {
+                errorOutput.append(line).append("\n");
+                System.out.println("stderr: " + line);
+            }
+        }
+
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new IOException("Whisper transcription failed with exit code: " + exitCode + ", error: " + errorOutput.toString());
+        }
+
+        try {
+            if (output.length() == 0) {
+                throw new IOException("No output from Whisper script, stderr: " + errorOutput.toString());
+            }
+            List<Map<String, Object>> segments = objectMapper.readValue(
+                    output.toString(),
+                    new TypeReference<List<Map<String, Object>>>() {}
+            );
+            for (Map<String, Object> segment : segments) {
+                double startTime = ((Number) segment.get("start")).doubleValue();
+                double endTime = ((Number) segment.get("end")).doubleValue();
+                String text = (String) segment.get("text");
+
+                // Constrain timings to audio duration
+                startTime = Math.max(0, startTime);
+                endTime = Math.min(audioDuration, endTime);
+
+                if (endTime > startTime && text != null && !text.trim().isEmpty()) {
+                    Subtitle subtitle = new Subtitle();
+                    subtitle.setStartTime(startTime);
+                    subtitle.setEndTime(endTime);
+                    subtitle.setText(text.trim());
+                    subtitles.add(subtitle);
+                }
+            }
+        } catch (JsonProcessingException e) {
+            throw new IOException("Failed to parse Whisper output: " + e.getMessage() + ", output: " + output.toString());
+        }
+
+        return subtitles;
+    }
+
+    // Helper method to get audio duration using FFmpeg
+    private double getAudioDuration(File audioFile) throws IOException, InterruptedException {
+        List<String> command = new ArrayList<>();
+        command.add(ffmpegPath);
+        command.add("-i");
+        command.add(audioFile.getAbsolutePath());
+        command.add("-f");
+        command.add("null");
+        command.add("-");
+
+        ProcessBuilder pb = new ProcessBuilder(command);
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+        StringBuilder output = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
+            }
+        }
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new IOException("FFmpeg failed to get audio duration: " + output.toString());
+        }
+
+        // Parse duration from FFmpeg output (e.g., "Duration: 00:00:10.23")
+        Pattern pattern = Pattern.compile("Duration: (\\d{2}):(\\d{2}):(\\d{2}\\.\\d+)");
+        Matcher matcher = pattern.matcher(output.toString());
+        if (matcher.find()) {
+            int hours = Integer.parseInt(matcher.group(1));
+            int minutes = Integer.parseInt(matcher.group(2));
+            double seconds = Double.parseDouble(matcher.group(3));
+            return hours * 3600 + minutes * 60 + seconds;
+        }
+        throw new IOException("Could not parse audio duration from FFmpeg output");
+    }
+
+    // Find the topmost layer across all segment types
+    public int findTopmostLayer(TimelineState timelineState) {
+        int maxLayer = -1;
+        maxLayer = Math.max(maxLayer, timelineState.getSegments().stream()
+                .mapToInt(VideoSegment::getLayer)
+                .max().orElse(-1));
+        maxLayer = Math.max(maxLayer, timelineState.getImageSegments().stream()
+                .mapToInt(ImageSegment::getLayer)
+                .max().orElse(-1));
+        maxLayer = Math.max(maxLayer, timelineState.getTextSegments().stream()
+                .mapToInt(TextSegment::getLayer)
+                .max().orElse(-1));
+        return maxLayer + 1;
+    }
     public Project uploadAudioToProject(User user, Long projectId, MultipartFile[] audioFiles, String[] audioFileNames) throws IOException, InterruptedException {
         Project project = projectRepository.findById(projectId)
                 .orElseThrow(() -> new RuntimeException("Project not found with ID: " + projectId));
