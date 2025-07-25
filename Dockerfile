@@ -1,15 +1,21 @@
-# Use Amazon Corretto 21 as the base image
-FROM amazoncorretto:21
+# Use Amazon Linux 2 as the base image (as recommended)
+FROM amazonlinux:2
 
-# Install build tools, dependencies for FFmpeg, debugging tools, and OpenSSL
+# Install build tools, dependencies for FFmpeg, debugging tools, OpenSSL 1.1, and CA certificates
 RUN yum update -y && \
     yum groupinstall -y "Development Tools" && \
     yum install -y wget tar gzip bzip2-devel nasm pkg-config cmake3 unzip \
                    fribidi-devel fontconfig-devel freetype-devel \
                    iputils bind-utils mysql \
-                   openssl openssl-devel && \
+                   openssl11 openssl11-devel ca-certificates \
+                   zlib-devel libffi-devel sqlite-devel readline-devel && \
     ln -sf /usr/bin/cmake3 /usr/bin/cmake && \
     yum clean all
+
+# Add Amazon Corretto repository and install Java 21
+RUN rpm --import https://yum.corretto.aws/corretto.key && \
+    curl -L -o /etc/yum.repos.d/corretto.repo https://yum.corretto.aws/corretto.repo && \
+    yum install -y java-21-amazon-corretto java-21-amazon-corretto-devel
 
 # Create directory for source files
 RUN mkdir -p /tmp/ffmpeg_sources
@@ -77,12 +83,14 @@ RUN cd /tmp/ffmpeg_sources && \
 # Install pkg-config development files
 RUN yum install -y pkgconfig
 
-# Build FFmpeg with x264, x265, additional codecs, and HTTPS support
+# Build FFmpeg with x264, x265, additional codecs, and HTTPS support (using OpenSSL 1.1)
 RUN cd /tmp/ffmpeg_sources && \
     wget https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.gz && \
     tar -xzf ffmpeg-7.1.1.tar.gz && \
     cd ffmpeg-7.1.1 && \
     export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig" && \
+    export CFLAGS="-I/usr/include/openssl11" && \
+    export LDFLAGS="-L/usr/lib64/openssl11" && \
     ./configure \
         --prefix=/usr/local \
         --enable-gpl \
@@ -94,28 +102,74 @@ RUN cd /tmp/ffmpeg_sources && \
         --enable-libmp3lame \
         --enable-libopus \
         --enable-openssl \
-        --extra-ldflags="-L/usr/local/lib -L/usr/lib64" \
-        --extra-cflags="-I/usr/local/include -I/usr/include" && \
+        --extra-ldflags="-L/usr/local/lib -L/usr/lib64 -L/usr/lib64/openssl11" \
+        --extra-cflags="-I/usr/local/include -I/usr/include -I/usr/include/openssl11" && \
     make -j$(nproc) && \
     make install && \
     ldconfig
 
+# Build Python 3.11 with OpenSSL 1.1 support
+RUN cd /tmp && \
+    wget https://www.python.org/ftp/python/3.11.10/Python-3.11.10.tgz && \
+    tar -xzf Python-3.11.10.tgz && \
+    cd Python-3.11.10 && \
+    export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    export CPPFLAGS="-I/usr/include/openssl11" && \
+    export LDFLAGS="-L/usr/lib64/openssl11 -Wl,-rpath,/usr/lib64/openssl11" && \
+    export PKG_CONFIG_PATH="/usr/lib64/openssl11/pkgconfig:$PKG_CONFIG_PATH" && \
+    ./configure \
+        --prefix=/usr/local \
+        --enable-optimizations \
+        --enable-shared \
+        --with-openssl=/usr \
+        --with-openssl-rpath=auto \
+        --enable-loadable-sqlite-extensions && \
+    LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib make -j$(nproc) && \
+    LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib make altinstall && \
+    ldconfig && \
+    ln -sf /usr/local/bin/python3.11 /usr/local/bin/python3 && \
+    ln -sf /usr/local/bin/python3.11 /usr/local/bin/python && \
+    ln -sf /usr/local/bin/pip3.11 /usr/local/bin/pip3 && \
+    ln -sf /usr/local/bin/pip3.11 /usr/local/bin/pip && \
+    echo "Testing SSL module..." && \
+    LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib /usr/local/bin/python3.11 -c "import ssl; print('SSL module loaded successfully')"
+
+# Install Python packages for Whisper and other dependencies with compatible versions
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    echo "Verifying SSL module before pip install..." && \
+    /usr/local/bin/python3.11 -c "import ssl; print('SSL available, version:', ssl.OPENSSL_VERSION)" && \
+    echo "GCC version:" && gcc --version && \
+    /usr/local/bin/pip3.11 install --upgrade pip setuptools wheel && \
+    /usr/local/bin/pip3.11 install "numpy==1.24.4" "scipy==1.10.1" && \
+    /usr/local/bin/pip3.11 install "torch==2.0.1" "torchaudio==2.0.2" --index-url https://download.pytorch.org/whl/cpu && \
+    /usr/local/bin/pip3.11 install "transformers==4.30.2" && \
+    /usr/local/bin/pip3.11 install openai-whisper && \
+    /usr/local/bin/pip3.11 install ffmpeg-python python-dotenv requests
+
 # Update library cache and set LD_LIBRARY_PATH
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local-libs.conf && \
+    echo "/usr/lib64/openssl11" >> /etc/ld.so.conf.d/local-libs.conf && \
     ldconfig
 
 # Clean up
-RUN rm -rf /tmp/ffmpeg_sources
+RUN rm -rf /tmp/ffmpeg_sources /tmp/Python-3.11.10*
 
 # Set environment variables
-ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/lib
+ENV LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:/usr/lib:/lib
+ENV PATH=/usr/local/bin:$PATH
 ENV FFMPEG_PATH=/usr/local/bin/ffmpeg
 ENV FFPROBE_PATH=/usr/local/bin/ffprobe
+ENV PYTHON_PATH=/usr/local/bin/python3.11
 ENV JAVA_OPTS="-Xms512m -Xmx1024m"
 ENV SPRING_PROFILES_ACTIVE=prod
+ENV SSL_CERT_DIR=/etc/pki/tls/certs
+ENV SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
 
 # Set working directory
 WORKDIR /app
+
+# Copy the Python script
+COPY scripts/whisper_subtitle.py /app/scripts/whisper_subtitle.py
 
 # Copy the .env file
 COPY .env /app/.env
