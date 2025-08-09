@@ -10,6 +10,24 @@ public class ExportLinkDTO {
     private String r2Path;
     private LocalDateTime createdAt;
     private LocalDateTime expiresAt;
+    private String status; // e.g., QUEUED, EXPORTED, FAILED
+    private String messageId; // SQS message ID
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public String getMessageId() {
+        return messageId;
+    }
+
+    public void setMessageId(String messageId) {
+        this.messageId = messageId;
+    }
 
     public String getFileName() {
         return fileName;

@@ -1,5 +1,6 @@
 package com.example.Scenith.dto;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
 import java.util.*;
@@ -169,6 +170,17 @@ public class TextSegment implements Segment {
         }
         // Optionally throw an exception if no keyframe is found
         // throw new IllegalArgumentException("No keyframe found for property " + property + " at time " + updatedKeyframe.getTime());
+    }
+    @JsonProperty("isSubtitle") // Ensure JSON field is "isSubtitle"
+    private boolean isSubtitle = false;
+
+    @JsonProperty("isSubtitle") // Optional: reinforce on getter
+    public boolean isSubtitle() {
+        return isSubtitle;
+    }
+
+    public void setSubtitle(boolean isSubtitle) {
+        this.isSubtitle = isSubtitle;
     }
 
     public void removeKeyframe(String property, double time) {

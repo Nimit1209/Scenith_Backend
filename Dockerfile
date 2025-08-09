@@ -190,6 +190,8 @@ RUN chmod +x /temp/scripts/whisper_subtitle.py
 # Copy the .env file
 COPY .env /app/.env
 
+COPY credentials/video-editor-tts-24b472478ab838d2168992684517cacfab4c11da.json /app/credentials/video-editor-tts.json
+
 # Copy the Spring Boot JAR
 COPY target/Scenith-0.0.1-SNAPSHOT.jar app.jar
 

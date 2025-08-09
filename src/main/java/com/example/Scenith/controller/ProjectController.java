@@ -146,26 +146,12 @@ public class ProjectController {
             Authentication authentication,
             HttpServletRequest request) throws Exception {
 
-        // Generate requestId if not provided
         String effectiveRequestId = requestId != null ? requestId : UUID.randomUUID().toString();
         logger.info("=== EXPORT REQUEST DEBUG ===");
         logger.info("Export request received: projectId={}, sessionId={}, requestId={}, tokenPrefix={}",
                 projectId, sessionId, effectiveRequestId, token != null ? token.substring(0, Math.min(token.length(), 20)) : "null");
 
-        // Debug authentication object
-        logger.info("Authentication debug: isNull={}, isAuthenticated={}, principalType={}, principal={}",
-                authentication == null,
-                authentication != null && authentication.isAuthenticated(),
-                authentication != null && authentication.getPrincipal() != null ? authentication.getPrincipal().getClass().getSimpleName() : "null",
-                authentication != null ? authentication.getPrincipal() : "null");
-
-        // Debug request headers
-        logger.info("Request headers: User-Agent={}, Content-Type={}, Authorization-exists={}",
-                request.getHeader("User-Agent"),
-                request.getHeader("Content-Type"),
-                request.getHeader("Authorization") != null);
-
-        // Step 1: Handle authentication (optional since permitAll)
+        // Authentication and project validation logic (unchanged)
         User user = null;
         if (token != null && token.startsWith("Bearer ")) {
             try {
@@ -174,37 +160,22 @@ public class ProjectController {
             } catch (Exception e) {
                 logger.warn("Invalid token, proceeding without user: {}", e.getMessage());
             }
-        } else {
-            logger.info("STEP 1 SKIPPED: No token provided, proceeding without authentication");
         }
 
-        // Step 2: Verify project and session
-        Project project;
-        try {
-            project = projectRepository.findByEditSession(sessionId)
-                    .orElseThrow(() -> {
-                        logger.error("STEP 2 FAILED: Session not found: sessionId={}", sessionId);
-                        return new ResponseStatusException(HttpStatus.NOT_FOUND, "Session not found: " + sessionId);
-                    });
-            logger.info("STEP 2 PASSED: Project found: id={}, userId={}, name={}",
-                    project.getId(), project.getUser() != null ? project.getUser().getId() : "null", project.getName());
-        } catch (ResponseStatusException e) {
-            throw e;
-        } catch (Exception e) {
-            logger.error("STEP 2 FAILED: Database error finding project: {}", e.getMessage(), e);
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Database error: " + e.getMessage());
-        }
+        Project project = projectRepository.findByEditSession(sessionId)
+                .orElseThrow(() -> {
+                    logger.error("STEP 2 FAILED: Session not found: sessionId={}", sessionId);
+                    return new ResponseStatusException(HttpStatus.NOT_FOUND, "Session not found: " + sessionId);
+                });
+        logger.info("STEP 2 PASSED: Project found: id={}, userId={}, name={}",
+                project.getId(), project.getUser() != null ? project.getUser().getId() : "null", project.getName());
 
-        // Step 3: Verify project ownership (if authenticated)
         if (user != null && project.getUser() != null && !project.getUser().getId().equals(user.getId())) {
             logger.error("STEP 3 FAILED: User mismatch: projectUserId={}, authenticatedUserId={}",
                     project.getUser().getId(), user.getId());
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
-                    "Unauthorized to export this project");
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Unauthorized to export this project");
         }
-        logger.info("STEP 3 PASSED: User owns the project or no user check required");
 
-        // Step 4: Verify project ID matches path parameter
         if (!project.getId().equals(projectId)) {
             logger.error("STEP 4 FAILED: Project ID mismatch: projectId={}, pathProjectId={}",
                     project.getId(), projectId);
@@ -212,33 +183,73 @@ public class ProjectController {
                     "Project ID mismatch: session belongs to project " + project.getId() +
                             " but path specifies project " + projectId);
         }
-        logger.info("STEP 4 PASSED: Project ID matches path parameter");
 
-        // Step 5: Trigger export
+        // Queue export task
         try {
-            logger.info("STEP 5: Starting video export...");
+            logger.info("STEP 5: Queuing video export...");
             Map<String, String> exportResult = videoEditingService.exportProject(sessionId);
-            logger.info("STEP 5 PASSED: Export result: fileName={}, r2Path={}",
-                    exportResult.get("fileName"), exportResult.get("r2Path"));
+            logger.info("STEP 5 PASSED: Export queued: messageId={}, fileName={}, r2Path={}",
+                    exportResult.get("messageId"), exportResult.get("fileName"), exportResult.get("r2Path"));
 
-            // Step 6: Create ExportLinkDTO from export result
             ExportLinkDTO exportLinkDTO = new ExportLinkDTO();
             exportLinkDTO.setFileName(exportResult.get("fileName"));
-            exportLinkDTO.setDownloadUrl(exportResult.get("downloadUrl"));
             exportLinkDTO.setR2Path(exportResult.get("r2Path"));
+            exportLinkDTO.setStatus(exportResult.get("status"));
+            exportLinkDTO.setMessageId(exportResult.get("messageId"));
             exportLinkDTO.setCreatedAt(LocalDateTime.now());
-            exportLinkDTO.setExpiresAt(LocalDateTime.now().plusHours(1));
 
             logger.info("STEP 6 PASSED: Export link DTO created: fileName={}", exportLinkDTO.getFileName());
-
-            logger.info("=== EXPORT REQUEST SUCCESS ===");
             return ResponseEntity.ok(exportLinkDTO);
-
         } catch (Exception e) {
-            logger.error("STEP 5/6 FAILED: Export failed: {}", e.getMessage(), e);
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
-                    "Export failed: " + e.getMessage());
+            logger.error("STEP 5/6 FAILED: Export queuing failed: {}", e.getMessage(), e);
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Export queuing failed: " + e.getMessage());
         }
+    }
+
+    @GetMapping("/{projectId}/export/status")
+    public ResponseEntity<String> getExportStatus(
+            @RequestHeader(value = "Authorization", required = false) String token,
+            @PathVariable Long projectId,
+            @RequestParam String sessionId) {
+        logger.info("=== EXPORT STATUS REQUEST DEBUG ===");
+        logger.info("Export status request: projectId={}, sessionId={}, tokenPrefix={}",
+                projectId, sessionId, token != null ? token.substring(0, Math.min(token.length(), 20)) : "null");
+
+        // Authenticate user (optional, matching /export endpoint)
+        User user = null;
+        if (token != null && token.startsWith("Bearer ")) {
+            try {
+                user = getUserFromToken(token);
+                logger.info("User from token: id={}, email={}", user.getId(), user.getEmail());
+            } catch (Exception e) {
+                logger.warn("Invalid token, proceeding without user: {}", e.getMessage());
+            }
+        }
+
+        // Find project by sessionId
+        Project project = projectRepository.findByEditSession(sessionId)
+                .orElseThrow(() -> {
+                    logger.error("Session not found: sessionId={}", sessionId);
+                    return new ResponseStatusException(HttpStatus.NOT_FOUND, "Session not found: " + sessionId);
+                });
+
+        // Verify project ID
+        if (!project.getId().equals(projectId)) {
+            logger.error("Project ID mismatch: requestedId={}, sessionProjectId={}", projectId, project.getId());
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Project ID mismatch");
+        }
+
+        // Verify user ownership (if user is authenticated)
+        if (user != null && project.getUser() != null && !project.getUser().getId().equals(user.getId())) {
+            logger.error("User mismatch: projectUserId={}, authenticatedUserId={}",
+                    project.getUser().getId(), user.getId());
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Unauthorized to access this project");
+        }
+
+        // Return the project status
+        String status = project.getStatus();
+        logger.info("Returning export status: status={}, projectId={}, sessionId={}", status, projectId, sessionId);
+        return ResponseEntity.ok(status);
     }
 
     // Add this helper method to debug your JWT token parsing
@@ -2366,7 +2377,8 @@ public class ProjectController {
     public ResponseEntity<?> addAutoSubtitlesToTimeline(
             @RequestHeader("Authorization") String token,
             @PathVariable Long projectId,
-            @RequestParam String sessionId) {
+            @RequestParam String sessionId,
+            @RequestBody(required = false) Map<String, Object> subtitleProperties) {
         try {
             User user = getUserFromToken(token);
             Project project = projectRepository.findById(projectId)
@@ -2378,7 +2390,7 @@ public class ProjectController {
             }
 
             // Call the service method to add subtitles
-            videoEditingService.addAutoSubtitlesToTimeline(sessionId, projectId);
+            videoEditingService.addAutoSubtitlesToTimeline(sessionId, projectId, subtitleProperties);
 
             // Retrieve the updated timeline state
             TimelineState timelineState = videoEditingService.getTimelineState(sessionId);
@@ -2408,6 +2420,7 @@ public class ProjectController {
                 data.put("letterSpacing", t.getLetterSpacing());
                 data.put("lineSpacing", t.getLineSpacing());
                 data.put("rotation", t.getRotation());
+                data.put("isSubtitle", t.isSubtitle());
                 return data;
             }).collect(Collectors.toList());
 
@@ -2423,5 +2436,218 @@ public class ProjectController {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(e.getMessage());
         }
+    }
+
+    @PutMapping("/{projectId}/update-multiple-text")
+    public ResponseEntity<?> updateMultipleTextSegments(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long projectId,
+            @RequestParam String sessionId,
+            @RequestBody Map<String, Object> request) {
+        try {
+            User user = getUserFromToken(token);
+
+            // Extract segmentIds as a list
+            @SuppressWarnings("unchecked")
+            List<String> segmentIds = (List<String>) request.get("segmentIds");
+            String text = (String) request.get("text");
+            String fontFamily = (String) request.get("fontFamily");
+            Double scale = request.containsKey("scale") ? Double.valueOf(request.get("scale").toString()) : null;
+            String fontColor = (String) request.get("fontColor");
+            String backgroundColor = (String) request.get("backgroundColor");
+            Integer positionX = request.containsKey("positionX") ? Integer.valueOf(request.get("positionX").toString()) : null;
+            Integer positionY = request.containsKey("positionY") ? Integer.valueOf(request.get("positionY").toString()) : null;
+            Double opacity = request.containsKey("opacity") ? Double.valueOf(request.get("opacity").toString()) : null;
+            Double timelineStartTime = request.containsKey("timelineStartTime") ? Double.valueOf(request.get("timelineStartTime").toString()) : null;
+            Double timelineEndTime = request.containsKey("timelineEndTime") ? Double.valueOf(request.get("timelineEndTime").toString()) : null;
+            Integer layer = request.containsKey("layer") ? Integer.valueOf(request.get("layer").toString()) : null;
+            String alignment = (String) request.get("alignment");
+            Double rotation = request.containsKey("rotation") ? Double.valueOf(request.get("rotation").toString()) : null;
+            @SuppressWarnings("unchecked")
+            Map<String, List<Map<String, Object>>> keyframes = request.containsKey("keyframes") ? (Map<String, List<Map<String, Object>>>) request.get("keyframes") : null;
+
+            // Background parameters
+            Double backgroundOpacity = request.containsKey("backgroundOpacity") ? Double.valueOf(request.get("backgroundOpacity").toString()) : null;
+            Integer backgroundBorderWidth = request.containsKey("backgroundBorderWidth") ? Integer.valueOf(request.get("backgroundBorderWidth").toString()) : null;
+            String backgroundBorderColor = (String) request.get("backgroundBorderColor");
+            Integer backgroundH = request.containsKey("backgroundH") ? Integer.valueOf(request.get("backgroundH").toString()) : null;
+            Integer backgroundW = request.containsKey("backgroundW") ? Integer.valueOf(request.get("backgroundW").toString()) : null;
+            Integer backgroundBorderRadius = request.containsKey("backgroundBorderRadius") ? Integer.valueOf(request.get("backgroundBorderRadius").toString()) : null;
+
+            // Text border parameters
+            String textBorderColor = (String) request.get("textBorderColor");
+            Integer textBorderWidth = request.containsKey("textBorderWidth") ? Integer.valueOf(request.get("textBorderWidth").toString()) : null;
+            Double textBorderOpacity = request.containsKey("textBorderOpacity") ? Double.valueOf(request.get("textBorderOpacity").toString()) : null;
+
+            // Letter spacing parameter
+            Double letterSpacing = request.containsKey("letterSpacing") ? Double.valueOf(request.get("letterSpacing").toString()) : null;
+
+            // Line spacing parameter
+            Double lineSpacing = request.containsKey("lineSpacing") ? Double.valueOf(request.get("lineSpacing").toString()) : null;
+
+            // Parse keyframes
+            Map<String, List<Keyframe>> parsedKeyframes = null;
+            if (keyframes != null) {
+                parsedKeyframes = new HashMap<>();
+                for (Map.Entry<String, List<Map<String, Object>>> entry : keyframes.entrySet()) {
+                    String property = entry.getKey();
+                    List<Keyframe> kfList = new ArrayList<>();
+                    for (Map<String, Object> kfData : entry.getValue()) {
+                        double time = Double.valueOf(kfData.get("time").toString());
+                        Object value = kfData.get("value");
+                        String interpolation = (String) kfData.getOrDefault("interpolationType", "linear");
+                        // Validate keyframe value based on property
+                        if (property.equals("rotation") && value instanceof Number && !Double.isFinite(((Number) value).doubleValue())) {
+                            return ResponseEntity.badRequest().body("Rotation keyframe value must be a valid number");
+                        }
+                        kfList.add(new Keyframe(time, value, interpolation));
+                    }
+                    parsedKeyframes.put(property, kfList);
+                }
+            }
+
+            // Validation
+            if (segmentIds == null || segmentIds.isEmpty()) {
+                return ResponseEntity.badRequest().body("Missing or empty required parameter: segmentIds");
+            }
+            // Allow text to be null if not updating text content (e.g., for styling updates)
+            if (text != null && text.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body("Text content cannot be empty if provided");
+            }
+            if (opacity != null && (opacity < 0 || opacity > 1)) {
+                return ResponseEntity.badRequest().body("Opacity must be between 0 and 1");
+            }
+            if (alignment != null && !Arrays.asList("left", "right", "center").contains(alignment)) {
+                return ResponseEntity.badRequest().body("Alignment must be 'left', 'right', or 'center'");
+            }
+            if (rotation != null && !Double.isFinite(rotation)) {
+                return ResponseEntity.badRequest().body("Rotation must be a valid number");
+            }
+            if (backgroundOpacity != null && (backgroundOpacity < 0 || backgroundOpacity > 1)) {
+                return ResponseEntity.badRequest().body("Background opacity must be between 0 and 1");
+            }
+            if (backgroundBorderWidth != null && backgroundBorderWidth < 0) {
+                return ResponseEntity.badRequest().body("Background border width must be non-negative");
+            }
+            if (backgroundH != null && backgroundH < 0) {
+                return ResponseEntity.badRequest().body("Background height must be non-negative");
+            }
+            if (backgroundW != null && backgroundW < 0) {
+                return ResponseEntity.badRequest().body("Background width must be non-negative");
+            }
+            if (backgroundBorderRadius != null && backgroundBorderRadius < 0) {
+                return ResponseEntity.badRequest().body("Background border radius must be non-negative");
+            }
+            if (textBorderWidth != null && textBorderWidth < 0) {
+                return ResponseEntity.badRequest().body("Text border width must be non-negative");
+            }
+            if (textBorderOpacity != null && (textBorderOpacity < 0 || textBorderOpacity > 1)) {
+                return ResponseEntity.badRequest().body("Text border opacity must be between 0 and 1");
+            }
+            if (letterSpacing != null && letterSpacing < 0) {
+                return ResponseEntity.badRequest().body("Letter spacing must be non-negative");
+            }
+            if (lineSpacing != null && lineSpacing < 0) {
+                return ResponseEntity.badRequest().body("Line spacing must be non-negative");
+            }
+
+            // Call the service method
+            videoEditingService.updateMultipleTextSegments(
+                    sessionId, segmentIds, text, fontFamily, scale,
+                    fontColor, backgroundColor, positionX, positionY, opacity,
+                    timelineStartTime, timelineEndTime, layer, alignment,
+                    backgroundOpacity, backgroundBorderWidth, backgroundBorderColor,
+                    backgroundH, backgroundW, backgroundBorderRadius,
+                    textBorderColor, textBorderWidth, textBorderOpacity,
+                    letterSpacing, lineSpacing, rotation, parsedKeyframes);
+
+            return ResponseEntity.ok().build();
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error updating multiple text segments: " + e.getMessage());
+        }
+    }
+
+    @PostMapping("/{projectId}/generate-ai-audio")
+    public ResponseEntity<?> generateAiAudioToTimeline(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long projectId,
+            @RequestParam String sessionId,
+            @RequestBody Map<String, Object> request) {
+        try {
+            User user = getUserFromToken(token);
+
+            // Extract parameters from the request
+            String text = (String) request.get("text");
+            String voiceName = (String) request.get("voiceName");
+            String languageCode = (String) request.get("languageCode");
+            Integer layer = request.get("layer") != null ? ((Number) request.get("layer")).intValue() : -1;
+            Double timelineStartTime = request.get("timelineStartTime") != null ?
+                    ((Number) request.get("timelineStartTime")).doubleValue() : 0.0;
+            Double timelineEndTime = request.get("timelineEndTime") != null ?
+                    ((Number) request.get("timelineEndTime")).doubleValue() : null;
+
+            // Validate parameters
+            if (text == null || text.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body("Text is required and cannot be empty");
+            }
+            if (voiceName == null || voiceName.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body("Voice name is required");
+            }
+            if (languageCode == null || languageCode.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body("Language code is required");
+            }
+            if (layer >= 0) {
+                return ResponseEntity.badRequest().body("Audio layer must be negative (e.g., -1, -2, -3)");
+            }
+            if (timelineStartTime < 0) {
+                return ResponseEntity.badRequest().body("Timeline start time must be non-negative");
+            }
+
+            // Call the service method to generate AI audio and add to timeline
+            videoEditingService.generateTtsAndAddToTimeline(
+                    sessionId, projectId, text, voiceName, languageCode, layer, timelineStartTime, timelineEndTime);
+
+            // Retrieve the newly added audio segment from TimelineState
+            TimelineState timelineState = videoEditingService.getTimelineState(sessionId);
+            AudioSegment addedAudioSegment = timelineState.getAudioSegments().stream()
+                    .filter(a -> a.getAudioPath().contains(projectId + "_tts_") &&
+                            Math.abs(a.getTimelineStartTime() - timelineStartTime) < 0.001)
+                    .findFirst()
+                    .orElseThrow(() -> new RuntimeException("Failed to find added AI audio segment"));
+
+            // Prepare response
+            Map<String, Object> response = new HashMap<>();
+            response.put("audioSegmentId", addedAudioSegment.getId());
+            response.put("layer", addedAudioSegment.getLayer());
+            response.put("timelineStartTime", addedAudioSegment.getTimelineStartTime());
+            response.put("timelineEndTime", addedAudioSegment.getTimelineEndTime());
+            response.put("startTime", addedAudioSegment.getStartTime());
+            response.put("endTime", addedAudioSegment.getEndTime());
+            response.put("volume", addedAudioSegment.getVolume());
+            response.put("audioPath", addedAudioSegment.getAudioPath());
+            response.put("waveformJsonPath", addedAudioSegment.getWaveformJsonPath());
+            response.put("isExtracted", addedAudioSegment.isExtracted());
+            response.put("keyframes", addedAudioSegment.getKeyframes() != null ?
+                    addedAudioSegment.getKeyframes() : new HashMap<>());
+
+            return ResponseEntity.ok(response);
+        } catch (IOException | InterruptedException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error generating AI audio: " + e.getMessage());
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body("Unauthorized or project not found: " + e.getMessage());
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Unexpected error: " + e.getMessage());
+        }
+    }
+
+    @GetMapping("/get-all-voices")
+    public ResponseEntity<List<VoiceInfo>> getAllVoices() {
+        return ResponseEntity.ok(videoEditingService.getAvailableVoices());
     }
 }
