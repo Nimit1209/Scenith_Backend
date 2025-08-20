@@ -46,6 +46,7 @@ import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -132,10 +133,10 @@ public class VideoEditingService {
             project.setVideosJson(objectMapper.writeValueAsString(videos));
         }
 
-        // Overloaded method to maintain compatibility with existing calls
-        public void addVideo(Project project, String videoPath, String videoFileName) throws JsonProcessingException {
-            addVideo(project, videoPath, videoFileName, null); // Call with null audioPath for backward compatibility
-        }
+//        // Overloaded method to maintain compatibility with existing calls
+//        public void addVideo(Project project, String videoPath, String videoFileName) throws JsonProcessingException {
+//            addVideo(project, videoPath, videoFileName, null); // Call with null audioPath for backward compatibility
+//        }
 
         // Moved from Project entity: Image handling methods
         public List<Map<String, String>> getImages(Project project) throws JsonProcessingException {
@@ -146,14 +147,14 @@ public class VideoEditingService {
             });
         }
 
-        public void addImage(Project project, String imagePath, String imageFileName) throws JsonProcessingException {
-            List<Map<String, String>> images = getImages(project);
-            Map<String, String> imageData = new HashMap<>();
-            imageData.put("imagePath", imagePath);
-            imageData.put("imageFileName", imageFileName);
-            images.add(imageData);
-            project.setImagesJson(objectMapper.writeValueAsString(images));
-        }
+//        public void addImage(Project project, String imagePath, String imageFileName) throws JsonProcessingException {
+//            List<Map<String, String>> images = getImages(project);
+//            Map<String, String> imageData = new HashMap<>();
+//            imageData.put("imagePath", imagePath);
+//            imageData.put("imageFileName", imageFileName);
+//            images.add(imageData);
+//            project.setImagesJson(objectMapper.writeValueAsString(images));
+//        }
 
         // Moved from Project entity: Audio handling methods
         public List<Map<String, String>> getAudio(Project project) throws JsonProcessingException {
@@ -176,9 +177,9 @@ public class VideoEditingService {
             project.setAudioJson(objectMapper.writeValueAsString(audioFiles));
         }
 
-        public void addAudio(Project project, String audioPath, String audioFileName) throws JsonProcessingException {
-            addAudio(project, audioPath, audioFileName, null);
-        }
+//        public void addAudio(Project project, String audioPath, String audioFileName) throws JsonProcessingException {
+//            addAudio(project, audioPath, audioFileName, null);
+//        }
 
         // Get extracted audio metadata from project
         public List<Map<String, String>> getExtractedAudio(Project project) throws JsonProcessingException {
@@ -201,9 +202,9 @@ public class VideoEditingService {
             project.setExtractedAudioJson(objectMapper.writeValueAsString(extractedAudio));
         }
 
-        public void addExtractedAudio(Project project, String audioPath, String audioFileName, String sourceVideoPath) throws JsonProcessingException {
-            addExtractedAudio(project, audioPath, audioFileName, sourceVideoPath, null);
-        }
+//        public void addExtractedAudio(Project project, String audioPath, String audioFileName, String sourceVideoPath) throws JsonProcessingException {
+//            addExtractedAudio(project, audioPath, audioFileName, sourceVideoPath, null);
+//        }
 
         public Project createProject(User user, String name, Integer width, Integer height, Float fps) throws JsonProcessingException {
             Project project = new Project();
@@ -468,7 +469,6 @@ public class VideoEditingService {
         String localRelativePath = "temp/videos/" + localFileName;
         File localFile = new File(baseDir, localRelativePath);
 
-        logger.info("Downloading video from R2: {} to localPath={}", r2Path, localFile.getAbsolutePath());
         try {
             // Ensure parent directory exists
             File parentDir = localFile.getParentFile();
@@ -481,8 +481,6 @@ public class VideoEditingService {
 
             // Validate downloaded file
             if (!localFile.exists() || !localFile.isFile() || localFile.length() == 0) {
-                logger.error("Downloaded file is invalid: localPath={}, exists={}, isFile={}, size={}",
-                        localFile.getAbsolutePath(), localFile.exists(), localFile.isFile(), localFile.length());
                 throw new IOException("Downloaded video file is invalid: " + localFile.getAbsolutePath());
             }
 
@@ -4152,6 +4150,71 @@ public class VideoEditingService {
 
         return r2WaveformPath;
     }
+
+    private void executeFFmpegCommand(List<String> command, Long projectId, double batchStart, double batchDuration, double totalDuration, int batchIndex) throws IOException, InterruptedException {
+        Project project = projectRepository.findById(projectId)
+                .orElseThrow(() -> new RuntimeException("Project not found: " + projectId));
+
+        List<String> updatedCommand = new ArrayList<>(command);
+        if (!updatedCommand.contains("-progress")) {
+            updatedCommand.add("-progress");
+            updatedCommand.add("pipe:");
+        }
+
+        ProcessBuilder processBuilder = new ProcessBuilder(updatedCommand);
+        processBuilder.redirectErrorStream(true);
+
+        System.out.println("Executing FFmpeg command: " + String.join(" ", updatedCommand));
+        Process process = processBuilder.start();
+        double lastProgress = -1.0;
+
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                System.out.println("FFmpeg: " + line);
+                if (line.startsWith("out_time_ms=") && !line.equals("out_time_ms=N/A")) {
+                    try {
+                        long outTimeUs = Long.parseLong(line.replace("out_time_ms=", ""));
+                        double currentBatchTime = outTimeUs / 1_000_000.0;
+
+                        double batchProgress = Math.min(currentBatchTime / batchDuration, 1.0);
+                        double batchContribution = batchDuration / totalDuration * 100.0;
+                        double completedBatchesProgress = batchIndex * (batchDuration / totalDuration * 100.0);
+                        double totalProgress = completedBatchesProgress + (batchProgress * batchContribution);
+                        totalProgress = Math.min(totalProgress, 100.0);
+
+                        int roundedProgress = (int) Math.round(totalProgress);
+                        if (roundedProgress != (int) lastProgress && roundedProgress >= 0 && roundedProgress <= 100 && roundedProgress % 10 == 0) {
+                            project.setProgress((double) roundedProgress);
+                            project.setLastModified(LocalDateTime.now());
+                            project.setStatus("PENDING");
+                            projectRepository.save(project);
+                            System.out.println("Progress updated: " + roundedProgress + "% for projectId: " + projectId);
+                            lastProgress = roundedProgress;
+                        }
+                    } catch (NumberFormatException e) {
+                        System.err.println("Failed to parse out_time_ms: " + line);
+                    }
+                }
+            }
+        }
+
+        boolean completed = process.waitFor(10, TimeUnit.MINUTES);
+        if (!completed) {
+            process.destroyForcibly();
+            throw new RuntimeException("FFmpeg process timed out after 10 minutes");
+        }
+
+        int exitCode = process.exitValue();
+        if (exitCode != 0) {
+            project.setStatus("FAILED");
+            project.setProgress(0.0);
+            project.setLastModified(LocalDateTime.now());
+            projectRepository.save(project);
+            throw new RuntimeException("FFmpeg process failed with exit code: " + exitCode);
+        }
+    }
+
     public Map<String, String> exportProject(String sessionId) throws IOException {
         Project project = projectRepository.findByEditSession(sessionId)
                 .orElseThrow(() -> new RuntimeException("Session not found: " + sessionId));
@@ -4208,10 +4271,16 @@ public class VideoEditingService {
         if (!Files.exists(tempDir)) Files.createDirectories(tempDir);
         Path tempOutputFile = tempDir.resolve(outputFileName);
 
+        // Set initial project status to PENDING
+        project.setStatus("PENDING");
+        project.setProgress(0.0);
+        project.setLastModified(LocalDateTime.now());
+        projectRepository.save(project);
+
         try {
             // Render the final video
             TimelineState timelineState = objectMapper.readValue(project.getTimelineState(), TimelineState.class);
-            renderFinalVideo(timelineState, tempOutputFile.toAbsolutePath().toString(), width, height, fps, projectId);
+            String exportedVideoPath = renderFinalVideo(timelineState, tempOutputFile.toAbsolutePath().toString(), width, height, fps, projectId);
 
             // Upload to Cloudflare R2
             logger.info("Uploading exported video to R2: r2Path={}", r2Path);
@@ -4234,11 +4303,22 @@ public class VideoEditingService {
             }
             exportLinks.add(exportLink);
 
-            project.setExportsJson(objectMapper.writeValueAsString(exportLinks));
+            // Update project status to EXPORTED and save timeline state
             project.setStatus("EXPORTED");
             project.setLastModified(LocalDateTime.now());
+            project.setExportedVideoPath(exportedVideoPath);
+            project.setProgress(100.0);
+
+            try {
+                project.setTimelineState(objectMapper.writeValueAsString(timelineState));
+            } catch (JsonProcessingException e) {
+                logger.error("Error saving timeline state for projectId={}: {}", projectId, e.getMessage(), e);
+            }
+
+            project.setExportsJson(objectMapper.writeValueAsString(exportLinks));
             projectRepository.save(project);
-        } catch (Exception e) {
+            logger.info("Project successfully exported to: {}", exportedVideoPath);
+        }catch (Exception e) {
             logger.error("Failed to process export task for sessionId={}: {}", sessionId, e.getMessage(), e);
             project.setStatus("FAILED");
             project.setLastModified(LocalDateTime.now());
@@ -4295,6 +4375,11 @@ public class VideoEditingService {
 
             // Concatenate all batch files into the final video
             concatenateBatches(tempVideoFiles, outputPath, fps != null ? fps : 30);
+            Project project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new RuntimeException("Project not found: " + projectId));
+            project.setProgress(100.0);
+            project.setLastModified(LocalDateTime.now());
+            projectRepository.save(project);
 
         } finally {
             // Clean up temporary text PNGs
@@ -5679,7 +5764,19 @@ public class VideoEditingService {
         // Execute FFmpeg command
         System.out.println("FFmpeg command for batch: " + String.join(" ", command));
         try {
-            executeFFmpegCommand(command);
+            double totalDuration = Math.max(
+                    timelineState.getSegments().stream().mapToDouble(VideoSegment::getTimelineEndTime).max().orElse(0.0),
+                    Math.max(
+                            timelineState.getImageSegments().stream().mapToDouble(ImageSegment::getTimelineEndTime).max().orElse(0.0),
+                            Math.max(
+                                    timelineState.getTextSegments().stream().mapToDouble(TextSegment::getTimelineEndTime).max().orElse(0.0),
+                                    timelineState.getAudioSegments().stream().mapToDouble(AudioSegment::getTimelineEndTime).max().orElse(0.0)
+                            )
+                    )
+            );
+            int totalBatches = (int) Math.ceil(totalDuration / 8.0);
+            int batchIndex = (int) (batchStart / 8.0);
+            executeFFmpegCommand(command, projectId, batchStart, batchDuration, totalDuration, batchIndex);
         } finally {
             // Clean up temporary files
             for (File tempFile : tempFiles) {

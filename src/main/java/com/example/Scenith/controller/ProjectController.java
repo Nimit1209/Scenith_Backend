@@ -206,6 +206,24 @@ public class ProjectController {
         }
     }
 
+    @GetMapping("/{projectId}/export/progress")
+    public ResponseEntity<Map<String, Object>> getExportProgress(
+            @PathVariable Long projectId,
+            @RequestParam String sessionId,
+            @RequestHeader(value = "Authorization", required = false) String token) {
+        Project project = projectRepository.findById(projectId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Session not found: " + sessionId));
+
+        if (!project.getId().equals(projectId)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Session does not match project");
+        }
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("status", project.getStatus());
+        response.put("progress", project.getProgress() != null ? project.getProgress() : 0.0);
+        return ResponseEntity.ok(response);
+    }
+
     @GetMapping("/{projectId}/export/status")
     public ResponseEntity<String> getExportStatus(
             @RequestHeader(value = "Authorization", required = false) String token,

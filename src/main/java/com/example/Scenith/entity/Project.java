@@ -57,6 +57,15 @@ public class Project {
     @Column(name = "edit_session") // New column for session ID
     private String editSession;
 
+    private Double progress;
+
+    public Double getProgress() {
+        return progress;
+    }
+
+    public void setProgress(Double progress) {
+        this.progress = progress;
+    }
 //    @Version
 //    private Long version;
 
