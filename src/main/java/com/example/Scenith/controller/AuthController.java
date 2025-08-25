@@ -100,6 +100,7 @@ public class AuthController {
                     user.getEmail(), user.getName(), user.getProfilePicture(), user.isGoogleAuth());
 
             UserProfileResponse profileResponse = new UserProfileResponse(
+                    user.getId(),
                     user.getEmail(),
                     user.getName() != null ? user.getName() : "",
                     user.getProfilePicture() != null ? user.getProfilePicture() : "",
@@ -111,7 +112,7 @@ public class AuthController {
         } catch (Exception e) {
             logger.error("Error fetching user profile: {}", e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body(new UserProfileResponse(null, null, null, false, null));
+                    .body(new UserProfileResponse(null, null, null, null, false, null));
         }
     }
 

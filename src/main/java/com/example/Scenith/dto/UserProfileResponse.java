@@ -1,18 +1,28 @@
 package com.example.Scenith.dto;
 
 public class UserProfileResponse {
+    private Long id;
     private String email;
     private String name;
     private String picture;
     private boolean googleAuth;
     private String role; // Changed to String to match enum name
 
-    public UserProfileResponse(String email, String name, String picture, boolean googleAuth, String role) {
+    public UserProfileResponse(Long id, String email, String name, String picture, boolean googleAuth, String role) {
+        this.id = id;
         this.email = email;
         this.name = name;
         this.picture = picture;
         this.googleAuth = googleAuth;
         this.role = role;
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
     }
 
     // Getters and setters

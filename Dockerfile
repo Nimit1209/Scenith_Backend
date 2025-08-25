@@ -2,13 +2,14 @@
 FROM amazonlinux:2
 
 # Install build tools, dependencies for FFmpeg, debugging tools, OpenSSL 1.1, and CA certificates
+# Added xz-devel for lzma support in Python
 RUN yum update -y && \
     yum groupinstall -y "Development Tools" && \
     yum install -y wget tar gzip bzip2-devel nasm pkg-config cmake3 unzip \
                    fribidi-devel fontconfig-devel freetype-devel \
                    iputils bind-utils mysql \
                    openssl11 openssl11-devel ca-certificates \
-                   zlib-devel libffi-devel sqlite-devel readline-devel && \
+                   zlib-devel libffi-devel sqlite-devel readline-devel xz-devel && \
     ln -sf /usr/bin/cmake3 /usr/bin/cmake && \
     yum clean all
 
@@ -134,16 +135,43 @@ RUN cd /tmp && \
     echo "Testing SSL module..." && \
     LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib /usr/local/bin/python3.11 -c "import ssl; print('SSL module loaded successfully')"
 
-# Install Python packages for Whisper and other dependencies with compatible versions
+# Solution: Install packages in specific order to resolve dependency conflicts
+# Step 1: Install base numerical libraries
 RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
-    echo "Verifying SSL module before pip install..." && \
-    /usr/local/bin/python3.11 -c "import ssl; print('SSL available, version:', ssl.OPENSSL_VERSION)" && \
-    echo "GCC version:" && gcc --version && \
-    /usr/local/bin/pip3.11 install --upgrade pip setuptools wheel && \
-    /usr/local/bin/pip3.11 install "numpy==1.24.4" "scipy==1.10.1" && \
-    /usr/local/bin/pip3.11 install "torch==2.0.1" "torchaudio==2.0.2" --index-url https://download.pytorch.org/whl/cpu && \
-    /usr/local/bin/pip3.11 install "transformers==4.30.2" && \
-    /usr/local/bin/pip3.11 install openai-whisper && \
+    /usr/local/bin/pip3.11 install --upgrade pip setuptools wheel
+
+# Step 2: Install PyTorch ecosystem first (using latest available CPU version)
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "torch==2.6.0+cpu" --index-url https://download.pytorch.org/whl/cpu && \
+    /usr/local/bin/pip3.11 install "torchaudio==2.6.0+cpu" --index-url https://download.pytorch.org/whl/cpu
+
+# Step 3: Install numpy with compatible version for ONNX runtime
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "numpy<2.0" "numpy>=1.21.0"
+
+# Step 4: Install ONNX runtime compatible with both whisper and rembg
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "onnxruntime==1.16.3"
+
+# Step 5: Install image processing libraries
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "Pillow==11.3.0" && \
+    /usr/local/bin/pip3.11 install "opencv-python-headless" && \
+    /usr/local/bin/pip3.11 install "scipy"
+
+# Step 6: Install rembg dependencies manually, then rembg (FIXED)
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "pymatting" "pooch" "tqdm" "requests" && \
+    /usr/local/bin/pip3.11 install "jsonschema" "click" "aiohttp" && \
+    /usr/local/bin/pip3.11 install "rembg==2.0.67"
+
+# Step 7: Install whisper with constraints to prevent numpy upgrade
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    echo "numpy<2.0" > /tmp/constraints.txt && \
+    /usr/local/bin/pip3.11 install "openai-whisper==20250625" --constraint /tmp/constraints.txt
+
+# Step 8: Install remaining utility packages
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
     /usr/local/bin/pip3.11 install ffmpeg-python python-dotenv requests
 
 # Update library cache and set LD_LIBRARY_PATH
@@ -165,31 +193,42 @@ ENV SPRING_PROFILES_ACTIVE=prod
 ENV SSL_CERT_DIR=/etc/pki/tls/certs
 ENV SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
 
-# Quick verification of key components
+# Set environment variables for ONNX and image processing
+ENV OMP_NUM_THREADS=1
+ENV OPENCV_IO_MAX_IMAGE_PIXELS=1073741824
+
+# Quick verification of key components including rembg
 RUN echo "Verifying installations..." && \
     /usr/local/bin/ffmpeg -version | head -1 && \
     /usr/local/bin/python3.11 --version && \
     /usr/local/bin/python3.11 -c "import ssl; print('SSL module available')" && \
+    /usr/local/bin/python3.11 -c "import rembg; print('Rembg module available')" && \
+    /usr/local/bin/python3.11 -c "import torch; print('PyTorch version:', torch.__version__)" && \
+    /usr/local/bin/python3.11 -c "import PIL; print('Pillow version:', PIL.__version__)" && \
     echo "Setup verification complete."
 
 # Set working directory
 WORKDIR /app
 
-# Create the expected directory structure for the Python script
-RUN mkdir -p /temp/scripts
+# Create the expected directory structure for Python scripts
+RUN mkdir -p /app/scripts /temp/scripts
 
-# Copy the Python script to the expected location
+# Copy the background removal script to the expected location
+COPY scripts/remove_background.py /app/scripts/remove_background.py
+
+# Copy the whisper script to the expected locations
 COPY scripts/whisper_subtitle.py /temp/scripts/whisper_subtitle.py
-
-# Also copy to /app/scripts for backup
 COPY scripts/whisper_subtitle.py /app/scripts/whisper_subtitle.py
 
-# Make the Python script executable
-RUN chmod +x /temp/scripts/whisper_subtitle.py
+# Make the Python scripts executable
+RUN chmod +x /app/scripts/remove_background.py && \
+    chmod +x /temp/scripts/whisper_subtitle.py && \
+    chmod +x /app/scripts/whisper_subtitle.py
 
 # Copy the .env file
 COPY .env /app/.env
 
+# Copy credentials
 COPY credentials/video-editor-tts-24b472478ab838d2168992684517cacfab4c11da.json /app/credentials/video-editor-tts.json
 
 # Copy the Spring Boot JAR
@@ -199,4 +238,4 @@ COPY target/Scenith-0.0.1-SNAPSHOT.jar app.jar
 EXPOSE 1000
 
 # Run the application with proper environment setup
-ENTRYPOINT ["sh", "-c", "export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:/usr/lib:/lib && echo 'Starting application...' && echo 'Environment check:' && ls -la /usr/local/bin/ffmpeg && ls -la /usr/local/bin/python3.11 && ls -la /temp/scripts/ && java $JAVA_OPTS -jar app.jar"]
+ENTRYPOINT ["sh", "-c", "export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:/usr/lib:/lib && export OMP_NUM_THREADS=1 && echo 'Starting application...' && echo 'Environment check:' && ls -la /usr/local/bin/ffmpeg && ls -la /usr/local/bin/python3.11 && ls -la /app/scripts/ && java $JAVA_OPTS -jar app.jar"]
