@@ -2663,9 +2663,4 @@ public class ProjectController {
                     .body("Unexpected error: " + e.getMessage());
         }
     }
-
-    @GetMapping("/get-all-voices")
-    public ResponseEntity<List<VoiceInfo>> getAllVoices() {
-        return ResponseEntity.ok(videoEditingService.getAvailableVoices());
-    }
 }

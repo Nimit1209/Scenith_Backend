@@ -2819,8 +2819,8 @@ public class VideoEditingService {
             throw new IllegalArgumentException("Text exceeds 15-minute limit (~13,500 characters)");
         }
 
-        // Track character usage per user (assumes a database table or in-memory store)
-        long userUsage = getUserTtsUsage(projectId); // Implement this method
+        // Track character usage per user
+        long userUsage = getUserTtsUsage(projectId);
         if (userUsage + text.length() > 13_500) {
             throw new IllegalStateException("User exceeded monthly TTS limit (13,500 characters)");
         }
@@ -2846,55 +2846,79 @@ public class VideoEditingService {
             SynthesizeSpeechResponse response = textToSpeechClient.synthesizeSpeech(input, voice, audioConfig);
             ByteString audioContent = response.getAudioContent();
 
-            // Save audio file
+            // Save audio to temporary file for upload
             String audioFileName = projectId + "_tts_" + System.currentTimeMillis() + ".mp3";
-            File audioDir = new File(baseDir, "audio/projects/" + projectId);
-            audioDir.mkdirs();
-            File audioFile = new File(audioDir, audioFileName);
-            try (FileOutputStream out = new FileOutputStream(audioFile)) {
-                out.write(audioContent.toByteArray());
+            String r2Path = "audio/projects/" + projectId + "/" + audioFileName;
+            String tempFileName = "tts-" + System.currentTimeMillis() + "-" + audioFileName;
+            String tempPath = System.getProperty("java.io.tmpdir") + File.separator + "videoeditor" + File.separator + tempFileName;
+            File tempFile = new File(tempPath);
+
+            try {
+                // Create directories for temp file
+                Files.createDirectories(tempFile.getParentFile().toPath());
+                // Write audio content to temp file
+                Files.write(tempFile.toPath(), audioContent.toByteArray());
+                logger.info("Saved TTS audio to temporary file: {}", tempFile.getAbsolutePath());
+
+                // Upload to Cloudflare R2
+                cloudflareR2Service.uploadFile(r2Path, tempFile);
+                logger.info("Uploaded TTS audio to R2: {}", r2Path);
+
+                // Generate waveform JSON (assumes method is updated for R2)
+                String waveformJsonPath = generateAndSaveWaveformJson(r2Path, projectId);
+
+                // Add to project audioJson
+                Map<String, String> audioData = new HashMap<>();
+                audioData.put("audioPath", r2Path);
+                audioData.put("audioFileName", audioFileName);
+                audioData.put("waveformJsonPath", waveformJsonPath);
+                audioData.put("cdnUrl", cloudflareR2Service.generateDownloadUrl(r2Path, 3600));
+                List<Map<String, String>> audioList = getAudio(project);
+                audioList.add(audioData);
+                project.setAudioJson(objectMapper.writeValueAsString(audioList));
+                project.setLastModified(LocalDateTime.now());
+                projectRepository.save(project);
+
+                // Get audio duration
+                double audioDuration = getAudioDuration(r2Path);
+                double startTime = 0.0;
+                double endTime = roundToThreeDecimals(audioDuration);
+                timelineStartTime = roundToThreeDecimals(timelineStartTime);
+                double calculatedTimelineEndTime = timelineEndTime != null ? roundToThreeDecimals(timelineEndTime) :
+                        roundToThreeDecimals(timelineStartTime + audioDuration);
+
+                // Add to timeline as AudioSegment
+                AudioSegment audioSegment = new AudioSegment();
+                audioSegment.setAudioPath(r2Path);
+                audioSegment.setLayer(layer);
+                audioSegment.setStartTime(startTime);
+                audioSegment.setEndTime(endTime);
+                audioSegment.setTimelineStartTime(timelineStartTime);
+                audioSegment.setTimelineEndTime(calculatedTimelineEndTime);
+                audioSegment.setVolume(1.0);
+                audioSegment.setExtracted(false);
+                audioSegment.setWaveformJsonPath(waveformJsonPath);
+
+                timelineState.getAudioSegments().add(audioSegment);
+                project.setTimelineState(objectMapper.writeValueAsString(timelineState));
+                project.setLastModified(LocalDateTime.now());
+                projectRepository.save(project);
+
+                // Update TTS usage
+                updateUserTtsUsage(projectId, text.length());
+            } finally {
+                // Clean up temporary file
+                try {
+                    if (tempFile.exists()) {
+                        Files.delete(tempFile.toPath());
+                        logger.debug("Deleted temporary TTS audio file: {}", tempFile.getAbsolutePath());
+                    }
+                } catch (IOException e) {
+                    logger.warn("Failed to delete temporary TTS audio file: {}", tempFile.getAbsolutePath(), e);
+                }
             }
-
-            String audioPath = "audio/projects/" + projectId + "/" + audioFileName;
-
-            // Generate waveform JSON
-            String waveformJsonPath = generateAndSaveWaveformJson(audioPath, projectId);
-
-            // Add to project audioJson (same as uploadAudioToProject)
-            addAudio(project, audioPath, audioFileName, waveformJsonPath);
-            project.setLastModified(LocalDateTime.now());
-            projectRepository.save(project);
-
-            // Get audio duration
-            double audioDuration = getAudioDuration(audioPath);
-            double startTime = 0.0;
-            double endTime = roundToThreeDecimals(audioDuration);
-            timelineStartTime = roundToThreeDecimals(timelineStartTime);
-            double calculatedTimelineEndTime = timelineEndTime != null ? roundToThreeDecimals(timelineEndTime) :
-                    roundToThreeDecimals(timelineStartTime + audioDuration);
-
-
-            // Add to timeline as AudioSegment
-            AudioSegment audioSegment = new AudioSegment();
-            audioSegment.setAudioPath(audioPath);
-            audioSegment.setLayer(layer);
-            audioSegment.setStartTime(startTime);
-            audioSegment.setEndTime(endTime);
-            audioSegment.setTimelineStartTime(timelineStartTime);
-            audioSegment.setTimelineEndTime(calculatedTimelineEndTime);
-            audioSegment.setVolume(1.0);
-            audioSegment.setExtracted(false); // Not extracted from video
-            audioSegment.setWaveformJsonPath(waveformJsonPath);
-
-            project.setTimelineState(objectMapper.writeValueAsString(timelineState));
-            project.setLastModified(LocalDateTime.now());
-            projectRepository.save(project);
-
-            // Update TTS usage
-            updateUserTtsUsage(projectId, text.length()); // Implement this method
         }
     }
-
     private long getUserTtsUsage(Long projectId) {
         Project project = projectRepository.findById(projectId)
                 .orElseThrow(() -> new RuntimeException("Project not found"));
@@ -2913,88 +2937,6 @@ public class VideoEditingService {
                 .orElseGet(() -> new UserTtsUsage(user, currentMonth));
         usage.setCharactersUsed(usage.getCharactersUsed() + characters);
         userTtsUsageRepository.save(usage);
-    }
-
-    public List<VoiceInfo> getAvailableVoices() {
-        List<VoiceInfo> voices = new ArrayList<>();
-
-        // English (US)
-        voices.add(new VoiceInfo("English (US)", "en-US", "en-US-Neural2-E", "Female", "Emily"));
-        voices.add(new VoiceInfo("English (US)", "en-US", "en-US-Wavenet-C", "Female", "Charlotte"));
-        voices.add(new VoiceInfo("English (US)", "en-US", "en-US-Wavenet-E", "Female", "Emma"));
-        voices.add(new VoiceInfo("English (US)", "en-US", "en-US-Neural2-F", "Female", "Sophia"));
-        voices.add(new VoiceInfo("English (US)", "en-US", "en-US-Wavenet-F", "Female", "Isabella"));
-        voices.add(new VoiceInfo("English (US)", "en-US", "en-US-Neural2-H", "Female", "Madison"));
-        voices.add(new VoiceInfo("English (US)", "en-US", "en-US-Wavenet-A", "Male", "Alexander"));
-        voices.add(new VoiceInfo("English (US)", "en-US", "en-US-Wavenet-B", "Male", "Benjamin"));
-        voices.add(new VoiceInfo("English (US)", "en-US", "en-US-Neural2-B", "Male", "William"));
-        voices.add(new VoiceInfo("English (US)", "en-US", "en-US-Wavenet-D", "Male", "Daniel"));
-        voices.add(new VoiceInfo("English (US)", "en-US", "en-US-Neural2-G", "Male", "Gabriel"));
-        voices.add(new VoiceInfo("English (US)", "en-US", "en-US-Neural2-J", "Male", "Jackson"));
-
-        // English (UK)
-        voices.add(new VoiceInfo("English (UK)", "en-GB", "en-GB-Neural2-A", "Female", "Amelia"));
-        voices.add(new VoiceInfo("English (UK)", "en-GB", "en-GB-Wavenet-C", "Female", "Catherine"));
-        voices.add(new VoiceInfo("English (UK)", "en-GB", "en-GB-Neural2-F", "Female", "Florence"));
-        voices.add(new VoiceInfo("English (UK)", "en-GB", "en-GB-Wavenet-B", "Male", "Benedict"));
-        voices.add(new VoiceInfo("English (UK)", "en-GB", "en-GB-Neural2-D", "Male", "David"));
-        voices.add(new VoiceInfo("English (UK)", "en-GB", "en-GB-Neural2-O", "Male", "Oliver"));
-
-        // Hindi (India)
-        voices.add(new VoiceInfo("Hindi (India)", "hi-IN", "hi-IN-Wavenet-A", "Female", "Alia"));
-        voices.add(new VoiceInfo("Hindi (India)", "hi-IN", "hi-IN-Wavenet-D", "Female", "Kiara"));
-        voices.add(new VoiceInfo("Hindi (India)", "hi-IN", "hi-IN-Wavenet-B", "Male", "Rohit"));
-        voices.add(new VoiceInfo("Hindi (India)", "hi-IN", "hi-IN-Wavenet-C", "Male", "Virat"));
-
-        // Spanish (Spain)
-        voices.add(new VoiceInfo("Spanish (Spain)", "es-ES", "es-ES-Neural2-A", "Female", "Alba"));
-        voices.add(new VoiceInfo("Spanish (Spain)", "es-ES", "es-ES-Neural2-B", "Male", "Bruno"));
-
-        // Spanish (Latin America)
-        voices.add(new VoiceInfo("Spanish (Latin America)", "es-US", "es-US-Neural2-A", "Female", "Alejandra"));
-        voices.add(new VoiceInfo("Spanish (Latin America)", "es-US", "es-US-Neural2-B", "Male", "Bruno-2"));
-
-        // Portuguese (Brazil)
-        voices.add(new VoiceInfo("Portuguese (Brazil)", "pt-BR", "pt-BR-Neural2-A", "Female", "Ana"));
-        voices.add(new VoiceInfo("Portuguese (Brazil)", "pt-BR", "pt-BR-Neural2-B", "Male", "Nuno"));
-
-        // French (France)
-        voices.add(new VoiceInfo("French (France)", "fr-FR", "fr-FR-Neural2-A", "Female", "Amélie"));
-        voices.add(new VoiceInfo("French (France)", "fr-FR", "fr-FR-Neural2-D", "Male", "Damien"));
-
-        // German (Germany)
-        voices.add(new VoiceInfo("German (Germany)", "de-DE", "de-DE-Neural2-B", "Female", "Beatrice"));
-        voices.add(new VoiceInfo("German (Germany)", "de-DE", "de-DE-Neural2-D", "Male", "Dominik"));
-
-        // Arabic (Modern Standard)
-        voices.add(new VoiceInfo("Arabic (Modern Standard)", "ar-XA", "ar-XA-Wavenet-A", "Female", "Aisha"));
-        voices.add(new VoiceInfo("Arabic (Modern Standard)", "ar-XA", "ar-XA-Wavenet-B", "Male", "Bilal"));
-
-        // Japanese
-        voices.add(new VoiceInfo("Japanese", "ja-JP", "ja-JP-Wavenet-B", "Female", "Yuki"));
-        voices.add(new VoiceInfo("Japanese", "ja-JP", "ja-JP-Wavenet-D", "Male", "Daiki"));
-
-        // Korean
-        voices.add(new VoiceInfo("Korean", "ko-KR", "ko-KR-Wavenet-A", "Female", "Areum"));
-        voices.add(new VoiceInfo("Korean", "ko-KR", "ko-KR-Wavenet-B", "Male", "Byung-ho"));
-
-        // Chinese (Simplified)
-        voices.add(new VoiceInfo("Chinese (Simplified)", "cmn-CN", "cmn-CN-Wavenet-A", "Female", "An"));
-        voices.add(new VoiceInfo("Chinese (Simplified)", "cmn-CN", "cmn-CN-Wavenet-D", "Male", "Dong"));
-
-        // Italian
-        voices.add(new VoiceInfo("Italian", "it-IT", "it-IT-Wavenet-A", "Female", "Alessia"));
-        voices.add(new VoiceInfo("Italian", "it-IT", "it-IT-Wavenet-C", "Male", "Carlo"));
-
-        // Russian
-        voices.add(new VoiceInfo("Russian", "ru-RU", "ru-RU-Wavenet-A", "Female", "Anastasia"));
-        voices.add(new VoiceInfo("Russian", "ru-RU", "ru-RU-Wavenet-D", "Male", "Dmitri"));
-
-        // Turkish
-        voices.add(new VoiceInfo("Turkish", "tr-TR", "tr-TR-Wavenet-A", "Female", "Ayşe"));
-        voices.add(new VoiceInfo("Turkish", "tr-TR", "tr-TR-Wavenet-B", "Male", "Burak"));
-
-        return voices;
     }
 
     public void removeAudioSegment(String sessionId, String audioSegmentId) throws JsonProcessingException {

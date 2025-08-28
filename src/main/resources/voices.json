@@ -1,0 +1,370 @@
+[
+  {
+    "language": "English (US)",
+    "languageCode": "en-US",
+    "voiceName": "en-US-Neural2-E",
+    "gender": "Female",
+    "humanName": "Emily",
+    "profileUrl": "https://cdn.scenith.in/Avatars/US%20F/Emily.jpg"
+  },
+  {
+    "language": "English (US)",
+    "languageCode": "en-US",
+    "voiceName": "en-US-Wavenet-C",
+    "gender": "Female",
+    "humanName": "Charlotte",
+    "profileUrl": "https://cdn.scenith.in/Avatars/US%20F/Charlotte.jpg"
+  },
+  {
+    "language": "English (US)",
+    "languageCode": "en-US",
+    "voiceName": "en-US-Wavenet-E",
+    "gender": "Female",
+    "humanName": "Emma",
+    "profileUrl": "https://cdn.scenith.in/Avatars/US%20F/Emma.jpg"
+  },
+  {
+    "language": "English (US)",
+    "languageCode": "en-US",
+    "voiceName": "en-US-Neural2-F",
+    "gender": "Female",
+    "humanName": "Sophia",
+    "profileUrl": "https://cdn.scenith.in/Avatars/US%20F/Sophia.jpg"
+  },
+  {
+    "language": "English (US)",
+    "languageCode": "en-US",
+    "voiceName": "en-US-Wavenet-F",
+    "gender": "Female",
+    "humanName": "Isabella",
+    "profileUrl": "https://cdn.scenith.in/Avatars/US%20F/Isabella.jpg"
+  },
+  {
+    "language": "English (US)",
+    "languageCode": "en-US",
+    "voiceName": "en-US-Neural2-H",
+    "gender": "Female",
+    "humanName": "Madison",
+    "profileUrl": "https://cdn.scenith.in/Avatars/US%20F/Madison.jpg"
+  },
+  {
+    "language": "English (US)",
+    "languageCode": "en-US",
+    "voiceName": "en-US-Wavenet-A",
+    "gender": "Male",
+    "humanName": "Alexander",
+    "profileUrl": "https://cdn.scenith.in/Avatars/US%20M/Alexander.jpg"
+  },
+  {
+    "language": "English (US)",
+    "languageCode": "en-US",
+    "voiceName": "en-US-Wavenet-B",
+    "gender": "Male",
+    "humanName": "Benjamin",
+    "profileUrl": "https://cdn.scenith.in/Avatars/US%20M/Benjamin.jpg"
+  },
+  {
+    "language": "English (US)",
+    "languageCode": "en-US",
+    "voiceName": "en-US-Neural2-B",
+    "gender": "Male",
+    "humanName": "William",
+    "profileUrl": "https://cdn.scenith.in/Avatars/US%20M/William.jpg"
+  },
+  {
+    "language": "English (US)",
+    "languageCode": "en-US",
+    "voiceName": "en-US-Wavenet-D",
+    "gender": "Male",
+    "humanName": "Daniel",
+    "profileUrl": "https://cdn.scenith.in/Avatars/US%20M/Daniel.png"
+  },
+  {
+    "language": "English (US)",
+    "languageCode": "en-US",
+    "voiceName": "en-US-Neural2-G",
+    "gender": "Male",
+    "humanName": "Gabriel",
+    "profileUrl": "https://cdn.scenith.in/Avatars/US%20M/Gabriel.png"
+  },
+  {
+    "language": "English (US)",
+    "languageCode": "en-US",
+    "voiceName": "en-US-Neural2-J",
+    "gender": "Male",
+    "humanName": "Jackson",
+    "profileUrl": "https://cdn.scenith.in/Avatars/US%20M/Jackson.jpg"
+  },
+  {
+    "language": "English (UK)",
+    "languageCode": "en-GB",
+    "voiceName": "en-GB-Neural2-A",
+    "gender": "Female",
+    "humanName": "Amelia",
+    "profileUrl": "https://cdn.scenith.in/Avatars/UK%20-F/Amelia.jpg"
+  },
+  {
+    "language": "English (UK)",
+    "languageCode": "en-GB",
+    "voiceName": "en-GB-Wavenet-C",
+    "gender": "Female",
+    "humanName": "Catherine",
+    "profileUrl": "https://cdn.scenith.in/Avatars/UK%20-F/Catherine.jpg"
+  },
+  {
+    "language": "English (UK)",
+    "languageCode": "en-GB",
+    "voiceName": "en-GB-Neural2-F",
+    "gender": "Female",
+    "humanName": "Florence",
+    "profileUrl": "https://cdn.scenith.in/Avatars/UK%20-F/Florence.jpg"
+  },
+  {
+    "language": "English (UK)",
+    "languageCode": "en-GB",
+    "voiceName": "en-GB-Wavenet-B",
+    "gender": "Male",
+    "humanName": "Benedict",
+    "profileUrl": "https://cdn.scenith.in/Avatars/UK%20-M/Benedict.jpg"
+  },
+  {
+    "language": "English (UK)",
+    "languageCode": "en-GB",
+    "voiceName": "en-GB-Neural2-D",
+    "gender": "Male",
+    "humanName": "David",
+    "profileUrl": "https://cdn.scenith.in/Avatars/UK%20-M/David.jpg"
+  },
+  {
+    "language": "English (UK)",
+    "languageCode": "en-GB",
+    "voiceName": "en-GB-Neural2-O",
+    "gender": "Male",
+    "humanName": "Oliver",
+    "profileUrl": "https://cdn.scenith.in/Avatars/UK%20-M/Oliver.jpg"
+  },
+  {
+    "language": "Hindi (India)",
+    "languageCode": "hi-IN",
+    "voiceName": "hi-IN-Wavenet-A",
+    "gender": "Female",
+    "humanName": "Alia",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Hindi%20-F/Alia.jpg"
+  },
+  {
+    "language": "Hindi (India)",
+    "languageCode": "hi-IN",
+    "voiceName": "hi-IN-Wavenet-D",
+    "gender": "Female",
+    "humanName": "Kiara",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Hindi%20-F/Kiara.jpg"
+  },
+  {
+    "language": "Hindi (India)",
+    "languageCode": "hi-IN",
+    "voiceName": "hi-IN-Wavenet-B",
+    "gender": "Male",
+    "humanName": "Rohit",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Hindi%20-M/Rohit.png"
+  },
+  {
+    "language": "Hindi (India)",
+    "languageCode": "hi-IN",
+    "voiceName": "hi-IN-Wavenet-C",
+    "gender": "Male",
+    "humanName": "Virat",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Hindi%20-M/Virat.png"
+  },
+  {
+    "language": "Spanish (Spain)",
+    "languageCode": "es-ES",
+    "voiceName": "es-ES-Neural2-A",
+    "gender": "Female",
+    "humanName": "Alba",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Spanish(Spain)/Alba.jpg"
+  },
+  {
+    "language": "Spanish (Spain)",
+    "languageCode": "es-ES",
+    "voiceName": "es-ES-Neural2-B",
+    "gender": "Male",
+    "humanName": "Bruno",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Spanish(Spain)/Bruno.jpg"
+  },
+  {
+    "language": "Spanish (Latin America)",
+    "languageCode": "es-US",
+    "voiceName": "es-US-Neural2-A",
+    "gender": "Female",
+    "humanName": "Alejandra",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Spanish(Latin%20American)/Alejandra.jpg"
+  },
+  {
+    "language": "Spanish (Latin America)",
+    "languageCode": "es-US",
+    "voiceName": "es-US-Neural2-B",
+    "gender": "Male",
+    "humanName": "Bruno-2",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Spanish(Latin%20American)/Bruno-2.jpg"
+  },
+  {
+    "language": "Portuguese (Brazil)",
+    "languageCode": "pt-BR",
+    "voiceName": "pt-BR-Neural2-A",
+    "gender": "Female",
+    "humanName": "Ana",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Portuguese%20(Brazil)/Ana.jpg"
+  },
+  {
+    "language": "Portuguese (Brazil)",
+    "languageCode": "pt-BR",
+    "voiceName": "pt-BR-Neural2-B",
+    "gender": "Male",
+    "humanName": "Nuno",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Portuguese%20(Brazil)/Nuno.jpg"
+  },
+  {
+    "language": "French (France)",
+    "languageCode": "fr-FR",
+    "voiceName": "fr-FR-Neural2-A",
+    "gender": "Female",
+    "humanName": "Amélie",
+    "profileUrl": "https://cdn.scenith.in/Avatars/French(France)/Am%C3%A9lie.jpg"
+  },
+  {
+    "language": "French (France)",
+    "languageCode": "fr-FR",
+    "voiceName": "fr-FR-Neural2-D",
+    "gender": "Male",
+    "humanName": "Damien",
+    "profileUrl": "https://cdn.scenith.in/Avatars/French(France)/Damien.jpg"
+  },
+  {
+    "language": "German (Germany)",
+    "languageCode": "de-DE",
+    "voiceName": "de-DE-Neural2-B",
+    "gender": "Female",
+    "humanName": "Beatrice",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Germany(German)/Beatrice.jpg"
+  },
+  {
+    "language": "German (Germany)",
+    "languageCode": "de-DE",
+    "voiceName": "de-DE-Neural2-D",
+    "gender": "Male",
+    "humanName": "Dominik",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Germany(German)/Dominik.jpg"
+  },
+  {
+    "language": "Arabic (Modern Standard)",
+    "languageCode": "ar-XA",
+    "voiceName": "ar-XA-Wavenet-A",
+    "gender": "Female",
+    "humanName": "Aisha",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Arabic%20(Modern%20Standard)/Aisha.jpg"
+  },
+  {
+    "language": "Arabic (Modern Standard)",
+    "languageCode": "ar-XA",
+    "voiceName": "ar-XA-Wavenet-B",
+    "gender": "Male",
+    "humanName": "Bilal",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Arabic%20(Modern%20Standard)/Bilal.jpg"
+  },
+  {
+    "language": "Japanese",
+    "languageCode": "ja-JP",
+    "voiceName": "ja-JP-Wavenet-B",
+    "gender": "Female",
+    "humanName": "Yuki",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Japanese/Yuki.jpg"
+  },
+  {
+    "language": "Japanese",
+    "languageCode": "ja-JP",
+    "voiceName": "ja-JP-Wavenet-D",
+    "gender": "Male",
+    "humanName": "Daiki",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Japanese/Daiki.jpg"
+  },
+  {
+    "language": "Korean",
+    "languageCode": "ko-KR",
+    "voiceName": "ko-KR-Wavenet-A",
+    "gender": "Female",
+    "humanName": "Areum",
+    "profileUrl": "https://cdn.scenith.in/Avatars/korean/Areum.jpg"
+  },
+  {
+    "language": "Korean",
+    "languageCode": "ko-KR",
+    "voiceName": "ko-KR-Wavenet-B",
+    "gender": "Male",
+    "humanName": "Byung-ho",
+    "profileUrl": "https://cdn.scenith.in/Avatars/korean/Byung-ho.jpg"
+  },
+  {
+    "language": "Chinese (Simplified)",
+    "languageCode": "cmn-CN",
+    "voiceName": "cmn-CN-Wavenet-A",
+    "gender": "Female",
+    "humanName": "An",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Chinese/An.jpg"
+  },
+  {
+    "language": "Chinese (Simplified)",
+    "languageCode": "cmn-CN",
+    "voiceName": "cmn-CN-Wavenet-D",
+    "gender": "Male",
+    "humanName": "Dong",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Chinese/Dong.jpg"
+  },
+  {
+    "language": "Italian",
+    "languageCode": "it-IT",
+    "voiceName": "it-IT-Wavenet-A",
+    "gender": "Female",
+    "humanName": "Alessia",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Italian/Alessia.jpg"
+  },
+  {
+    "language": "Italian",
+    "languageCode": "it-IT",
+    "voiceName": "it-IT-Wavenet-C",
+    "gender": "Male",
+    "humanName": "Carlo",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Italian/Carlo.jpg"
+  },
+  {
+    "language": "Russian",
+    "languageCode": "ru-RU",
+    "voiceName": "ru-RU-Wavenet-A",
+    "gender": "Female",
+    "humanName": "Anastasia",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Russian/Anastasia.jpg"
+  },
+  {
+    "language": "Russian",
+    "languageCode": "ru-RU",
+    "voiceName": "ru-RU-Wavenet-D",
+    "gender": "Male",
+    "humanName": "Dmitri",
+    "profileUrl": "https://cdn.scenith.in/Avatars/Russian/Dmitri.jpg"
+  },
+  {
+    "language": "Turkish",
+    "languageCode": "tr-TR",
+    "voiceName": "tr-TR-Wavenet-A",
+    "gender": "Female",
+    "humanName": "Ayşe",
+    "profileUrl": "https://cdn.scenith.in/Avatars/TURKISH/Ay%C5%9Fe.jpg"
+  },
+  {
+    "language": "Turkish",
+    "languageCode": "tr-TR",
+    "voiceName": "tr-TR-Wavenet-B",
+    "gender": "Male",
+    "humanName": "Burak",
+    "profileUrl": "https://cdn.scenith.in/Avatars/TURKISH/Burak.jpg"
+  }
+]

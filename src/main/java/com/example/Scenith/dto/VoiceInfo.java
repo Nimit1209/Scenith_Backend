@@ -1,5 +1,6 @@
 package com.example.Scenith.dto;
 
+
 public class VoiceInfo {
 
   private String language;
@@ -7,14 +8,9 @@ public class VoiceInfo {
   private String voiceName;
   private String gender;
   private String humanName;
+  private String profileUrl;
 
-  public VoiceInfo(String language, String languageCode, String voiceName, String gender, String humanName) {
-    this.language = language;
-    this.languageCode = languageCode;
-    this.voiceName = voiceName;
-    this.gender = gender;
-    this.humanName = humanName;
-  }
+  public VoiceInfo() {}
 
   public String getLanguage() {
     return language;
@@ -54,5 +50,13 @@ public class VoiceInfo {
 
   public void setHumanName(String humanName) {
     this.humanName = humanName;
+  }
+
+  public String getProfileUrl() {
+    return profileUrl;
+  }
+
+  public void setProfileUrl(String profileUrl) {
+    this.profileUrl = profileUrl;
   }
 }
