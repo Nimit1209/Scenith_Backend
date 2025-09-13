@@ -4282,10 +4282,10 @@ public class VideoEditingService {
         if (timelineState.getCanvasWidth() != null) canvasWidth = timelineState.getCanvasWidth();
         if (timelineState.getCanvasHeight() != null) canvasHeight = timelineState.getCanvasHeight();
 
-        // Create temporary directory for batch files
+        // Create project-specific temporary directory for batch files
         Path baseDirPath = Paths.get(baseDir).toAbsolutePath().normalize();
         if (!Files.exists(baseDirPath)) Files.createDirectories(baseDirPath);
-        Path tempDir = baseDirPath.resolve("temp").toAbsolutePath().normalize();
+        Path tempDir = baseDirPath.resolve("temp").resolve(String.valueOf(projectId)).toAbsolutePath().normalize();
         if (!Files.exists(tempDir)) Files.createDirectories(tempDir);
 
         // Calculate total video duration
@@ -4316,7 +4316,7 @@ public class VideoEditingService {
             }
 
             // Concatenate all batch files into the final video
-            concatenateBatches(tempVideoFiles, outputPath, fps != null ? fps : 30);
+            concatenateBatches(tempVideoFiles, outputPath, fps != null ? fps : 30,projectId);
             Project project = projectRepository.findById(projectId)
                     .orElseThrow(() -> new RuntimeException("Project not found: " + projectId));
             project.setProgress(100.0);
@@ -4324,27 +4324,23 @@ public class VideoEditingService {
             projectRepository.save(project);
 
         } finally {
-            // Clean up temporary text PNGs
-            for (File tempFile : tempTextFiles) {
-                if (tempFile.exists()) {
-                    try {
-                        Files.delete(tempFile.toPath());
-                        System.out.println("Deleted temporary text PNG: " + tempFile.getAbsolutePath());
-                    } catch (IOException e) {
-                        System.err.println("Failed to delete temporary text PNG " + tempFile.getAbsolutePath() + ": " + e.getMessage());
-                    }
-                }
-            }
-            // Clean up temporary batch videos
-            for (String tempVideo : tempVideoFiles) {
-                Path tempFile = Paths.get(tempVideo);
-                if (Files.exists(tempFile)) {
-                    try {
-                        Files.delete(tempFile);
-                        System.out.println("Deleted temporary batch video: " + tempFile.toAbsolutePath());
-                    } catch (IOException e) {
-                        System.err.println("Failed to delete temporary batch video " + tempFile.toAbsolutePath() + ": " + e.getMessage());
-                    }
+            // Clean up project-specific temporary directory
+            if (Files.exists(tempDir)) {
+                try {
+                    Files.walk(tempDir)
+                            .sorted(Comparator.reverseOrder())
+                            .map(Path::toFile)
+                            .forEach(file -> {
+                                try {
+                                    Files.delete(file.toPath());
+                                    System.out.println("Deleted temporary file: " + file.getAbsolutePath());
+                                } catch (IOException e) {
+                                    System.err.println("Failed to delete temporary file " + file.getAbsolutePath() + ": " + e.getMessage());
+                                }
+                            });
+                    System.out.println("Deleted project-specific temp directory: " + tempDir.toAbsolutePath());
+                } catch (IOException e) {
+                    System.err.println("Failed to delete project-specific temp directory " + tempDir.toAbsolutePath() + ": " + e.getMessage());
                 }
             }
         }
@@ -4374,8 +4370,8 @@ public class VideoEditingService {
             Files.createDirectories(baseDirPath);
         }
 
-        // Create temp directory
-        Path tempDir = baseDirPath.resolve("temp").toAbsolutePath().normalize();
+        // Create project-specific temp directory
+        Path tempDir = baseDirPath.resolve("temp").resolve(String.valueOf(projectId)).toAbsolutePath().normalize();
         if (!Files.exists(tempDir)) {
             Files.createDirectories(tempDir);
         }
@@ -4401,7 +4397,7 @@ public class VideoEditingService {
         // Add inputs for relevant video segments
         for (VideoSegment vs : relevantVideoSegments) {
             String r2Path = vs.getSourceVideoPath();
-            String localFileName = vs.getId() + "_" + System.currentTimeMillis() + "_" + new File(r2Path).getName();
+            String localFileName = vs.getId() + "_" + UUID.randomUUID().toString() + "_" + new File(r2Path).getName();
             Path localPath = tempDir.resolve("videos").resolve(localFileName).toAbsolutePath().normalize();
             Files.createDirectories(localPath.getParent());
             logger.info("Downloading video from R2: {} to {}", r2Path, localPath);
@@ -4420,7 +4416,7 @@ public class VideoEditingService {
         // Add inputs for relevant image segments
         for (ImageSegment is : relevantImageSegments) {
             String r2Path = is.getImagePath();
-            String localFileName = is.getId() + "_" + System.currentTimeMillis() + "_" + new File(r2Path).getName();
+            String localFileName = is.getId() + "_" + UUID.randomUUID().toString() + "_" + new File(r2Path).getName();
             Path localPath = tempDir.resolve("images").resolve(localFileName).toAbsolutePath().normalize();
             Files.createDirectories(localPath.getParent());
             if (!is.isElement()) {
@@ -4468,7 +4464,7 @@ public class VideoEditingService {
         // Add inputs for relevant audio segments
         for (AudioSegment as : relevantAudioSegments) {
             String r2Path = as.getAudioPath();
-            String localFileName = as.getId() + "_" + System.currentTimeMillis() + "_" + new File(r2Path).getName();
+            String localFileName = as.getId() + "_" + UUID.randomUUID().toString() + "_" + new File(r2Path).getName();
             Path localPath = tempDir.resolve("audio").resolve(localFileName).toAbsolutePath().normalize();
             Files.createDirectories(localPath.getParent());
             logger.info("Downloading audio from R2: {} to {}", r2Path, localPath);
@@ -5705,38 +5701,25 @@ public class VideoEditingService {
 
         // Execute FFmpeg command
         System.out.println("FFmpeg command for batch: " + String.join(" ", command));
-        try {
-            double totalDuration = Math.max(
-                    timelineState.getSegments().stream().mapToDouble(VideoSegment::getTimelineEndTime).max().orElse(0.0),
-                    Math.max(
-                            timelineState.getImageSegments().stream().mapToDouble(ImageSegment::getTimelineEndTime).max().orElse(0.0),
-                            Math.max(
-                                    timelineState.getTextSegments().stream().mapToDouble(TextSegment::getTimelineEndTime).max().orElse(0.0),
-                                    timelineState.getAudioSegments().stream().mapToDouble(AudioSegment::getTimelineEndTime).max().orElse(0.0)
-                            )
-                    )
-            );
-            int totalBatches = (int) Math.ceil(totalDuration / 8.0);
-            int batchIndex = (int) (batchStart / 8.0);
-            executeFFmpegCommand(command, projectId, batchStart, batchDuration, totalDuration, batchIndex);
-        } finally {
-            // Clean up temporary files
-            for (File tempFile : tempFiles) {
-                try {
-                    if (tempFile.exists()) {
-                        Files.delete(tempFile.toPath());
-                        System.out.println("Deleted temporary file: " + tempFile.getAbsolutePath());
-                    }
-                } catch (IOException e) {
-                    System.err.println("Failed to delete temporary file " + tempFile.getAbsolutePath() + ": " + e.getMessage());
-                }
-            }
-        }
+        double totalDuration = Math.max(
+                timelineState.getSegments().stream().mapToDouble(VideoSegment::getTimelineEndTime).max().orElse(0.0),
+                Math.max(
+                        timelineState.getImageSegments().stream().mapToDouble(ImageSegment::getTimelineEndTime).max().orElse(0.0),
+                        Math.max(
+                                timelineState.getTextSegments().stream().mapToDouble(TextSegment::getTimelineEndTime).max().orElse(0.0),
+                                timelineState.getAudioSegments().stream().mapToDouble(AudioSegment::getTimelineEndTime).max().orElse(0.0)
+                        )
+                )
+        );
+        int totalBatches = (int) Math.ceil(totalDuration / 8.0);
+        int batchIndex = (int) (batchStart / 8.0);
+        executeFFmpegCommand(command, projectId, batchStart, batchDuration, totalDuration, batchIndex);
+
     }
 
 
 
-    private void concatenateBatches(List<String> tempVideoFiles, String outputPath, float fps)
+    private void concatenateBatches(List<String> tempVideoFiles, String outputPath, float fps,Long projectId)
             throws IOException, InterruptedException {
         if (tempVideoFiles.isEmpty()) {
             throw new IllegalStateException("No batch files to concatenate");
@@ -5749,7 +5732,7 @@ public class VideoEditingService {
 
         // Create a text file listing the batch files
         Path baseDirPath = Paths.get(baseDir).toAbsolutePath().normalize();
-        Path tempDir = baseDirPath.resolve("temp").toAbsolutePath().normalize();
+        Path tempDir = baseDirPath.resolve("temp").resolve(String.valueOf(projectId)).toAbsolutePath().normalize();
         if (!Files.exists(tempDir)) Files.createDirectories(tempDir);
         Path concatListFile = tempDir.resolve("concat_list.txt");
         try (PrintWriter writer = new PrintWriter(Files.newBufferedWriter(concatListFile, StandardCharsets.UTF_8))) {
@@ -5775,19 +5758,9 @@ public class VideoEditingService {
         command.add(Paths.get(outputPath).toAbsolutePath().normalize().toString());
 
         System.out.println("FFmpeg concatenation command: " + String.join(" ", command));
-        try {
-            executeFFmpegCommand(command);
-        } finally {
-            if (Files.exists(concatListFile)) {
-                try {
-                    Files.delete(concatListFile);
-                    System.out.println("Deleted concat list file: " + concatListFile.toAbsolutePath());
-                } catch (IOException e) {
-                    System.err.println("Failed to delete concat list file: " + e.getMessage());
-                }
-            }
-        }
+        executeFFmpegCommand(command);
     }
+
     private String generateTextPng(TextSegment ts, File tempDir, int canvasWidth, int canvasHeight) throws IOException {
         // Resolution multiplier for high-quality text (1.5 for 4K, 2.0 for 1080p)
         final double RESOLUTION_MULTIPLIER = canvasWidth >= 3840 ? 1.5 : 2.0;
