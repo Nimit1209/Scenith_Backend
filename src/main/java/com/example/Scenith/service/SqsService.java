@@ -17,63 +17,61 @@ public class SqsService {
     private static final Logger logger = LoggerFactory.getLogger(SqsService.class);
     private SqsClient sqsClient;
 
-    @Value("${sqs.queue.url}")
-    private String queueUrl;
-
     @Value("${sqs.region}")
     private String region;
 
     @PostConstruct
     public void init() {
-        logger.info("Initializing SqsService with queue URL: {}", queueUrl);
+        logger.info("Initializing SqsService with region: {}", region);
         this.sqsClient = SqsClient.builder()
-                .credentialsProvider(DefaultCredentialsProvider.create()) // Use default credential provider
+                .credentialsProvider(DefaultCredentialsProvider.create())
                 .region(Region.of(region))
                 .build();
     }
 
-    public String sendMessage(String messageBody) {
+    public String sendMessage(String messageBody, String queueUrl) {
         try {
-            SendMessageRequest request = SendMessageRequest.builder()
+            SendMessageRequest sendMsgRequest = SendMessageRequest.builder()
                     .queueUrl(queueUrl)
                     .messageBody(messageBody)
                     .build();
-            SendMessageResponse response = sqsClient.sendMessage(request);
-            logger.info("Sent message to SQS: messageId={}", response.messageId());
+            SendMessageResponse response = sqsClient.sendMessage(sendMsgRequest);
+            logger.info("Message sent to queue {}: messageId={}", queueUrl, response.messageId());
             return response.messageId();
         } catch (SqsException e) {
-            logger.error("Failed to send message to SQS: {}", e.getMessage(), e);
-            throw new RuntimeException("Failed to send message to SQS", e);
+            logger.error("Failed to send message to queue {}: {}", queueUrl, e.getMessage(), e);
+            throw e;
         }
     }
 
-    public List<Message> receiveMessages(int maxMessages) {
+    public List<Message> receiveMessages(String queueUrl, int maxMessages) {
         try {
-            ReceiveMessageRequest request = ReceiveMessageRequest.builder()
+            ReceiveMessageRequest receiveRequest = ReceiveMessageRequest.builder()
                     .queueUrl(queueUrl)
                     .maxNumberOfMessages(maxMessages)
-                    .waitTimeSeconds(20) // Long polling
+                    .waitTimeSeconds(20) // Long polling for efficiency
+                    .visibilityTimeout(30)
                     .build();
-            List<Message> messages = sqsClient.receiveMessage(request).messages();
-            logger.info("Received {} messages from SQS", messages.size());
+            List<Message> messages = sqsClient.receiveMessage(receiveRequest).messages();
+            logger.debug("Received {} messages from queue {}", messages.size(), queueUrl);
             return messages;
         } catch (SqsException e) {
-            logger.error("Failed to receive messages from SQS: {}", e.getMessage(), e);
-            throw new RuntimeException("Failed to receive messages from SQS", e);
+            logger.error("Failed to receive messages from queue {}: {}", queueUrl, e.getMessage(), e);
+            throw e;
         }
     }
 
-    public void deleteMessage(String receiptHandle) {
+    public void deleteMessage(String receiptHandle, String queueUrl) {
         try {
-            DeleteMessageRequest request = DeleteMessageRequest.builder()
+            DeleteMessageRequest deleteRequest = DeleteMessageRequest.builder()
                     .queueUrl(queueUrl)
                     .receiptHandle(receiptHandle)
                     .build();
-            sqsClient.deleteMessage(request);
-            logger.info("Deleted message from SQS: receiptHandle={}", receiptHandle);
+            sqsClient.deleteMessage(deleteRequest);
+            logger.debug("Deleted message from queue {}: receiptHandle={}", queueUrl, receiptHandle);
         } catch (SqsException e) {
-            logger.error("Failed to delete message from SQS: {}", e.getMessage(), e);
-            throw new RuntimeException("Failed to delete message from SQS", e);
+            logger.error("Failed to delete message from queue {}: {}", queueUrl, e.getMessage(), e);
+            throw e;
         }
     }
 }

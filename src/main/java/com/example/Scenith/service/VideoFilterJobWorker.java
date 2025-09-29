@@ -13,18 +13,18 @@ import java.util.List;
 import java.util.Map;
 
 @Component
-public class VideoExportWorker {
-    private static final Logger logger = LoggerFactory.getLogger(VideoExportWorker.class);
+public class VideoFilterJobWorker {
+    private static final Logger logger = LoggerFactory.getLogger(VideoFilterJobWorker.class);
     private final SqsService sqsService;
-    private final VideoEditingService videoEditingService;
+    private final VideoFilterJobService videoFilterJobService;
     private final ObjectMapper objectMapper;
 
     @Value("${sqs.queue.url}")
     private String videoExportQueueUrl;
 
-    public VideoExportWorker(SqsService sqsService, VideoEditingService videoEditingService, ObjectMapper objectMapper) {
+    public VideoFilterJobWorker(SqsService sqsService, VideoFilterJobService videoFilterJobService, ObjectMapper objectMapper) {
         this.sqsService = sqsService;
-        this.videoEditingService = videoEditingService;
+        this.videoFilterJobService = videoFilterJobService;
         this.objectMapper = objectMapper;
     }
 
@@ -35,9 +35,8 @@ public class VideoExportWorker {
             for (Message message : messages) {
                 try {
                     Map<String, String> taskDetails = objectMapper.readValue(message.body(), new TypeReference<>() {});
-                    String sessionId = taskDetails.get("sessionId");
-                    logger.info("Processing export task: sessionId={}", sessionId);
-                    videoEditingService.processExportTask(taskDetails);
+                    logger.info("Processing video filter job: jobId={}", taskDetails.get("jobId"));
+                    videoFilterJobService.processJobFromSqs(taskDetails);
                     sqsService.deleteMessage(message.receiptHandle(), videoExportQueueUrl);
                     logger.info("Successfully processed and deleted message: messageId={}", message.messageId());
                 } catch (Exception e) {

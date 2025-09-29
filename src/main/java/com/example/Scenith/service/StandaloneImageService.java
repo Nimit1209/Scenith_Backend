@@ -71,7 +71,9 @@ public class StandaloneImageService {
     // Create temporary files for processing
     String tempFileName = "standalone-" + System.currentTimeMillis() + "-" + imageFile.getOriginalFilename();
     String tempInputPath = absoluteBaseDir + File.separator + "videoeditor" + File.separator + tempFileName;
-    String outputFileName = "bg_removed_" + imageFile.getOriginalFilename();
+    // Replace the original extension with .png
+    String originalFileName = imageFile.getOriginalFilename();
+    String outputFileName = "bg_removed_" + originalFileName.substring(0, originalFileName.lastIndexOf('.')) + ".png";
     String tempOutputPath = absoluteBaseDir + File.separator + "videoeditor" + File.separator + outputFileName;
 
     File inputFile = null;

@@ -82,6 +82,9 @@ public class VideoEditingService {
     @Value("${google.credentials.path}")
     private String credentialsPath;
 
+    @Value("${sqs.queue.url}")
+    private String videoExportQueueUrl;
+
     public VideoEditingService(
             ProjectRepository projectRepository,
             ObjectMapper objectMapper,
@@ -1822,76 +1825,58 @@ public class VideoEditingService {
                     continue;
                 }
 
-                // NEW: Split subtitle text into chunks that fit within maxTextWidth
-                List<String> subtitleChunks = splitSubtitleText(
-                        subtitle.getText().trim(),
-                        maxTextWidth,
-                        subtitleProperties
-                );
+                String subtitleText = subtitle.getText().trim();
 
-                // NEW: Calculate duration per chunk (distribute original duration across chunks)
-                double chunkDuration = (endTime - startTime) / subtitleChunks.size();
-                double currentStartTime = startTime;
-
-                for (String chunkText : subtitleChunks) {
-                    double chunkEndTime = currentStartTime + chunkDuration;
-
-                    if (!timelineState.isTimelinePositionAvailable(currentStartTime, chunkEndTime, subtitleLayer)) {
-                        System.out.println("Skipping subtitle chunk at " + currentStartTime + "s due to overlap in layer " + subtitleLayer);
-                        continue;
-                    }
-
-                    TextSegment textSegment = new TextSegment();
-                    textSegment.setId(UUID.randomUUID().toString());
-                    textSegment.setText(chunkText);
-                    textSegment.setLayer(subtitleLayer);
-                    textSegment.setTimelineStartTime(currentStartTime);
-                    textSegment.setTimelineEndTime(chunkEndTime);
-
-                    textSegment.setPositionX(subtitleProperties != null && subtitleProperties.containsKey("positionX")
-                            ? (int) ((Number) subtitleProperties.get("positionX")).doubleValue() : 0);
-
-                    textSegment.setFontFamily(subtitleProperties != null && subtitleProperties.containsKey("fontFamily")
-                            ? (String) subtitleProperties.get("fontFamily") : "Montserrat Alternates Black");
-                    textSegment.setFontColor(subtitleProperties != null && subtitleProperties.containsKey("fontColor")
-                            ? (String) subtitleProperties.get("fontColor") : "black");
-                    textSegment.setBackgroundColor(subtitleProperties != null && subtitleProperties.containsKey("backgroundColor")
-                            ? (String) subtitleProperties.get("backgroundColor") : "white");
-                    textSegment.setBackgroundOpacity(subtitleProperties != null && subtitleProperties.containsKey("backgroundOpacity")
-                            ? ((Number) subtitleProperties.get("backgroundOpacity")).doubleValue() : 1.0);
-                    textSegment.setPositionY(subtitleProperties != null && subtitleProperties.containsKey("positionY")
-                            ? (int) ((Number) subtitleProperties.get("positionY")).doubleValue() : 350);
-                    textSegment.setOpacity(subtitleProperties != null && subtitleProperties.containsKey("opacity")
-                            ? ((Number) subtitleProperties.get("opacity")).doubleValue() : 1.0);
-                    textSegment.setScale(subtitleProperties != null && subtitleProperties.containsKey("scale")
-                            ? ((Number) subtitleProperties.get("scale")).doubleValue() : 1.25);
-                    textSegment.setAlignment(subtitleProperties != null && subtitleProperties.containsKey("alignment")
-                            ? (String) subtitleProperties.get("alignment") : "center");
-                    textSegment.setBackgroundH(subtitleProperties != null && subtitleProperties.containsKey("backgroundH")
-                            ? (int) ((Number) subtitleProperties.get("backgroundH")).doubleValue() : 50);
-                    textSegment.setBackgroundW(subtitleProperties != null && subtitleProperties.containsKey("backgroundW")
-                            ? (int) ((Number) subtitleProperties.get("backgroundW")).doubleValue() : 50);
-                    textSegment.setBackgroundBorderRadius(subtitleProperties != null && subtitleProperties.containsKey("backgroundBorderRadius")
-                            ? (int) ((Number) subtitleProperties.get("backgroundBorderRadius")).doubleValue() : 15);
-                    textSegment.setBackgroundBorderWidth(subtitleProperties != null && subtitleProperties.containsKey("backgroundBorderWidth")
-                            ? (int) ((Number) subtitleProperties.get("backgroundBorderWidth")).doubleValue() : 0);
-                    textSegment.setTextBorderWidth(subtitleProperties != null && subtitleProperties.containsKey("textBorderWidth")
-                            ? (int) ((Number) subtitleProperties.get("textBorderWidth")).doubleValue() : 0);
-                    textSegment.setLetterSpacing(subtitleProperties != null && subtitleProperties.containsKey("letterSpacing")
-                            ? ((Number) subtitleProperties.get("letterSpacing")).doubleValue() : 0.0);
-                    textSegment.setLineSpacing(subtitleProperties != null && subtitleProperties.containsKey("lineSpacing")
-                            ? ((Number) subtitleProperties.get("lineSpacing")).doubleValue() : 1.2);
-                    textSegment.setRotation(subtitleProperties != null && subtitleProperties.containsKey("rotation")
-                            ? ((Number) subtitleProperties.get("rotation")).doubleValue() : 0.0);
-                    textSegment.setSubtitle(true);
-
-                    timelineState.getTextSegments().add(textSegment);
-
-                    // NEW: Increment start time for the next chunk
-                    currentStartTime = chunkEndTime;
+                if (!timelineState.isTimelinePositionAvailable(startTime, endTime, subtitleLayer)) {
+                    System.out.println("Skipping subtitle at " + startTime + "s due to overlap in layer " + subtitleLayer);
+                    continue;
                 }
-            }
 
+                TextSegment textSegment = new TextSegment();
+                textSegment.setId(UUID.randomUUID().toString());
+                textSegment.setText(subtitleText);
+                textSegment.setLayer(subtitleLayer);
+                textSegment.setTimelineStartTime(startTime);
+                textSegment.setTimelineEndTime(endTime);
+
+                textSegment.setPositionX(subtitleProperties != null && subtitleProperties.containsKey("positionX")
+                        ? (int) ((Number) subtitleProperties.get("positionX")).doubleValue() : 0);
+                textSegment.setFontFamily(subtitleProperties != null && subtitleProperties.containsKey("fontFamily")
+                        ? (String) subtitleProperties.get("fontFamily") : "Montserrat Alternates Black");
+                textSegment.setFontColor(subtitleProperties != null && subtitleProperties.containsKey("fontColor")
+                        ? (String) subtitleProperties.get("fontColor") : "black");
+                textSegment.setBackgroundColor(subtitleProperties != null && subtitleProperties.containsKey("backgroundColor")
+                        ? (String) subtitleProperties.get("backgroundColor") : "white");
+                textSegment.setBackgroundOpacity(subtitleProperties != null && subtitleProperties.containsKey("backgroundOpacity")
+                        ? ((Number) subtitleProperties.get("backgroundOpacity")).doubleValue() : 1.0);
+                textSegment.setPositionY(subtitleProperties != null && subtitleProperties.containsKey("positionY")
+                        ? (int) ((Number) subtitleProperties.get("positionY")).doubleValue() : 350);
+                textSegment.setOpacity(subtitleProperties != null && subtitleProperties.containsKey("opacity")
+                        ? ((Number) subtitleProperties.get("opacity")).doubleValue() : 1.0);
+                textSegment.setScale(subtitleProperties != null && subtitleProperties.containsKey("scale")
+                        ? ((Number) subtitleProperties.get("scale")).doubleValue() : 1.5); // Default scale set to 1.5
+                textSegment.setAlignment(subtitleProperties != null && subtitleProperties.containsKey("alignment")
+                        ? (String) subtitleProperties.get("alignment") : "center");
+                textSegment.setBackgroundH(subtitleProperties != null && subtitleProperties.containsKey("backgroundH")
+                        ? (int) ((Number) subtitleProperties.get("backgroundH")).doubleValue() : 50);
+                textSegment.setBackgroundW(subtitleProperties != null && subtitleProperties.containsKey("backgroundW")
+                        ? (int) ((Number) subtitleProperties.get("backgroundW")).doubleValue() : 50);
+                textSegment.setBackgroundBorderRadius(subtitleProperties != null && subtitleProperties.containsKey("backgroundBorderRadius")
+                        ? (int) ((Number) subtitleProperties.get("backgroundBorderRadius")).doubleValue() : 15);
+                textSegment.setBackgroundBorderWidth(subtitleProperties != null && subtitleProperties.containsKey("backgroundBorderWidth")
+                        ? (int) ((Number) subtitleProperties.get("backgroundBorderWidth")).doubleValue() : 0);
+                textSegment.setTextBorderWidth(subtitleProperties != null && subtitleProperties.containsKey("textBorderWidth")
+                        ? (int) ((Number) subtitleProperties.get("textBorderWidth")).doubleValue() : 0);
+                textSegment.setLetterSpacing(subtitleProperties != null && subtitleProperties.containsKey("letterSpacing")
+                        ? ((Number) subtitleProperties.get("letterSpacing")).doubleValue() : 0.0);
+                textSegment.setLineSpacing(subtitleProperties != null && subtitleProperties.containsKey("lineSpacing")
+                        ? ((Number) subtitleProperties.get("lineSpacing")).doubleValue() : 1.2);
+                textSegment.setRotation(subtitleProperties != null && subtitleProperties.containsKey("rotation")
+                        ? ((Number) subtitleProperties.get("rotation")).doubleValue() : 0.0);
+                textSegment.setSubtitle(true);
+
+                timelineState.getTextSegments().add(textSegment);
+            }
             // Clean up temporary file
             File mixedAudioFile = new File(mixedAudioPath);
             if (mixedAudioFile.exists()) {
@@ -1907,74 +1892,66 @@ public class VideoEditingService {
     // NEW: Helper method to split subtitle text into chunks that fit within max width
     private List<String> splitSubtitleText(String text, int maxTextWidth, Map<String, Object> subtitleProperties) {
         List<String> chunks = new ArrayList<>();
-        String[] words = text.split("\\s+");
-        StringBuilder currentChunk = new StringBuilder();
         double scale = subtitleProperties != null && subtitleProperties.containsKey("scale")
-                ? ((Number) subtitleProperties.get("scale")).doubleValue() : 1.25;
+                ? ((Number) subtitleProperties.get("scale")).doubleValue() : 1.5; // Default scale 1.5
         double letterSpacing = subtitleProperties != null && subtitleProperties.containsKey("letterSpacing")
                 ? ((Number) subtitleProperties.get("letterSpacing")).doubleValue() : 0.0;
 
-        for (String word : words) {
-            String testChunk = currentChunk.length() > 0 ? currentChunk + " " + word : word;
-            int textWidth = estimateTextWidth(testChunk, subtitleProperties);
-
-            if (textWidth <= maxTextWidth) {
-                if (currentChunk.length() > 0) {
-                    currentChunk.append(" ");
-                }
-                currentChunk.append(word);
-            } else {
-                if (currentChunk.length() > 0) {
-                    chunks.add(currentChunk.toString());
-                    currentChunk = new StringBuilder(word);
+        int textWidth = estimateTextWidth(text, subtitleProperties);
+        if (textWidth <= maxTextWidth) {
+            chunks.add(text);
+        } else {
+            String[] words = text.split("\\s+");
+            StringBuilder currentChunk = new StringBuilder();
+            for (String word : words) {
+                String testChunk = currentChunk.length() > 0 ? currentChunk + " " + word : word;
+                if (estimateTextWidth(testChunk, subtitleProperties) <= maxTextWidth) {
+                    if (currentChunk.length() > 0) {
+                        currentChunk.append(" ");
+                    }
+                    currentChunk.append(word);
                 } else {
-                    // Handle single word longer than max width (rare case)
-                    chunks.add(word);
+                    if (currentChunk.length() > 0) {
+                        chunks.add(currentChunk.toString());
+                        currentChunk = new StringBuilder(word);
+                    } else {
+                        chunks.add(word);
+                    }
                 }
+            }
+            if (currentChunk.length() > 0) {
+                chunks.add(currentChunk.toString());
             }
         }
 
-        if (currentChunk.length() > 0) {
-            chunks.add(currentChunk.toString());
-        }
-
-        // Ensure at least one chunk
         if (chunks.isEmpty()) {
             chunks.add("");
         }
-
         return chunks;
     }
 
-    // NEW: Helper method to estimate text width based on font properties
     private int estimateTextWidth(String text, Map<String, Object> subtitleProperties) {
-        // Extract font properties
         String fontFamily = subtitleProperties != null && subtitleProperties.containsKey("fontFamily")
                 ? (String) subtitleProperties.get("fontFamily") : "Montserrat Alternates Black";
         double scale = subtitleProperties != null && subtitleProperties.containsKey("scale")
-                ? ((Number) subtitleProperties.get("scale")).doubleValue() : 1.25;
+                ? ((Number) subtitleProperties.get("scale")).doubleValue() : 1.5;
         double letterSpacing = subtitleProperties != null && subtitleProperties.containsKey("letterSpacing")
                 ? ((Number) subtitleProperties.get("letterSpacing")).doubleValue() : 0.0;
 
-        // Simplified text width estimation (adjust based on your rendering engine)
-        // Assumption: Average character width is 10 pixels at scale 1.0 for a standard font
-        double baseCharWidth = 10.0; // Adjust this based on font metrics or testing
+        double baseCharWidth = 12.0;
         double scaledCharWidth = baseCharWidth * scale;
         double totalWidth = text.length() * scaledCharWidth;
 
-        // Add letter spacing
         if (text.length() > 1) {
             totalWidth += (text.length() - 1) * letterSpacing;
         }
 
-        // Adjust for font family (optional, if you have font-specific metrics)
         if (fontFamily.equals("Montserrat Alternates Black")) {
-            totalWidth *= 1.1; // Example adjustment for wider font
+            totalWidth *= 1.1; // Wider font adjustment
         }
 
         return (int) Math.ceil(totalWidth);
     }
-
     public void updateMultipleTextSegments(
             String sessionId,
             List<String> segmentIds,
@@ -4178,7 +4155,7 @@ public class VideoEditingService {
 
         // Send task to SQS
         String messageBody = objectMapper.writeValueAsString(taskDetails);
-        String messageId = sqsService.sendMessage(messageBody);
+        String messageId = sqsService.sendMessage(messageBody,videoExportQueueUrl);
 
         // Update project status to PENDING
         project.setStatus("PENDING");
