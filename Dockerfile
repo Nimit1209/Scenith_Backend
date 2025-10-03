@@ -213,17 +213,19 @@ WORKDIR /app
 # Create the expected directory structure for Python scripts
 RUN mkdir -p /app/scripts /temp/scripts
 
-# Copy the background removal script to the expected location
+# Copy the Python scripts to the expected locations
 COPY scripts/remove_background.py /app/scripts/remove_background.py
 
 # Copy the whisper script to the expected locations
 COPY scripts/whisper_subtitle.py /temp/scripts/whisper_subtitle.py
 COPY scripts/whisper_subtitle.py /app/scripts/whisper_subtitle.py
+COPY scripts/compress_media.py /app/scripts/compress_media.py
 
 # Make the Python scripts executable
 RUN chmod +x /app/scripts/remove_background.py && \
     chmod +x /temp/scripts/whisper_subtitle.py && \
-    chmod +x /app/scripts/whisper_subtitle.py
+    chmod +x /app/scripts/whisper_subtitle.py && \
+    chmod +x /app/scripts/compress_media.py
 
 # Copy the .env file
 COPY .env /app/.env
