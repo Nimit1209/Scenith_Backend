@@ -120,11 +120,6 @@ public class CompressionService {
             throw new IllegalArgumentException("Not authorized to compress this media");
         }
 
-        if (!compressedMedia.getStatus().equals("UPLOADED")) {
-            logger.error("Media {} is not in UPLOADED state, current state: {}", mediaId, compressedMedia.getStatus());
-            throw new IllegalStateException("Media is not ready for compression");
-        }
-
         String absoluteBaseDir = baseDir.startsWith("/") ? baseDir : "/" + baseDir;
         String tempInputPath = absoluteBaseDir + File.separator + "videoeditor" + File.separator + "input-" + System.currentTimeMillis() + "-" + compressedMedia.getOriginalFileName();
         String outputFileName = "compressed_" + compressedMedia.getOriginalFileName();
@@ -257,5 +252,29 @@ public class CompressionService {
 
     public List<CompressedMedia> getUserCompressedMedia(User user) {
         return compressedMediaRepository.findByUser(user);
+    }
+
+    public CompressedMedia updateTargetSize(User user, Long mediaId, String newTargetSize) throws IllegalArgumentException {
+
+        if (newTargetSize == null || !newTargetSize.matches("\\d+(KB|MB)")) {
+            throw new IllegalArgumentException("Target size must be in format 'numberKB' or 'numberMB'");
+        }
+
+        CompressedMedia compressedMedia = compressedMediaRepository.findById(mediaId)
+                .orElseThrow(() -> {
+                    return new IllegalArgumentException("Media not found");
+                });
+
+        if (!compressedMedia.getUser().getId().equals(user.getId())) {
+            throw new IllegalArgumentException("Not authorized to update this media");
+        }
+
+        if (!compressedMedia.getStatus().equals("UPLOADED")) {
+            throw new IllegalStateException("Media target size can only be updated in UPLOADED state");
+        }
+
+        compressedMedia.setTargetSize(newTargetSize);
+        compressedMediaRepository.save(compressedMedia);
+        return compressedMedia;
     }
 }

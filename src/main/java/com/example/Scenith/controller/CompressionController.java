@@ -63,4 +63,21 @@ public class CompressionController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("message", "Failed to retrieve media: " + e.getMessage()));
         }
     }
+
+    @PatchMapping("/update-target-size/{mediaId}")
+    public ResponseEntity<?> updateTargetSize(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long mediaId,
+            @RequestParam("targetSize") String targetSize
+    ) {
+        try {
+            User user = compressionService.getUserFromToken(token);
+            CompressedMedia result = compressionService.updateTargetSize(user, mediaId, targetSize);
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("message", "Failed to update target size: " + e.getMessage()));
+        }
+    }
 }

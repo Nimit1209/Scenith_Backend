@@ -62,16 +62,20 @@ def get_media_info(input_path):
 def is_image(file_path, format_name):
     """Check if the file is an image based on extension and format."""
     image_extensions = {'.jpg', '.jpeg', '.png', '.heic', '.heif'}
-    image_formats = {'jpeg', 'jpg', 'png', 'heic', 'heif'}
+    image_formats = {'jpeg', 'jpg', 'png', 'heic', 'heif', 'image2'}
+
     extension = Path(file_path).suffix.lower()
     if extension not in image_extensions:
         logger.error(f"Unsupported file extension: {extension}")
         sys.stderr.write(f"Unsupported file extension: {extension}\n")
         return False
-    if not any(fmt in format_name.split(',') for fmt in image_formats):
+
+    format_lower = format_name.lower()
+    if not any(fmt in format_lower for fmt in image_formats):
         logger.error(f"Unsupported file format: {format_name}")
         sys.stderr.write(f"Unsupported file format: {format_name}\n")
         return False
+
     return True
 
 def compress_image(input_path, output_path, target_size_bytes):
@@ -184,20 +188,22 @@ def compress_video(input_path, output_path, target_size_bytes, duration):
     for attempt in range(max_attempts):
         logger.debug(f"Attempt {attempt + 1}, video bitrate: {video_bitrate_kbps}kbps")
         cmd_pass1 = [
-            '/usr/local/bin/ffmpeg',
+            'ffmpeg',
             '-i', input_path,
             '-c:v', 'libx264',
             '-b:v', f'{int(video_bitrate_kbps)}k',
+            '-vf', 'scale=ceil(iw/2)*2:ih',
             '-pass', '1',
             '-an',
             '-f', 'null',
             '-y', '/dev/null'
         ]
         cmd_pass2 = [
-            '/usr/local/bin/ffmpeg',
+            'ffmpeg',
             '-i', input_path,
             '-c:v', 'libx264',
             '-b:v', f'{int(video_bitrate_kbps)}k',
+            '-vf', 'scale=ceil(iw/2)*2:ih',
             '-pass', '2',
             '-c:a', 'aac',
             '-b:a', f'{audio_bitrate_kbps}k',
