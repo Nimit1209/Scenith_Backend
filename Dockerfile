@@ -165,7 +165,11 @@ RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH 
     /usr/local/bin/pip3.11 install "jsonschema" "click" "aiohttp" && \
     /usr/local/bin/pip3.11 install "rembg==2.0.67"
 
-# Step 7: Install whisper with constraints to prevent numpy upgrade
+# Step 7a: Install tiktoken with a specific version that has prebuilt wheels
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "tiktoken==0.7.0"
+
+# Step 7b: Install whisper with constraints to prevent numpy upgrade
 RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
     echo "numpy<2.0" > /tmp/constraints.txt && \
     /usr/local/bin/pip3.11 install "openai-whisper==20250625" --constraint /tmp/constraints.txt
@@ -206,7 +210,9 @@ RUN echo "Verifying installations..." && \
     /usr/local/bin/python3.11 -c "import torch; print('PyTorch version:', torch.__version__)" && \
     /usr/local/bin/python3.11 -c "import PIL; print('Pillow version:', PIL.__version__)" && \
     echo "Setup verification complete."
-
+# Create and set permissions for /temp/videoeditor
+RUN mkdir -p /temp/videoeditor/logs /temp/videoeditor/temp && \
+    chmod -R 777 /temp
 # Set working directory
 WORKDIR /app
 

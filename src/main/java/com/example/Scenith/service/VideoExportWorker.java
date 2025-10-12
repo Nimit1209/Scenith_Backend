@@ -28,7 +28,7 @@ public class VideoExportWorker {
         this.objectMapper = objectMapper;
     }
 
-    @Scheduled(fixedDelay = 1000) // Poll every second
+    @Scheduled(fixedDelay = 10000) // Poll every second
     public void processQueue() {
         try {
             List<Message> messages = sqsService.receiveMessages(videoExportQueueUrl, 1);
