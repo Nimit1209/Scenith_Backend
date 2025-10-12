@@ -1156,18 +1156,10 @@ public class SubtitleService {
     File errorLogFile = new File(tempDir, errorLogFileName);
     File stdoutLogFile = new File(tempDir, stdoutLogFileName); // Declare outside try block
 
-    String r2LogDir = String.format("subtitles/%s/logs/%s", subtitleMedia.getUser().getId(), mediaId);
-    String r2CommandLogPath = r2LogDir + "/" + commandLogFileName;
-    String r2ErrorLogPath = r2LogDir + "/" + errorLogFileName;
-    String r2StdoutLogPath = r2LogDir + "/" + stdoutLogFileName;
-
     // Log the command to file and R2
     try (PrintWriter writer = new PrintWriter(commandLogFile, "UTF-8")) {
       writer.println(String.join(" ", updatedCommand));
     }
-    cloudflareR2Service.uploadFile(r2CommandLogPath, commandLogFile);
-    logger.debug("Uploaded FFmpeg command log to R2: {}", r2CommandLogPath);
-
     logger.debug("Executing FFmpeg command: {}", String.join(" ", updatedCommand));
     Process process = processBuilder.start();
     StringBuilder stdoutOutput = new StringBuilder();
@@ -1237,14 +1229,10 @@ public class SubtitleService {
       try (PrintWriter writer = new PrintWriter(errorLogFile, "UTF-8")) {
         writer.println(stderrOutput.toString());
       }
-      cloudflareR2Service.uploadFile(r2ErrorLogPath, errorLogFile);
-      logger.debug("Uploaded FFmpeg error log to R2: {}", r2ErrorLogPath);
 
       try (PrintWriter writer = new PrintWriter(stdoutLogFile, "UTF-8")) {
         writer.println(stdoutOutput.toString());
       }
-      cloudflareR2Service.uploadFile(r2StdoutLogPath, stdoutLogFile);
-      logger.debug("Uploaded FFmpeg stdout log to R2: {}", r2StdoutLogPath);
     }
 
     boolean completed = process.waitFor(10, TimeUnit.MINUTES);
@@ -1253,7 +1241,7 @@ public class SubtitleService {
       subtitleMedia.setStatus("FAILED");
       subtitleMedia.setProgress(0.0);
       subtitleMediaRepository.save(subtitleMedia);
-      throw new RuntimeException("FFmpeg process timed out after 10 minutes for mediaId: " + mediaId + ". Error log uploaded to: " + r2ErrorLogPath);
+      throw new RuntimeException("FFmpeg process timed out after 10 minutes for mediaId: " + mediaId + ". Error log uploaded to: ");
     }
 
     int exitCode = process.exitValue();
@@ -1261,7 +1249,7 @@ public class SubtitleService {
       subtitleMedia.setStatus("FAILED");
       subtitleMedia.setProgress(0.0);
       subtitleMediaRepository.save(subtitleMedia);
-      throw new RuntimeException("FFmpeg process failed with exit code: " + exitCode + " for mediaId: " + mediaId + ". Error log uploaded to: " + r2ErrorLogPath);
+      throw new RuntimeException("FFmpeg process failed with exit code: " + exitCode + " for mediaId: " + mediaId + ". Error log uploaded to: ");
     }
 
     // Clean up local log files
@@ -1288,18 +1276,10 @@ public class SubtitleService {
     File errorLogFile = new File(tempDir, errorLogFileName);
     File stdoutLogFile = new File(tempDir, stdoutLogFileName); // Declare outside try block
 
-    String r2LogDir = "subtitles/logs/concat";
-    String r2CommandLogPath = r2LogDir + "/" + commandLogFileName;
-    String r2ErrorLogPath = r2LogDir + "/" + errorLogFileName;
-    String r2StdoutLogPath = r2LogDir + "/" + stdoutLogFileName;
-
     // Log the command to file and R2
     try (PrintWriter writer = new PrintWriter(commandLogFile, "UTF-8")) {
       writer.println(String.join(" ", command));
     }
-    cloudflareR2Service.uploadFile(r2CommandLogPath, commandLogFile);
-    logger.debug("Uploaded FFmpeg concat command log to R2: {}", r2CommandLogPath);
-
     logger.debug("Executing FFmpeg command: {}", String.join(" ", command));
     Process process = processBuilder.start();
     StringBuilder stdoutOutput = new StringBuilder();
@@ -1345,25 +1325,20 @@ public class SubtitleService {
       try (PrintWriter writer = new PrintWriter(errorLogFile, "UTF-8")) {
         writer.println(stderrOutput.toString());
       }
-      cloudflareR2Service.uploadFile(r2ErrorLogPath, errorLogFile);
-      logger.debug("Uploaded FFmpeg concat error log to R2: {}", r2ErrorLogPath);
-
       try (PrintWriter writer = new PrintWriter(stdoutLogFile, "UTF-8")) {
         writer.println(stdoutOutput.toString());
       }
-      cloudflareR2Service.uploadFile(r2StdoutLogPath, stdoutLogFile);
-      logger.debug("Uploaded FFmpeg concat stdout log to R2: {}", r2StdoutLogPath);
     }
 
     boolean completed = process.waitFor(5, TimeUnit.MINUTES);
     if (!completed) {
       process.destroyForcibly();
-      throw new RuntimeException("FFmpeg concat process timed out after 5 minutes. Error log uploaded to: " + r2ErrorLogPath);
+      throw new RuntimeException("FFmpeg concat process timed out after 5 minutes. Error log uploaded to: ");
     }
 
     int exitCode = process.exitValue();
     if (exitCode != 0) {
-      throw new RuntimeException("FFmpeg concat process failed with exit code: " + exitCode + ". Error log uploaded to: " + r2ErrorLogPath);
+      throw new RuntimeException("FFmpeg concat process failed with exit code: " + exitCode + ". Error log uploaded to: ");
     }
 
     // Clean up local log files
