@@ -1,7 +1,5 @@
 package com.example.Scenith.service;
 
-import com.example.Scenith.dto.VideoSpeedRequest;
-import com.example.Scenith.dto.VideoSpeedResponse;
 import com.example.Scenith.entity.User;
 import com.example.Scenith.entity.VideoSpeed;
 import com.example.Scenith.repository.VideoSpeedRepository;
@@ -40,8 +38,8 @@ public class VideoSpeedService {
     @Value("${app.base-dir}")
     private String baseDir;
 
-    @Value("${sqs.speed.queue.url}")
-    private String speedQueueUrl;
+    @Value("${sqs.queue.url}")
+    private String videoExportQueueUrl;
 
     public VideoSpeed uploadVideo(User user, MultipartFile videoFile, Double speed) throws IOException {
         String originalFileName = System.currentTimeMillis() + "_" + sanitizeFilename(videoFile.getOriginalFilename());
@@ -99,7 +97,7 @@ public class VideoSpeedService {
         taskDetails.put("originalFilePath", video.getOriginalFilePath());
         taskDetails.put("speed", String.valueOf(video.getSpeed()));
         String messageBody = objectMapper.writeValueAsString(taskDetails);
-        sqsService.sendMessage(messageBody, speedQueueUrl);
+        sqsService.sendMessage(messageBody, videoExportQueueUrl);
 
         return video;
     }

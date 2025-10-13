@@ -22,19 +22,19 @@ public class VideoSpeedWorker {
     private final VideoSpeedService videoSpeedService;
     private final ObjectMapper objectMapper;
 
-    @Value("${sqs.speed.queue.url}")
-    private String speedQueueUrl;
+    @Value("${sqs.queue.url}")
+    private String videoExportQueueUrl;
 
-    @Scheduled(fixedDelay = 1000)
+    @Scheduled(fixedDelay = 10000)
     public void processQueue() {
         try {
-            List<Message> messages = sqsService.receiveMessages(speedQueueUrl, 1);
+            List<Message> messages = sqsService.receiveMessages(videoExportQueueUrl, 1);
             for (Message message : messages) {
                 try {
                     Map<String, String> taskDetails = objectMapper.readValue(message.body(), new TypeReference<>() {});
                     logger.info("Processing speed task: videoId={}", taskDetails.get("videoId"));
                     videoSpeedService.processSpeedTask(taskDetails);
-                    sqsService.deleteMessage(message.receiptHandle(), speedQueueUrl);
+                    sqsService.deleteMessage(message.receiptHandle(), videoExportQueueUrl);
                     logger.info("Successfully processed and deleted message: messageId={}", message.messageId());
                 } catch (Exception e) {
                     logger.error("Failed to process message: messageId={}, error={}", message.messageId(), e.getMessage(), e);
@@ -42,7 +42,7 @@ public class VideoSpeedWorker {
                 }
             }
         } catch (Exception e) {
-            logger.error("Error polling queue {}: {}", speedQueueUrl, e.getMessage(), e);
+            logger.error("Error polling queue {}: {}", videoExportQueueUrl, e.getMessage(), e);
         }
     }
 }
