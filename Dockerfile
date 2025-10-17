@@ -226,11 +226,13 @@ COPY scripts/remove_background.py /app/scripts/remove_background.py
 COPY scripts/whisper_subtitle.py /temp/scripts/whisper_subtitle.py
 COPY scripts/whisper_subtitle.py /app/scripts/whisper_subtitle.py
 COPY scripts/compress_media.py /app/scripts/compress_media.py
+COPY scripts/convert_media.py /app/scripts/convert_media.py
 
 # Make the Python scripts executable
 RUN chmod +x /app/scripts/remove_background.py && \
     chmod +x /temp/scripts/whisper_subtitle.py && \
     chmod +x /app/scripts/whisper_subtitle.py && \
+    chmod +x /app/scripts/convert_media.py && \
     chmod +x /app/scripts/compress_media.py
 
 # Copy the .env file
