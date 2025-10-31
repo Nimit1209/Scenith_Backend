@@ -1,12 +1,21 @@
 package com.example.Scenith.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.stereotype.Service;
 
 import jakarta.mail.MessagingException;
 import jakarta.mail.internet.MimeMessage;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
 
 @Service
 public class EmailService {
@@ -15,8 +24,15 @@ public class EmailService {
     @Value("${app.frontend.url}")
     private String frontendUrl; // e.g., http://localhost:3000
 
-    public EmailService(JavaMailSender mailSender) {
+    @Value("${spring.mail.username}")
+    private String fromEmail;
+
+    private final ObjectMapper objectMapper;
+    private static final Logger logger = LoggerFactory.getLogger(EmailService.class);
+
+    public EmailService(JavaMailSender mailSender, ObjectMapper objectMapper) {
         this.mailSender = mailSender;
+        this.objectMapper = objectMapper;
     }
 
     public void sendVerificationEmail(String to, String firstName, String token) throws MessagingException {
@@ -83,5 +99,56 @@ public class EmailService {
 
         helper.setText(htmlContent, true);
         mailSender.send(message);
+    }
+
+    public void sendHtmlEmail(String to, String subject, String htmlContent) throws MessagingException {
+        MimeMessage message = mailSender.createMimeMessage();
+        MimeMessageHelper helper = new MimeMessageHelper(message, true, StandardCharsets.UTF_8.name());
+
+        helper.setFrom(fromEmail);
+        helper.setTo(to);
+        helper.setSubject(subject);
+        helper.setText(htmlContent, true);
+
+        mailSender.send(message);
+        logger.info("Email sent successfully to: {}", to);
+    }
+
+    public Map<String, Object> loadEmailTemplate(String templateName) throws IOException {
+        ClassPathResource resource = new ClassPathResource("email-templates/" + templateName + ".json");
+        return objectMapper.readValue(resource.getInputStream(), Map.class);
+    }
+
+    public String generateEmailHtml(Map<String, Object> template, Map<String, String> variables) {
+        String htmlContent = (String) template.get("htmlContent");
+
+        // Replace variables in template
+        if (variables != null) {
+            for (Map.Entry<String, String> entry : variables.entrySet()) {
+                htmlContent = htmlContent.replace("{{" + entry.getKey() + "}}", entry.getValue());
+            }
+        }
+
+        return htmlContent;
+    }
+
+    public Map<String, Object> loadSpecificTemplate(String templateName, String templateId) throws IOException {
+        ClassPathResource resource = new ClassPathResource("email-templates/" + templateName + ".json");
+        Map<String, Object> data = objectMapper.readValue(resource.getInputStream(), Map.class);
+
+        List<Map<String, Object>> templates = (List<Map<String, Object>>) data.get("templates");
+        return templates.stream()
+                .filter(t -> templateId.equals(t.get("id")))
+                .findFirst()
+                .orElseThrow(() -> new IOException("Template with id '" + templateId + "' not found"));
+    }
+
+    public void sendTemplateEmail(String to, String templateName, String templateId, Map<String, String> variables)
+            throws IOException, MessagingException {
+        Map<String, Object> template = loadSpecificTemplate(templateName, templateId);
+        String subject = (String) template.get("subject");
+        String htmlContent = generateEmailHtml(template, variables);
+
+        sendHtmlEmail(to, subject, htmlContent);
     }
 }
