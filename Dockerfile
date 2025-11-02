@@ -183,6 +183,14 @@ RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local-libs.conf && \
     echo "/usr/lib64/openssl11" >> /etc/ld.so.conf.d/local-libs.conf && \
     ldconfig
 
+# Install yt-dlp for YouTube video downloads
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install yt-dlp && \
+    ln -sf /usr/local/bin/yt-dlp /usr/bin/yt-dlp && \
+    echo "yt-dlp installed successfully"
+
+# Verify yt-dlp installation
+RUN /usr/local/bin/yt-dlp --version || echo "yt-dlp version check failed"
 # Clean up
 RUN rm -rf /tmp/ffmpeg_sources /tmp/Python-3.11.10*
 
@@ -196,7 +204,8 @@ ENV JAVA_OPTS="-Xms512m -Xmx1024m"
 ENV SPRING_PROFILES_ACTIVE=prod
 ENV SSL_CERT_DIR=/etc/pki/tls/certs
 ENV SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
-
+# Update environment variable for yt-dlp
+ENV YT_DLP_PATH=/usr/local/bin/yt-dlp
 # Set environment variables for ONNX and image processing
 ENV OMP_NUM_THREADS=1
 ENV OPENCV_IO_MAX_IMAGE_PIXELS=1073741824
@@ -227,12 +236,16 @@ COPY scripts/whisper_subtitle.py /temp/scripts/whisper_subtitle.py
 COPY scripts/whisper_subtitle.py /app/scripts/whisper_subtitle.py
 COPY scripts/compress_media.py /app/scripts/compress_media.py
 COPY scripts/convert_media.py /app/scripts/convert_media.py
+COPY scripts/whisper_transcribe.py /app/scripts/whisper_transcribe.py
+COPY scripts/whisper_transcribe.py /temp/scripts/whisper_transcribe.py
 
 # Make the Python scripts executable
 RUN chmod +x /app/scripts/remove_background.py && \
     chmod +x /temp/scripts/whisper_subtitle.py && \
     chmod +x /app/scripts/whisper_subtitle.py && \
     chmod +x /app/scripts/convert_media.py && \
+    chmod +x /app/scripts/whisper_transcribe.py && \
+    chmod +x /temp/scripts/whisper_transcribe.py && \
     chmod +x /app/scripts/compress_media.py
 
 # Copy the .env file
@@ -240,7 +253,8 @@ COPY .env /app/.env
 
 # Copy credentials
 COPY credentials/video-editor-tts-24b472478ab838d2168992684517cacfab4c11da.json /app/credentials/video-editor-tts.json
-
+# Copy email templates directory
+COPY src/main/resources/email-templates/ /app/resources/email-templates/
 # Copy the Spring Boot JAR
 COPY target/Scenith-0.0.1-SNAPSHOT.jar app.jar
 
