@@ -42,10 +42,10 @@ public class ImageEditorController {
             return ResponseEntity.ok(project);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(Map.of("message", e.getMessage()));
+                    .body(Map.of("message", e.getMessage()));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("message", "Failed to create project: " + e.getMessage()));
+                    .body(Map.of("message", "Failed to create project: " + e.getMessage()));
         }
     }
 
@@ -61,7 +61,7 @@ public class ImageEditorController {
             return ResponseEntity.ok(projects);
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("message", "Failed to retrieve projects: " + e.getMessage()));
+                    .body(Map.of("message", "Failed to retrieve projects: " + e.getMessage()));
         }
     }
 
@@ -79,10 +79,10 @@ public class ImageEditorController {
             return ResponseEntity.ok(project);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(Map.of("message", e.getMessage()));
+                    .body(Map.of("message", e.getMessage()));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("message", "Failed to retrieve project: " + e.getMessage()));
+                    .body(Map.of("message", "Failed to retrieve project: " + e.getMessage()));
         }
     }
 
@@ -101,15 +101,15 @@ public class ImageEditorController {
             return ResponseEntity.ok(project);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(Map.of("message", e.getMessage()));
+                    .body(Map.of("message", e.getMessage()));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("message", "Failed to update project: " + e.getMessage()));
+                    .body(Map.of("message", "Failed to update project: " + e.getMessage()));
         }
     }
 
     /**
-     * Export project to image
+     * Export project to image (async via SQS)
      * POST /api/image-editor/projects/{id}/export
      */
     @PostMapping("/projects/{id}/export")
@@ -121,17 +121,16 @@ public class ImageEditorController {
             User user = imageEditorService.getUserFromToken(token);
             ImageProject project = imageEditorService.exportProject(user, id, request);
             return ResponseEntity.ok(Map.of(
-                "message", "Export successful",
-                "exportUrl", project.getLastExportedUrl(),
-                "format", project.getLastExportFormat(),
-                "project", project
+                    "message", "Export job queued successfully",
+                    "status", project.getStatus(),
+                    "projectId", project.getId()
             ));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(Map.of("message", e.getMessage()));
-        } catch (IOException | InterruptedException e) {
+                    .body(Map.of("message", e.getMessage()));
+        } catch (IOException e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("message", "Export failed: " + e.getMessage()));
+                    .body(Map.of("message", "Export failed: " + e.getMessage()));
         }
     }
 
@@ -149,10 +148,10 @@ public class ImageEditorController {
             return ResponseEntity.ok(Map.of("message", "Project deleted successfully"));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(Map.of("message", e.getMessage()));
+                    .body(Map.of("message", e.getMessage()));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("message", "Failed to delete project: " + e.getMessage()));
+                    .body(Map.of("message", "Failed to delete project: " + e.getMessage()));
         }
     }
 
@@ -171,10 +170,10 @@ public class ImageEditorController {
             return ResponseEntity.ok(asset);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(Map.of("message", e.getMessage()));
+                    .body(Map.of("message", e.getMessage()));
         } catch (IOException e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("message", "Upload failed: " + e.getMessage()));
+                    .body(Map.of("message", "Upload failed: " + e.getMessage()));
         }
     }
 
@@ -197,7 +196,7 @@ public class ImageEditorController {
             return ResponseEntity.ok(assets);
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("message", "Failed to retrieve assets: " + e.getMessage()));
+                    .body(Map.of("message", "Failed to retrieve assets: " + e.getMessage()));
         }
     }
 
@@ -215,10 +214,10 @@ public class ImageEditorController {
             return ResponseEntity.ok(asset);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(Map.of("message", e.getMessage()));
+                    .body(Map.of("message", e.getMessage()));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("message", "Failed to retrieve asset: " + e.getMessage()));
+                    .body(Map.of("message", "Failed to retrieve asset: " + e.getMessage()));
         }
     }
 
@@ -236,10 +235,10 @@ public class ImageEditorController {
             return ResponseEntity.ok(Map.of("message", "Asset deleted successfully"));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(Map.of("message", e.getMessage()));
+                    .body(Map.of("message", e.getMessage()));
         } catch (IOException e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("message", "Failed to delete asset: " + e.getMessage()));
+                    .body(Map.of("message", "Failed to delete asset: " + e.getMessage()));
         }
     }
 }

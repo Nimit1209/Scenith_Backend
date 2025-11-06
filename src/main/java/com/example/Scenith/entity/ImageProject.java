@@ -38,11 +38,17 @@ public class ImageProject {
     @Column(name = "status", nullable = false)
     private String status; // DRAFT, PROCESSING, COMPLETED, FAILED
 
+    @Column(name = "output_video_path")
+    private String outputVideoPath; // R2 path for the exported file
+
     @Column(name = "last_exported_url")
-    private String lastExportedUrl;
+    private String lastExportedUrl; // CDN URL for the exported file
 
     @Column(name = "last_export_format")
     private String lastExportFormat; // PNG, JPG, PDF
+
+    @Column(name = "progress_percentage")
+    private Integer progressPercentage; // Export progress (0-100)
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
@@ -56,6 +62,9 @@ public class ImageProject {
         updatedAt = LocalDateTime.now();
         if (status == null) {
             status = "DRAFT";
+        }
+        if (progressPercentage == null) {
+            progressPercentage = 0;
         }
     }
 

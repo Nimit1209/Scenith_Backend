@@ -20,6 +20,58 @@ RUN rpm --import https://yum.corretto.aws/corretto.key && \
 
 # Create directory for source files
 RUN mkdir -p /tmp/ffmpeg_sources
+# ============================================================================
+# IMAGEMAGICK INSTALLATION (NEW SECTION)
+# ============================================================================
+
+# Install ImageMagick dependencies (install compatible ghostscript versions together)
+RUN yum install -y \
+    libjpeg-turbo-devel \
+    libpng-devel \
+    libtiff-devel \
+    giflib-devel \
+    libwebp-devel \
+    openjpeg2-devel \
+    lcms2-devel \
+    libxml2-devel \
+    librsvg2-devel \
+    libtool-ltdl-devel \
+    perl
+
+# Install ghostscript with matching versions and exclude i686 to avoid multilib conflicts
+RUN yum install -y --setopt=protected_multilib=false \
+    ghostscript-9.54.0-9.amzn2.0.13.x86_64 || \
+    yum install -y ghostscript.x86_64
+
+# Build and install ImageMagick 7.1.2-2 (Q16-HDRI version to match local)
+RUN cd /tmp && \
+    wget https://github.com/ImageMagick/ImageMagick/archive/refs/tags/7.1.2-2.tar.gz && \
+    tar -xzf 7.1.2-2.tar.gz && \
+    cd ImageMagick-7.1.2-2 && \
+    ./configure \
+        --prefix=/usr/local \
+        --with-quantum-depth=16 \
+        --enable-hdri \
+        --with-modules \
+        --with-perl=no \
+        --enable-shared \
+        --enable-static \
+        --with-webp=yes \
+        --with-openjp2=yes \
+        --with-gslib=yes \
+        --with-rsvg=yes && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/7.1.2-2.tar.gz /tmp/ImageMagick-7.1.2-2
+
+# Verify ImageMagick installation
+RUN magick -version && \
+    echo "ImageMagick installed successfully"
+
+# ============================================================================
+# END OF IMAGEMAGICK INSTALLATION
+# ============================================================================
 
 # Install LAME (MP3 encoder) from source
 RUN cd /tmp/ffmpeg_sources && \
@@ -209,6 +261,8 @@ ENV YT_DLP_PATH=/usr/local/bin/yt-dlp
 # Set environment variables for ONNX and image processing
 ENV OMP_NUM_THREADS=1
 ENV OPENCV_IO_MAX_IMAGE_PIXELS=1073741824
+# Set ImageMagick path for the application
+ENV IMAGEMAGICK_PATH=/usr/local/bin/magick
 
 # Quick verification of key components including rembg
 RUN echo "Verifying installations..." && \
@@ -262,4 +316,4 @@ COPY target/Scenith-0.0.1-SNAPSHOT.jar app.jar
 EXPOSE 1000
 
 # Run the application with proper environment setup
-ENTRYPOINT ["sh", "-c", "export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:/usr/lib:/lib && export OMP_NUM_THREADS=1 && echo 'Starting application...' && echo 'Environment check:' && ls -la /usr/local/bin/ffmpeg && ls -la /usr/local/bin/python3.11 && ls -la /app/scripts/ && java $JAVA_OPTS -jar app.jar"]
+ENTRYPOINT ["sh", "-c", "export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:/usr/lib:/lib && export OMP_NUM_THREADS=1 && echo 'Starting application...' && echo 'Environment check:' && ls -la /usr/local/bin/ffmpeg && ls -la /usr/local/bin/python3.11 && ls -la /usr/local/bin/magick && ls -la /app/scripts/ && java $JAVA_OPTS -jar app.jar"]

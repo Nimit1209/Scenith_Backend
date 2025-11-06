@@ -20,79 +20,78 @@ public class ImageRenderService {
 
     private static final Logger logger = LoggerFactory.getLogger(ImageRenderService.class);
 
-    @Value("${app.base-dir:D:\\Backend\\videoEditor-main}")
+    @Value("${app.base-dir:/temp}")
     private String baseDir;
 
-    @Value("${app.imagemagick-path:C:\\Program Files\\ImageMagick-7.1.2-Q16-HDRI\\magick.exe}")
+    @Value("${IMAGEMAGICK_PATH:/usr/local/bin/magick}")
     private String imageMagickPath;
 
     private final ObjectMapper objectMapper;
+    private final CloudflareR2Service cloudflareR2Service;
 
-    public ImageRenderService(ObjectMapper objectMapper) {
+    public ImageRenderService(ObjectMapper objectMapper, CloudflareR2Service cloudflareR2Service) {
         this.objectMapper = objectMapper;
+        this.cloudflareR2Service = cloudflareR2Service;
     }
 
     /**
-     * Main method to render design JSON to image
+     * Main method to render design JSON to image and upload to R2
      */
-    public String renderDesign(String designJson, String format, Integer quality, Long userId, Long projectId) 
+    public String renderDesign(String designJson, String format, Integer quality, Long userId, Long projectId)
             throws IOException, InterruptedException {
-        
+
         logger.info("Starting render for project: {}, format: {}", projectId, format);
         System.setProperty("MAGICK_CONFIGURE_PATH", "");
-        
+
         // Parse design JSON
         DesignDTO design = objectMapper.readValue(designJson, DesignDTO.class);
-        
-        // Create temp and output directories
-        String tempDirPath = baseDir + File.separator + "image_editor" + File.separator + userId + 
-                            File.separator + "temp_" + projectId;
-        String outputDirPath = baseDir + File.separator + "image_editor" + File.separator + userId + 
-                              File.separator + "exports";
-        
-        File tempDir = new File(tempDirPath);
-        File outputDir = new File(outputDirPath);
-        
-        if (!tempDir.exists() && !tempDir.mkdirs()) {
+
+        // Create temp directories
+        String tempDirPath = baseDir + File.separator + "image_render_" + userId + "_" + projectId + "_" + System.currentTimeMillis();
+        File tempDirFile = new File(tempDirPath);
+
+        if (!tempDirFile.exists() && !tempDirFile.mkdirs()) {
             throw new IOException("Failed to create temp directory");
         }
-        if (!outputDir.exists() && !outputDir.mkdirs()) {
-            throw new IOException("Failed to create output directory");
+
+        try {
+            // Sort layers by zIndex
+            List<LayerDTO> sortedLayers = new ArrayList<>(design.getLayers());
+            sortedLayers.sort(Comparator.comparingInt(l -> l.getZIndex() != null ? l.getZIndex() : 0));
+
+            // Step 1: Create base canvas
+            String baseCanvasPath = tempDirPath + File.separator + "base_canvas.png";
+            createBaseCanvas(design.getCanvas(), baseCanvasPath);
+
+            // Step 2: Process each layer and composite
+            String currentImage = baseCanvasPath;
+            int layerIndex = 0;
+
+            for (LayerDTO layer : sortedLayers) {
+                String layerOutputPath = tempDirPath + File.separator + "layer_" + layerIndex + "_composite.png";
+                currentImage = processAndCompositeLayer(layer, currentImage, layerOutputPath, tempDirPath,
+                        design.getCanvas().getWidth(), design.getCanvas().getHeight());
+                layerIndex++;
+            }
+
+            // Step 3: Export final image in desired format
+            String outputFileName = "project_" + projectId + "_" + System.currentTimeMillis() + "." + format.toLowerCase();
+            String tempOutputPath = tempDirPath + File.separator + outputFileName;
+
+            exportFinalImage(currentImage, tempOutputPath, format, quality);
+
+            // Step 4: Upload to R2
+            String r2Path = String.format("image_editor/%d/exports/%s", userId, outputFileName);
+            File outputFile = new File(tempOutputPath);
+            cloudflareR2Service.uploadFile(outputFile, r2Path);
+            logger.info("Uploaded rendered image to R2: {}", r2Path);
+
+            return r2Path;
+
+        } finally {
+            // Cleanup temp directory
+            cleanupTempDirectory(tempDirFile);
         }
-        
-        // Sort layers by zIndex
-        List<LayerDTO> sortedLayers = new ArrayList<>(design.getLayers());
-        sortedLayers.sort(Comparator.comparingInt(l -> l.getZIndex() != null ? l.getZIndex() : 0));
-        
-        // Step 1: Create base canvas
-        String baseCanvasPath = tempDirPath + File.separator + "base_canvas.png";
-        createBaseCanvas(design.getCanvas(), baseCanvasPath);
-        
-        // Step 2: Process each layer and composite
-        String currentImage = baseCanvasPath;
-        int layerIndex = 0;
-        
-        for (LayerDTO layer : sortedLayers) {
-            String layerOutputPath = tempDirPath + File.separator + "layer_" + layerIndex + "_composite.png";
-            currentImage = processAndCompositeLayer(layer, currentImage, layerOutputPath, tempDirPath, 
-                                                   design.getCanvas().getWidth(), design.getCanvas().getHeight());
-            layerIndex++;
-        }
-        
-        // Step 3: Export final image in desired format
-        String outputFileName = "project_" + projectId + "_" + System.currentTimeMillis() + "." + format.toLowerCase();
-        String finalOutputPath = outputDirPath + File.separator + outputFileName;
-        
-        exportFinalImage(currentImage, finalOutputPath, format, quality);
-        
-        // Cleanup temp files
-        cleanupTempDirectory(tempDir);
-        
-        // Return relative path for CDN URL
-        String relativePath = "image_editor/" + userId + "/exports/" + outputFileName;
-        logger.info("Render completed successfully: {}", relativePath);
-        
-        return relativePath;
     }
 
     /**
@@ -117,14 +116,14 @@ public class ImageRenderService {
     /**
      * Process single layer and composite it onto current image
      */
-    private String processAndCompositeLayer(LayerDTO layer, String baseImagePath, String outputPath, 
-                                           String tempDirPath, Integer canvasWidth, Integer canvasHeight) 
+    private String processAndCompositeLayer(LayerDTO layer, String baseImagePath, String outputPath,
+                                            String tempDirPath, Integer canvasWidth, Integer canvasHeight)
             throws IOException, InterruptedException {
-        
+
         logger.debug("Processing layer: {} of type: {}", layer.getId(), layer.getType());
-        
+
         String layerImagePath;
-        
+
         switch (layer.getType().toLowerCase()) {
             case "image":
                 layerImagePath = processImageLayer(layer, tempDirPath, canvasWidth, canvasHeight);
@@ -142,27 +141,27 @@ public class ImageRenderService {
                 logger.warn("Unknown layer type: {}, skipping", layer.getType());
                 return baseImagePath;
         }
-        
+
         // Composite layer onto base image
         compositeImages(baseImagePath, layerImagePath, outputPath, layer);
-        
+
         // Delete intermediate layer file
         Files.deleteIfExists(Paths.get(layerImagePath));
-        
+
         return outputPath;
     }
 
     /**
      * Process IMAGE layer
      */
-    private String processImageLayer(LayerDTO layer, String tempDirPath, Integer canvasWidth, Integer canvasHeight) 
+    private String processImageLayer(LayerDTO layer, String tempDirPath, Integer canvasWidth, Integer canvasHeight)
             throws IOException, InterruptedException {
-        
+
         String outputPath = tempDirPath + File.separator + "layer_" + layer.getId() + "_image.png";
-        
+
         // Download or copy source image
         String sourceImagePath = downloadOrCopyImage(layer.getSrc(), tempDirPath, layer.getId());
-        
+
         // Build command for resizing, rotating, and applying effects
         List<String> command = new ArrayList<>();
         command.add(imageMagickPath);
@@ -170,21 +169,20 @@ public class ImageRenderService {
         command.add("-set");
         command.add("colorspace");
         command.add("sRGB");
-        
+
         // Resize if width/height specified
         if (layer.getWidth() != null && layer.getHeight() != null) {
             command.add("-resize");
             command.add(layer.getWidth().intValue() + "x" + layer.getHeight().intValue() + "!");
         }
-        
-        // Apply rotation
+
         // Apply rotation
         if (layer.getRotation() != null && layer.getRotation() != 0) {
             command.add("-background");
-            command.add("transparent");  // CHANGED from "none"
+            command.add("transparent");
             command.add("-rotate");
             command.add(String.valueOf(layer.getRotation()));
-            command.add("+repage");  // ADDED: Reset virtual canvas
+            command.add("+repage");
         }
 
         // Apply opacity
@@ -194,26 +192,26 @@ public class ImageRenderService {
             command.add("-evaluate");
             command.add("multiply");
             command.add(String.valueOf(layer.getOpacity()));
-            command.add("+channel");  // ADDED: Reset channel
+            command.add("+channel");
         }
-        
+
         // Apply filters
         applyFilters(command, layer.getFilters());
-        
+
         // Apply shadow if exists
         if (layer.getShadow() != null) {
             applyShadow(command, layer.getShadow());
         }
-        
+
         command.add(outputPath);
-        
+
         executeImageMagickCommand(command, "Process image layer");
-        
+
         // Delete source if it was downloaded
         if (!sourceImagePath.equals(layer.getSrc())) {
             Files.deleteIfExists(Paths.get(sourceImagePath));
         }
-        
+
         return outputPath;
     }
 
@@ -221,7 +219,7 @@ public class ImageRenderService {
      * Process TEXT layer
      */
     private String processTextLayer(LayerDTO layer, String tempDirPath, Integer canvasWidth, Integer canvasHeight)
-        throws IOException, InterruptedException {
+            throws IOException, InterruptedException {
 
         String outputPath = tempDirPath + File.separator + "layer_" + layer.getId() + "_text.png";
 
@@ -296,7 +294,7 @@ public class ImageRenderService {
      * Process SHAPE layer
      */
     private String processShapeLayer(LayerDTO layer, String tempDirPath, Integer canvasWidth, Integer canvasHeight)
-        throws IOException, InterruptedException {
+            throws IOException, InterruptedException {
 
         String outputPath = tempDirPath + File.separator + "layer_" + layer.getId() + "_shape.png";
 
@@ -335,7 +333,7 @@ public class ImageRenderService {
                 if (borderRadius != null && borderRadius > 0) {
                     command.add("-draw");
                     command.add("roundrectangle 0,0 " + (width-1) + "," + (height-1) + " " +
-                        borderRadius + "," + borderRadius);
+                            borderRadius + "," + borderRadius);
                 } else {
                     command.add("-draw");
                     command.add("rectangle 0,0 " + (width-1) + "," + (height-1));
@@ -395,15 +393,15 @@ public class ImageRenderService {
     /**
      * Process BACKGROUND layer (similar to image but fills entire canvas)
      */
-    private String processBackgroundLayer(LayerDTO layer, String tempDirPath, Integer canvasWidth, Integer canvasHeight) 
+    private String processBackgroundLayer(LayerDTO layer, String tempDirPath, Integer canvasWidth, Integer canvasHeight)
             throws IOException, InterruptedException {
-        
+
         // Reuse image layer logic but force it to canvas size
         layer.setWidth((double) canvasWidth);
         layer.setHeight((double) canvasHeight);
         layer.setX(0.0);
         layer.setY(0.0);
-        
+
         return processImageLayer(layer, tempDirPath, canvasWidth, canvasHeight);
     }
 
@@ -411,7 +409,7 @@ public class ImageRenderService {
      * Composite layer image onto base image at specified position
      */
     private void compositeImages(String baseImagePath, String layerImagePath, String outputPath, LayerDTO layer)
-        throws IOException, InterruptedException {
+            throws IOException, InterruptedException {
 
         int x = layer.getX() != null ? layer.getX().intValue() : 0;
         int y = layer.getY() != null ? layer.getY().intValue() : 0;
@@ -441,11 +439,11 @@ public class ImageRenderService {
      */
     private void applyFilters(List<String> command, List<FilterDTO> filters) {
         if (filters == null || filters.isEmpty()) return;
-        
+
         for (FilterDTO filter : filters) {
             String type = filter.getType().toLowerCase();
             double value = filter.getValue();
-            
+
             switch (type) {
                 case "blur":
                     command.add("-blur");
@@ -492,8 +490,8 @@ public class ImageRenderService {
         command.add("-background");
         command.add(shadow.getColor() != null ? shadow.getColor() : "#000000");
         command.add("-shadow");
-        command.add("80x" + shadow.getBlur() + "+" + 
-                   shadow.getOffsetX().intValue() + "+" + shadow.getOffsetY().intValue());
+        command.add("80x" + shadow.getBlur() + "+" +
+                shadow.getOffsetX().intValue() + "+" + shadow.getOffsetY().intValue());
         command.add(")");
         command.add("+swap");
         command.add("-background");
@@ -503,21 +501,10 @@ public class ImageRenderService {
     }
 
     /**
-     * Apply shadow to text
-     */
-    private void applyShadowToText(List<String> command, ShadowDTO shadow) {
-        // For text, we use a simpler approach with stroke
-        command.add("-stroke");
-        command.add(shadow.getColor() != null ? shadow.getColor() : "#00000080");
-        command.add("-strokewidth");
-        command.add(String.valueOf(shadow.getBlur().intValue()));
-    }
-
-    /**
      * Export final image in specified format
      */
     private void exportFinalImage(String inputPath, String outputPath, String format, Integer quality)
-        throws IOException, InterruptedException {
+            throws IOException, InterruptedException {
 
         List<String> command = new ArrayList<>();
         command.add(imageMagickPath);
@@ -543,11 +530,11 @@ public class ImageRenderService {
     }
 
     /**
-     * Download image from URL or copy from local path
+     * Download image from URL or R2 path
      */
     private String downloadOrCopyImage(String src, String tempDirPath, String layerId) throws IOException {
         String outputPath = tempDirPath + File.separator + "source_" + layerId + ".png";
-        
+
         if (src.startsWith("http://") || src.startsWith("https://")) {
             // Download from URL
             logger.debug("Downloading image from: {}", src);
@@ -555,11 +542,14 @@ public class ImageRenderService {
                 Files.copy(in, Paths.get(outputPath), StandardCopyOption.REPLACE_EXISTING);
             }
         } else {
-            // Copy from local path
-            String fullPath = baseDir + File.separator + src;
-            Files.copy(Paths.get(fullPath), Paths.get(outputPath), StandardCopyOption.REPLACE_EXISTING);
+            // Download from R2
+            logger.debug("Downloading image from R2: {}", src);
+            File downloadedFile = cloudflareR2Service.downloadFile(src, outputPath);
+            if (!downloadedFile.exists()) {
+                throw new IOException("Failed to download file from R2: " + src);
+            }
         }
-        
+
         return outputPath;
     }
 
@@ -567,7 +557,7 @@ public class ImageRenderService {
      * Execute ImageMagick command
      */
     private void executeImageMagickCommand(List<String> command, String operationName)
-        throws IOException, InterruptedException {
+            throws IOException, InterruptedException {
 
         logger.debug("Executing {}: {}", operationName, String.join(" ", command));
 
@@ -601,7 +591,7 @@ public class ImageRenderService {
         int exitCode = process.exitValue();
         if (exitCode != 0) {
             throw new RuntimeException("ImageMagick failed for " + operationName + " with exit code " +
-                exitCode + ": " + output.toString());
+                    exitCode + ": " + output.toString());
         }
     }
 

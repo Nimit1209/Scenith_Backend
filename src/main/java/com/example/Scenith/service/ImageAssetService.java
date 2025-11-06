@@ -13,6 +13,7 @@ import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.List;
 import java.util.UUID;
 
@@ -21,13 +22,15 @@ public class ImageAssetService {
 
     private static final Logger logger = LoggerFactory.getLogger(ImageAssetService.class);
 
-    @Value("${app.base-dir:D:\\Backend\\videoEditor-main}")
+    @Value("${app.base-dir:/temp}")
     private String baseDir;
 
     private final ImageAssetRepository imageAssetRepository;
+    private final CloudflareR2Service cloudflareR2Service;
 
-    public ImageAssetService(ImageAssetRepository imageAssetRepository) {
+    public ImageAssetService(ImageAssetRepository imageAssetRepository, CloudflareR2Service cloudflareR2Service) {
         this.imageAssetRepository = imageAssetRepository;
+        this.cloudflareR2Service = cloudflareR2Service;
     }
 
     /**
@@ -42,34 +45,42 @@ public class ImageAssetService {
         }
 
         String originalFilename = file.getOriginalFilename();
+        if (originalFilename == null || originalFilename.lastIndexOf(".") == -1) {
+            throw new IllegalArgumentException("Invalid file name");
+        }
         String extension = originalFilename.substring(originalFilename.lastIndexOf("."));
-        
+
         // Validate image type
         String contentType = file.getContentType();
         if (contentType == null || !contentType.startsWith("image/")) {
             throw new IllegalArgumentException("File must be an image");
         }
 
-        // Create asset directory
-        String assetDirPath = baseDir + File.separator + "image_editor" + File.separator + 
-                            user.getId() + File.separator + "assets";
-        File assetDir = new File(assetDirPath);
-        if (!assetDir.exists() && !assetDir.mkdirs()) {
-            throw new IOException("Failed to create asset directory");
-        }
-
         // Generate unique filename
         String uniqueFilename = UUID.randomUUID().toString() + extension;
-        File assetFile = new File(assetDir, uniqueFilename);
-        file.transferTo(assetFile);
 
-        // Get image dimensions
-        BufferedImage image = ImageIO.read(assetFile);
+        // Define R2 path
+        String r2Path = String.format("image_editor/%d/assets/%s", user.getId(), uniqueFilename);
+
+        // Upload directly to Cloudflare R2 (no temp file)
+        cloudflareR2Service.uploadFile(file, r2Path);
+        logger.info("Uploaded asset to R2: {}", r2Path);
+
+        // Generate CDN URL (1 year expiration)
+        String cdnUrl = cloudflareR2Service.generateDownloadUrl(r2Path, 31536000);
+
+        // Read image dimensions from InputStream (no disk I/O)
         int width = 0;
         int height = 0;
-        if (image != null) {
-            width = image.getWidth();
-            height = image.getHeight();
+        try (var inputStream = file.getInputStream()) {
+            BufferedImage image = ImageIO.read(inputStream);
+            if (image != null) {
+                width = image.getWidth();
+                height = image.getHeight();
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to read image dimensions for file: {}", originalFilename, e);
+            // Dimensions remain 0 – acceptable fallback
         }
 
         // Save to database
@@ -78,8 +89,8 @@ public class ImageAssetService {
         asset.setAssetName(originalFilename);
         asset.setAssetType(assetType != null ? assetType.toUpperCase() : "IMAGE");
         asset.setOriginalFilename(originalFilename);
-        asset.setFilePath("image_editor/" + user.getId() + "/assets/" + uniqueFilename);
-        asset.setCdnUrl("http://localhost:8080/" + asset.getFilePath());
+        asset.setFilePath(r2Path);
+        asset.setCdnUrl(cdnUrl);
         asset.setFileSize(file.getSize());
         asset.setMimeType(contentType);
         asset.setWidth(width);
@@ -95,22 +106,59 @@ public class ImageAssetService {
      * Get all assets for user
      */
     public List<ImageAsset> getUserAssets(User user) {
-        return imageAssetRepository.findByUserOrderByCreatedAtDesc(user);
+        List<ImageAsset> assets = imageAssetRepository.findByUserOrderByCreatedAtDesc(user);
+
+        // Refresh CDN URLs if needed
+        for (ImageAsset asset : assets) {
+            try {
+                String cdnUrl = cloudflareR2Service.generateDownloadUrl(asset.getFilePath(), 31536000);
+                asset.setCdnUrl(cdnUrl);
+                imageAssetRepository.save(asset);
+            } catch (Exception e) {
+                logger.warn("Failed to refresh CDN URL for asset: {}, path: {}", asset.getId(), asset.getFilePath());
+            }
+        }
+
+        return assets;
     }
 
     /**
      * Get assets by type
      */
     public List<ImageAsset> getUserAssetsByType(User user, String assetType) {
-        return imageAssetRepository.findByUserAndAssetType(user, assetType.toUpperCase());
+        List<ImageAsset> assets = imageAssetRepository.findByUserAndAssetType(user, assetType.toUpperCase());
+
+        // Refresh CDN URLs
+        for (ImageAsset asset : assets) {
+            try {
+                String cdnUrl = cloudflareR2Service.generateDownloadUrl(asset.getFilePath(), 31536000);
+                asset.setCdnUrl(cdnUrl);
+                imageAssetRepository.save(asset);
+            } catch (Exception e) {
+                logger.warn("Failed to refresh CDN URL for asset: {}", asset.getId());
+            }
+        }
+
+        return assets;
     }
 
     /**
      * Get single asset
      */
     public ImageAsset getAssetById(User user, Long assetId) {
-        return imageAssetRepository.findByIdAndUser(assetId, user)
-            .orElseThrow(() -> new IllegalArgumentException("Asset not found"));
+        ImageAsset asset = imageAssetRepository.findByIdAndUser(assetId, user)
+                .orElseThrow(() -> new IllegalArgumentException("Asset not found"));
+
+        // Refresh CDN URL
+        try {
+            String cdnUrl = cloudflareR2Service.generateDownloadUrl(asset.getFilePath(), 31536000);
+            asset.setCdnUrl(cdnUrl);
+            imageAssetRepository.save(asset);
+        } catch (Exception e) {
+            logger.warn("Failed to refresh CDN URL for asset: {}", asset.getId());
+        }
+
+        return asset;
     }
 
     /**
@@ -118,13 +166,15 @@ public class ImageAssetService {
      */
     public void deleteAsset(User user, Long assetId) throws IOException {
         ImageAsset asset = imageAssetRepository.findByIdAndUser(assetId, user)
-            .orElseThrow(() -> new IllegalArgumentException("Asset not found"));
+                .orElseThrow(() -> new IllegalArgumentException("Asset not found"));
 
-        // Delete file
-        String fullPath = baseDir + File.separator + asset.getFilePath();
-        File file = new File(fullPath);
-        if (file.exists()) {
-            file.delete();
+        // Delete file from R2
+        try {
+            cloudflareR2Service.deleteFile(asset.getFilePath());
+            logger.info("Deleted asset from R2: {}", asset.getFilePath());
+        } catch (Exception e) {
+            logger.error("Failed to delete asset from R2: {}", asset.getFilePath(), e);
+            throw new IOException("Failed to delete asset from R2", e);
         }
 
         // Delete from database
