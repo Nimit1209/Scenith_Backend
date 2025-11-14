@@ -43,11 +43,11 @@ public class SubtitleController {
             @RequestBody(required = false) Map<String, String> styleParams) {
         try {
             User user = subtitleService.getUserFromToken(token);
-            subtitleService.queueGenerateSubtitles(user, mediaId, styleParams); // Updated method call
+            subtitleService.generateSubtitles(user, mediaId, styleParams); // Updated method call
             return ResponseEntity.ok(Map.of("message", "Subtitle generation queued successfully for mediaId: " + mediaId));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("message", e.getMessage()));
-        } catch (IOException e) {
+        } catch (IOException | InterruptedException e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("message", "Subtitle generation queueing failed: " + e.getMessage()));
         }
     }

@@ -10,6 +10,7 @@ import com.example.Scenith.security.JwtUtil;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.transaction.Transactional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -46,6 +47,7 @@ public class SubtitleService {
   private final CloudflareR2Service cloudflareR2Service;
   private final ObjectMapper objectMapper;
   private final SqsClient sqsClient;
+  private final EmailService emailService;
 
   @Value("${app.base-dir:/temp}")
   private String baseDir;
@@ -68,13 +70,14 @@ public class SubtitleService {
           UserRepository userRepository,
           CloudflareR2Service cloudflareR2Service,
           ObjectMapper objectMapper,
-          SqsClient sqsClient) {
+          SqsClient sqsClient, EmailService emailService) {
     this.jwtUtil = jwtUtil;
     this.subtitleMediaRepository = subtitleMediaRepository;
     this.userRepository = userRepository;
     this.cloudflareR2Service = cloudflareR2Service;
     this.objectMapper = objectMapper;
     this.sqsClient = sqsClient;
+      this.emailService = emailService;
   }
 
   public SubtitleMedia uploadMedia(User user, MultipartFile mediaFile) throws IOException {
@@ -128,8 +131,8 @@ public class SubtitleService {
     }
   }
 
-  public void queueGenerateSubtitles(User user, Long mediaId, Map<String, String> styleParams) throws IOException {
-    logger.info("Queueing subtitle generation for user: {}, mediaId: {}", user.getId(), mediaId);
+  public SubtitleMedia generateSubtitles(User user, Long mediaId, Map<String, String> styleParams) throws IOException, InterruptedException {
+    logger.info("Generating subtitles for user: {}, mediaId: {}", user.getId(), mediaId);
 
     SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
             .orElseThrow(() -> {
@@ -142,25 +145,8 @@ public class SubtitleService {
       throw new IllegalArgumentException("Not authorized to generate subtitles for this media");
     }
 
-    subtitleMedia.setStatus("QUEUED");
-    subtitleMediaRepository.save(subtitleMedia);
-
-    Map<String, String> taskDetails = new HashMap<>();
-    taskDetails.put("taskType", "GENERATE_SUBTITLES");
-    taskDetails.put("mediaId", mediaId.toString());
-    taskDetails.put("userId", user.getId().toString());
-    if (styleParams != null) {
-      taskDetails.putAll(styleParams);
-    }
-
-    String messageBody = objectMapper.writeValueAsString(taskDetails);
-    SendMessageRequest sendMsgRequest = SendMessageRequest.builder()
-            .queueUrl(videoExportQueueUrl)
-            .messageBody(messageBody)
-            .build();
-
-    sqsClient.sendMessage(sendMsgRequest);
-    logger.info("Successfully queued subtitle generation for mediaId: {}", mediaId);
+    // Execute synchronously - NO queuing
+    return generateSubtitlesTask(mediaId, user.getId(), styleParams);
   }
 
   public void queueProcessSubtitles(User user, Long mediaId) throws IOException {
@@ -571,6 +557,27 @@ public class SubtitleService {
       subtitleMedia.setStatus("SUCCESS");
       subtitleMedia.setProgress(100.0);
       subtitleMediaRepository.save(subtitleMedia);
+// ---- NEW: SEND EMAIL ----
+      try {
+        User user = subtitleMedia.getUser();
+        Map<String, String> vars = Map.of(
+                "userName",         Optional.ofNullable(user.getName()).orElse("Creator"),
+                "originalFileName", subtitleMedia.getOriginalFileName(),
+                "downloadUrl",      subtitleMedia.getProcessedCdnUrl()
+        );
+
+        emailService.sendTemplateEmail(
+                user.getEmail(),
+                "ai-voice-generation-campaign",       // This file exists
+                "subtitle-processing-complete",       // New template ID we just added
+                vars
+        );
+
+        logger.info("Processing-complete email sent to {} for mediaId {}", user.getEmail(), mediaId);
+      } catch (Exception e) {
+        logger.error("Failed to send processing-complete email for mediaId {}", mediaId, e);
+        // Email failure does NOT affect video processing
+      }
 
       logger.info("Successfully processed subtitles for mediaId: {}", mediaId);
       return subtitleMedia;
@@ -1347,7 +1354,7 @@ public class SubtitleService {
     Files.deleteIfExists(stdoutLogFile.toPath());
   }
 
-  private String generateTextPng(SubtitleDTO ts, File tempDir, int canvasWidth, int canvasHeight) throws IOException {
+  public String generateTextPng(SubtitleDTO ts, File tempDir, int canvasWidth, int canvasHeight) throws IOException {
     final double RESOLUTION_MULTIPLIER = canvasWidth >= 3840 ? 1.5 : 2.0;
     final double BORDER_SCALE_FACTOR = canvasWidth >= 3840 ? 1.5 : 2.0;
 
@@ -1564,22 +1571,26 @@ public class SubtitleService {
   }
 
   private String getFontPathByFamily(String fontFamily) {
-    final String FONTS_RESOURCE_PATH = "/app/fonts/";
-    final String TEMP_FONT_DIR = baseDir + "/videoeditor/fonts/";
+    final String FONTS_RESOURCE_PATH = "/fonts/";
+    // Use system-specific temp directory with proper separators
+    final String TEMP_FONT_DIR = System.getProperty("java.io.tmpdir") +
+            File.separator + "scenith-fonts" + File.separator;
 
+    // Create temp directory for fonts if it doesn't exist
     File tempDir = new File(TEMP_FONT_DIR);
-    if (!tempDir.exists() && !tempDir.mkdirs()) {
-      logger.error("Failed to create temporary font directory: {}", TEMP_FONT_DIR);
-      return "/app/fonts/arial.ttf";
+    if (!tempDir.exists()) {
+      tempDir.mkdirs();
     }
 
+    // Default font path (fallback)
     String defaultFontPath = getFontFilePath("arial.ttf", FONTS_RESOURCE_PATH, TEMP_FONT_DIR);
 
     if (fontFamily == null || fontFamily.trim().isEmpty()) {
-      logger.warn("Font family is null or empty. Using default font: arial.ttf");
+      System.out.println("Font family is null or empty. Using default font: arial.ttf");
       return defaultFontPath;
     }
 
+    // Map font families to filenames in resources/fonts
     Map<String, String> fontMap = new HashMap<>();
     fontMap.put("Arial", "arial.ttf");
     fontMap.put("Times New Roman", "times.ttf");
@@ -1590,119 +1601,221 @@ public class SubtitleService {
     fontMap.put("Comic Sans MS", "comic.ttf");
     fontMap.put("Impact", "impact.ttf");
     fontMap.put("Tahoma", "tahoma.ttf");
+
+    // Arial variants
     fontMap.put("Arial Bold", "arialbd.ttf");
     fontMap.put("Arial Italic", "ariali.ttf");
     fontMap.put("Arial Bold Italic", "arialbi.ttf");
     fontMap.put("Arial Black", "ariblk.ttf");
+
+    // Georgia variants
     fontMap.put("Georgia Bold", "georgiab.ttf");
     fontMap.put("Georgia Italic", "georgiai.ttf");
     fontMap.put("Georgia Bold Italic", "georgiaz.ttf");
+
+    // Times New Roman variants
     fontMap.put("Times New Roman Bold", "timesbd.ttf");
     fontMap.put("Times New Roman Italic", "timesi.ttf");
     fontMap.put("Times New Roman Bold Italic", "timesbi.ttf");
+
+    // Alumni Sans Pinstripe
     fontMap.put("Alumni Sans Pinstripe", "AlumniSansPinstripe-Regular.ttf");
+
+    // Lexend Giga variants
     fontMap.put("Lexend Giga", "LexendGiga-Regular.ttf");
     fontMap.put("Lexend Giga Black", "LexendGiga-Black.ttf");
     fontMap.put("Lexend Giga Bold", "LexendGiga-Bold.ttf");
+
+
+    // Montserrat Alternates variants
     fontMap.put("Montserrat Alternates", "MontserratAlternates-ExtraLight.ttf");
     fontMap.put("Montserrat Alternates Black", "MontserratAlternates-Black.ttf");
     fontMap.put("Montserrat Alternates Medium Italic", "MontserratAlternates-MediumItalic.ttf");
+
+    // Noto Sans Mono variants
     fontMap.put("Noto Sans Mono", "NotoSansMono-Regular.ttf");
     fontMap.put("Noto Sans Mono Bold", "NotoSansMono-Bold.ttf");
+
+
+    // Poiret One
     fontMap.put("Poiret One", "PoiretOne-Regular.ttf");
+
+    // Arimo variants
     fontMap.put("Arimo", "Arimo-Regular.ttf");
     fontMap.put("Arimo Bold", "Arimo-Bold.ttf");
     fontMap.put("Arimo Bold Italic", "Arimo-BoldItalic.ttf");
     fontMap.put("Arimo Italic", "Arimo-Italic.ttf");
+
+
+    // Carlito variants
     fontMap.put("Carlito", "Carlito-Regular.ttf");
     fontMap.put("Carlito Bold", "Carlito-Bold.ttf");
     fontMap.put("Carlito Bold Italic", "Carlito-BoldItalic.ttf");
     fontMap.put("Carlito Italic", "Carlito-Italic.ttf");
+
+    // Comic Neue variants
     fontMap.put("Comic Neue", "ComicNeue-Regular.ttf");
     fontMap.put("Comic Neue Bold", "ComicNeue-Bold.ttf");
     fontMap.put("Comic Neue Bold Italic", "ComicNeue-BoldItalic.ttf");
     fontMap.put("Comic Neue Italic", "ComicNeue-Italic.ttf");
+
+
+    // Courier Prime variants
     fontMap.put("Courier Prime", "CourierPrime-Regular.ttf");
     fontMap.put("Courier Prime Bold", "CourierPrime-Bold.ttf");
     fontMap.put("Courier Prime Bold Italic", "CourierPrime-BoldItalic.ttf");
     fontMap.put("Courier Prime Italic", "CourierPrime-Italic.ttf");
+
+    // Gelasio variants
     fontMap.put("Gelasio", "Gelasio-Regular.ttf");
     fontMap.put("Gelasio Bold", "Gelasio-Bold.ttf");
     fontMap.put("Gelasio Bold Italic", "Gelasio-BoldItalic.ttf");
     fontMap.put("Gelasio Italic", "Gelasio-Italic.ttf");
+
+
+    // Tinos variants
     fontMap.put("Tinos", "Tinos-Regular.ttf");
     fontMap.put("Tinos Bold", "Tinos-Bold.ttf");
     fontMap.put("Tinos Bold Italic", "Tinos-BoldItalic.ttf");
     fontMap.put("Tinos Italic", "Tinos-Italic.ttf");
+
+    // Amatic SC variants
     fontMap.put("Amatic SC", "AmaticSC-Regular.ttf");
     fontMap.put("Amatic SC Bold", "AmaticSC-Bold.ttf");
+
+// Barriecito
     fontMap.put("Barriecito", "Barriecito-Regular.ttf");
+
+// Barrio
     fontMap.put("Barrio", "Barrio-Regular.ttf");
+
+// Birthstone
     fontMap.put("Birthstone", "Birthstone-Regular.ttf");
+
+// Bungee Hairline
     fontMap.put("Bungee Hairline", "BungeeHairline-Regular.ttf");
+
+// Butcherman
     fontMap.put("Butcherman", "Butcherman-Regular.ttf");
+
+// Doto variants
     fontMap.put("Doto Black", "Doto-Black.ttf");
     fontMap.put("Doto ExtraBold", "Doto-ExtraBold.ttf");
     fontMap.put("Doto Rounded Bold", "Doto_Rounded-Bold.ttf");
+
+// Fascinate Inline
     fontMap.put("Fascinate Inline", "FascinateInline-Regular.ttf");
+
+// Freckle Face
     fontMap.put("Freckle Face", "FreckleFace-Regular.ttf");
+
+// Fredericka the Great
     fontMap.put("Fredericka the Great", "FrederickatheGreat-Regular.ttf");
+
+// Imperial Script
     fontMap.put("Imperial Script", "ImperialScript-Regular.ttf");
+
+// Kings
     fontMap.put("Kings", "Kings-Regular.ttf");
+
+// Kirang Haerang
     fontMap.put("Kirang Haerang", "KirangHaerang-Regular.ttf");
+
+// Lavishly Yours
     fontMap.put("Lavishly Yours", "LavishlyYours-Regular.ttf");
+
+// Mountains of Christmas variants
     fontMap.put("Mountains of Christmas", "MountainsofChristmas-Regular.ttf");
     fontMap.put("Mountains of Christmas Bold", "MountainsofChristmas-Bold.ttf");
+
+// Rampart One
     fontMap.put("Rampart One", "RampartOne-Regular.ttf");
+
+// Rubik Wet Paint
     fontMap.put("Rubik Wet Paint", "RubikWetPaint-Regular.ttf");
+
+// Tangerine variants
     fontMap.put("Tangerine", "Tangerine-Regular.ttf");
     fontMap.put("Tangerine Bold", "Tangerine-Bold.ttf");
+
+// Yesteryear
     fontMap.put("Yesteryear", "Yesteryear-Regular.ttf");
 
+    // Process the font family name
     String processedFontFamily = fontFamily.trim();
+
+    // Try direct match
     if (fontMap.containsKey(processedFontFamily)) {
       String fontFileName = fontMap.get(processedFontFamily);
       String fontPath = getFontFilePath(fontFileName, FONTS_RESOURCE_PATH, TEMP_FONT_DIR);
-      logger.debug("Found font match for: {} -> {}", processedFontFamily, fontPath);
+      System.out.println("Found exact font match for: " + processedFontFamily + " -> " + fontPath);
       return fontPath;
     }
 
+    // Try case-insensitive match
     for (Map.Entry<String, String> entry : fontMap.entrySet()) {
       if (entry.getKey().equalsIgnoreCase(processedFontFamily)) {
         String fontFileName = entry.getValue();
         String fontPath = getFontFilePath(fontFileName, FONTS_RESOURCE_PATH, TEMP_FONT_DIR);
-        logger.debug("Found case-insensitive font match for: {} -> {}", processedFontFamily, fontPath);
+        System.out.println("Found case-insensitive font match for: " + processedFontFamily + " -> " + fontPath);
         return fontPath;
       }
     }
 
-    logger.warn("Font family '{}' not found. Using default: arial.ttf", fontFamily);
+    // Fallback to default font
+    System.out.println("Warning: Font family '" + fontFamily + "' not found in font map. Using default: arial.ttf");
     return defaultFontPath;
   }
 
   private String getFontFilePath(String fontFileName, String fontsResourcePath, String tempFontDir) {
     try {
+      // Check if font is already extracted in temp directory
       File tempFontFile = new File(tempFontDir + fontFileName);
       if (tempFontFile.exists()) {
         return tempFontFile.getAbsolutePath();
       }
 
+      // Load font from classpath
       String resourcePath = fontsResourcePath + fontFileName;
       InputStream fontStream = getClass().getResourceAsStream(resourcePath);
+
       if (fontStream == null) {
-        logger.error("Font file not found in resources: {}", resourcePath);
-        return "/app/fonts/arial.ttf";
+        System.err.println("Font file not found in resources: " + resourcePath);
+        throw new IOException("Font file not found: " + fontFileName);
       }
 
+      // Copy font to temp directory
       Path tempPath = tempFontFile.toPath();
       Files.copy(fontStream, tempPath, StandardCopyOption.REPLACE_EXISTING);
       fontStream.close();
 
-      logger.debug("Extracted font to: {}", tempFontFile.getAbsolutePath());
+      System.out.println("Extracted font to: " + tempFontFile.getAbsolutePath());
       return tempFontFile.getAbsolutePath();
+
     } catch (IOException e) {
-      logger.error("Error accessing font file: {}. Error: {}", fontFileName, e.getMessage());
-      return "/app/fonts/arial.ttf";
+      System.err.println("Error accessing font file: " + fontFileName + ". Error: " + e.getMessage());
+
+      // Try to find any available default font in temp directory
+      String[] fallbackFonts = {"arial.ttf", "Arimo-Regular.ttf", "ComicNeue-Regular.ttf"};
+
+      for (String fallbackFont : fallbackFonts) {
+        File defaultFont = new File(tempFontDir + fallbackFont);
+        if (defaultFont.exists()) {
+          System.out.println("Using fallback font: " + defaultFont.getAbsolutePath());
+          return defaultFont.getAbsolutePath();
+        }
+      }
+
+      // Cross-platform system font fallbacks
+      String os = System.getProperty("os.name").toLowerCase();
+      if (os.contains("win")) {
+        return "C:/Windows/Fonts/Arial.ttf";
+      } else if (os.contains("mac")) {
+        return "/System/Library/Fonts/Arial.ttf";
+      } else {
+        // Linux/Unix
+        return "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+      }
     }
   }
 
