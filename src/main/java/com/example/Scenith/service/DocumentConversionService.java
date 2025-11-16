@@ -57,30 +57,70 @@ public class DocumentConversionService {
     }
 
     /**
-     * Word to PDF Conversion
+     * Word to PDF Conversion - NOT AVAILABLE (UPDATED)
+     * Replace the existing convertWordToPdf method
      */
-    public DocumentConversion convertWordToPdf(User user, MultipartFile wordFile) throws IOException, InterruptedException {
-        logger.info("Converting Word to PDF for user: {}", user.getId());
-        return processDocumentConversion(user, Collections.singletonList(wordFile), "WORD_TO_PDF", null);
+    public DocumentConversion convertWordToPdf(User user, MultipartFile wordFile) throws IOException {
+        logger.info("Word to PDF conversion requested for user: {}", user.getId());
+
+        // Create a simple error response without processing
+        DocumentConversion conversion = new DocumentConversion();
+        conversion.setUser(user);
+        conversion.setOperationType("WORD_TO_PDF");
+        conversion.setOriginalFileNames(objectMapper.writeValueAsString(Collections.singletonList(wordFile.getOriginalFilename())));
+        conversion.setStatus("FAILED");
+        conversion.setErrorMessage(
+                "Word to PDF conversion is not available. " +
+                        "Please convert your Word document to PDF using Microsoft Word, Google Docs, or an online converter " +
+                        "before uploading. You can then use our PDF tools for merging, splitting, compressing, and other operations."
+        );
+        conversion.setCreatedAt(LocalDateTime.now());
+
+        documentConversionRepository.save(conversion);
+
+        throw new IOException(
+                "Word to PDF conversion is not available. " +
+                        "Please convert to PDF first using Microsoft Word, Google Docs, or an online converter."
+        );
     }
 
     /**
-     * PDF to Word Conversion
+     * PDF to Word Conversion - Enhanced with better error handling (UPDATED)
+     * Replace the existing convertPdfToWord method
      */
     public DocumentConversion convertPdfToWord(User user, MultipartFile pdfFile) throws IOException, InterruptedException {
         logger.info("Converting PDF to Word for user: {}", user.getId());
-        return processDocumentConversion(user, Collections.singletonList(pdfFile), "PDF_TO_WORD", null);
-    }
+        try {
+            return processDocumentConversion(user, Collections.singletonList(pdfFile), "PDF_TO_WORD", null);
+        } catch (IOException e) {
+            // Log the error and create a failed conversion record
+            logger.error("PDF to Word conversion failed for user {}: {}", user.getId(), e.getMessage());
 
+            // Create failed conversion record
+            DocumentConversion conversion = new DocumentConversion();
+            conversion.setUser(user);
+            conversion.setOperationType("PDF_TO_WORD");
+            conversion.setOriginalFileNames(objectMapper.writeValueAsString(Collections.singletonList(pdfFile.getOriginalFilename())));
+            conversion.setStatus("FAILED");
+            conversion.setErrorMessage(e.getMessage());
+            conversion.setCreatedAt(LocalDateTime.now());
+
+            documentConversionRepository.save(conversion);
+
+            throw e;
+        }
+    }
     /**
-     * Merge multiple PDFs
+     * Merge PDFs with page rearrangement - UPDATED VERSION
+     * Replace the existing mergePdfs method with this enhanced version
      */
-    public DocumentConversion mergePdfs(User user, List<MultipartFile> pdfFiles) throws IOException, InterruptedException {
-        logger.info("Merging {} PDFs for user: {}", pdfFiles.size(), user.getId());
+    public DocumentConversion mergePdfs(User user, List<MultipartFile> pdfFiles, Map<String, Object> options)
+            throws IOException, InterruptedException {
+        logger.info("Merging {} PDFs for user: {} with options", pdfFiles.size(), user.getId());
         if (pdfFiles.size() < 2) {
             throw new IllegalArgumentException("At least 2 PDF files are required for merging");
         }
-        return processDocumentConversion(user, pdfFiles, "MERGE_PDF", null);
+        return processDocumentConversion(user, pdfFiles, "MERGE_PDF", options);
     }
 
     /**
@@ -108,11 +148,13 @@ public class DocumentConversionService {
     }
 
     /**
-     * Convert images to PDF
+     * Convert images to PDF with page arrangement - UPDATED VERSION
+     * Replace the existing imagesToPdf method with this enhanced version
      */
-    public DocumentConversion imagesToPdf(User user, List<MultipartFile> imageFiles) throws IOException, InterruptedException {
-        logger.info("Converting {} images to PDF for user: {}", imageFiles.size(), user.getId());
-        return processDocumentConversion(user, imageFiles, "IMAGES_TO_PDF", null);
+    public DocumentConversion imagesToPdf(User user, List<MultipartFile> imageFiles, Map<String, Object> options)
+            throws IOException, InterruptedException {
+        logger.info("Converting {} images to PDF for user: {} with options", imageFiles.size(), user.getId());
+        return processDocumentConversion(user, imageFiles, "IMAGES_TO_PDF", options);
     }
 
     /**
@@ -181,7 +223,7 @@ public class DocumentConversionService {
                 MultipartFile file = files.get(i);
                 String fileName = file.getOriginalFilename();
                 String tempFilePath = workDir + File.separator + "input_" + i + "_" + fileName;
-                
+
                 File inputFile = cloudflareR2Service.saveMultipartFileToTemp(file, tempFilePath);
                 inputFiles.add(inputFile);
                 inputPaths.add(inputFile.getAbsolutePath());
@@ -193,6 +235,43 @@ public class DocumentConversionService {
                 r2OriginalPaths.add(r2Path);
                 logger.info("Uploaded original file to R2: {}", r2Path);
             }
+
+            // ============================================================================
+            // ADD THIS SECTION: Handle insertion files for REARRANGE_PDF operation
+            // ============================================================================
+            if (options != null && options.containsKey("insertions") && "REARRANGE_PDF".equals(operationType)) {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> insertions = (List<Map<String, Object>>) options.get("insertions");
+
+                logger.info("Processing {} insertion files for PDF rearrangement", insertions.size());
+
+                // The insert files start after the main PDF (index 1 onwards)
+                for (int i = 0; i < insertions.size(); i++) {
+                    Map<String, Object> insertion = insertions.get(i);
+
+                    // inputFiles[0] is the main PDF
+                    // inputFiles[1], inputFiles[2], etc. are the insertion files
+                    if (i + 1 < inputFiles.size()) {
+                        String insertFilePath = inputFiles.get(i + 1).getAbsolutePath();
+                        insertion.put("filePath", insertFilePath);
+
+                        logger.debug("Insertion {} - Type: {}, Position: {}, File: {}",
+                                i,
+                                insertion.get("type"),
+                                insertion.get("position"),
+                                insertFilePath);
+                    } else {
+                        logger.warn("Insertion {} specified but no corresponding file found", i);
+                    }
+                }
+
+                // Update options with file paths included
+                options.put("insertions", insertions);
+                logger.info("Updated insertions with file paths: {}", insertions);
+            }
+            // ============================================================================
+            // END OF INSERTION HANDLING
+            // ============================================================================
 
             // Determine output file name and path
             String outputFileName = generateOutputFileName(originalFileNames.get(0), operationType);
@@ -220,7 +299,7 @@ public class DocumentConversionService {
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.directory(new File(workDir));
             pb.redirectErrorStream(true);
-            
+
             Process process = pb.start();
 
             StringBuilder output = new StringBuilder();
@@ -266,20 +345,20 @@ public class DocumentConversionService {
             conversion.setOutputFileName(outputFileName);
             conversion.setOutputPath(r2OutputPath);
             conversion.setFileSizeBytes(outputFile.length());
-            
+
             // Store original URLs as JSON
             List<String> cdnUrls = originalUrls.stream().map(u -> u.get("cdnUrl")).collect(Collectors.toList());
             List<String> presignedUrls = originalUrls.stream().map(u -> u.get("presignedUrl")).collect(Collectors.toList());
             conversion.setOriginalCdnUrls(objectMapper.writeValueAsString(cdnUrls));
             conversion.setOriginalPresignedUrls(objectMapper.writeValueAsString(presignedUrls));
-            
+
             conversion.setOutputCdnUrl(outputUrls.get("cdnUrl"));
             conversion.setOutputPresignedUrl(outputUrls.get("presignedUrl"));
-            
+
             if (options != null) {
                 conversion.setProcessingOptions(objectMapper.writeValueAsString(options));
             }
-            
+
             conversion.setStatus("SUCCESS");
             conversion.setCreatedAt(LocalDateTime.now());
 
@@ -351,6 +430,7 @@ public class DocumentConversionService {
             case "UNLOCK_PDF":
             case "LOCK_PDF":
             case "PDF_TO_IMAGES":
+            case "REARRANGE_PDF":  // NEW
                 command.add(inputPaths.get(0));
                 command.add(outputPath);
                 break;
@@ -380,9 +460,6 @@ public class DocumentConversionService {
         return command;
     }
 
-    /**
-     * Generate output file name based on operation
-     */
     private String generateOutputFileName(String originalFileName, String operationType) {
         String baseName = originalFileName.substring(0, originalFileName.lastIndexOf('.'));
         String timestamp = String.valueOf(System.currentTimeMillis());
@@ -396,7 +473,7 @@ public class DocumentConversionService {
             case "MERGE_PDF":
                 return "merged_" + timestamp + ".pdf";
             case "SPLIT_PDF":
-                return "split_" + timestamp + ".zip"; // Returns ZIP with multiple PDFs
+                return "split_" + timestamp + ".zip";
             case "COMPRESS_PDF":
                 return baseName + "_compressed_" + timestamp + ".pdf";
             case "ROTATE_PDF":
@@ -409,11 +486,12 @@ public class DocumentConversionService {
                 return baseName + "_unlocked_" + timestamp + ".pdf";
             case "LOCK_PDF":
                 return baseName + "_locked_" + timestamp + ".pdf";
+            case "REARRANGE_PDF":  // NEW
+                return baseName + "_rearranged_" + timestamp + ".pdf";
             default:
                 return "output_" + timestamp + ".pdf";
         }
     }
-
     /**
      * Get user from JWT token
      */
@@ -439,11 +517,11 @@ public class DocumentConversionService {
     public DocumentConversion getConversionById(User user, Long id) {
         DocumentConversion conversion = documentConversionRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Conversion not found"));
-        
+
         if (!conversion.getUser().getId().equals(user.getId())) {
             throw new RuntimeException("Unauthorized access");
         }
-        
+
         return conversion;
     }
 
@@ -452,27 +530,54 @@ public class DocumentConversionService {
      */
     public void deleteConversion(User user, Long id) throws IOException {
         DocumentConversion conversion = getConversionById(user, id);
-        
+
         try {
             // Delete from R2
             List<String> originalPaths = objectMapper.readValue(
-                    conversion.getOriginalPaths(), 
+                    conversion.getOriginalPaths(),
                     objectMapper.getTypeFactory().constructCollectionType(List.class, String.class)
             );
-            
+
             for (String path : originalPaths) {
                 cloudflareR2Service.deleteFile(path);
             }
-            
+
             cloudflareR2Service.deleteFile(conversion.getOutputPath());
-            
+
             // Delete from database
             documentConversionRepository.delete(conversion);
-            
+
             logger.info("Deleted conversion {} for user {}", id, user.getId());
         } catch (Exception e) {
             logger.error("Error deleting conversion: {}", e.getMessage());
             throw new IOException("Failed to delete conversion", e);
         }
+    }
+    // ============================================================================
+// ADD THESE NEW METHODS TO DocumentConversionService.java
+// ============================================================================
+    /**
+     * Rearrange PDF pages with optional insertions
+     * This is the main method for page rearrangement that all other operations can use
+     */
+    /**
+     * Rearrange PDF pages with optional insertions (FIXED)
+     */
+    public DocumentConversion rearrangePdfPages(
+            User user,
+            MultipartFile pdfFile,
+            List<MultipartFile> insertFiles,
+            Map<String, Object> options) throws IOException, InterruptedException {
+
+        logger.info("Rearranging PDF pages for user: {}", user.getId());
+
+        // Combine the main PDF and insert files into one list
+        List<MultipartFile> allFiles = new ArrayList<>();
+        allFiles.add(pdfFile);
+        if (insertFiles != null && !insertFiles.isEmpty()) {
+            allFiles.addAll(insertFiles);
+        }
+
+        return processDocumentConversion(user, allFiles, "REARRANGE_PDF", options);
     }
 }

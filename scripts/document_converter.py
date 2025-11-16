@@ -503,6 +503,162 @@ def lock_pdf(input_path, output_path, options=None):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+def rearrange_pdf(input_path, output_path, options=None):
+    """Rearrange PDF pages with optional insertions - ENHANCED with image resizing"""
+    try:
+        reader = PdfReader(input_path)
+        writer = PdfWriter()
+        total_pages = len(reader.pages)
+
+        if total_pages == 0:
+            raise Exception("PDF has no pages")
+
+        # Get the dimensions of the first page of the original PDF
+        # This will be our target size for all inserted images
+        first_page = reader.pages[0]
+        target_width = float(first_page.mediabox.width)
+        target_height = float(first_page.mediabox.height)
+
+
+        # Get page order (default: keep original order)
+        page_order = options.get('pageOrder', list(range(total_pages))) if options else list(range(total_pages))
+
+        # Validate page order
+        if not page_order:
+            page_order = list(range(total_pages))
+
+        # Get insertions if any
+        insertions = options.get('insertions', []) if options else []
+
+        # Create a map of position -> insertion for quick lookup
+        insertion_map = {}
+        for insertion in insertions:
+            pos = insertion.get('position', 0)
+            insertion_map[pos] = insertion
+
+        page_index = 0
+
+        # Process pages according to order and insertions
+        for i in range(len(page_order) + len(insertions)):
+            # Check if there's an insertion at this position
+            if i in insertion_map:
+                insertion = insertion_map[i]
+                insert_type = insertion.get('type', 'image')
+                file_path = insertion.get('filePath', '')
+
+                if not file_path or not os.path.exists(file_path):
+                    continue
+
+                try:
+                    if insert_type == 'pdf':
+                        # Insert PDF page(s) - keep original size
+                        insert_reader = PdfReader(file_path)
+                        for insert_page in insert_reader.pages:
+                            writer.add_page(insert_page)
+
+                    elif insert_type == 'image':
+                        # ============================================================
+                        # ENHANCED: Resize image to match PDF page dimensions
+                        # ============================================================
+                        img = Image.open(file_path)
+
+                        # Get original image dimensions
+                        orig_width, orig_height = img.size
+
+                        # Convert PDF points to pixels (assuming 72 DPI for PDF, 300 DPI for image quality)
+                        dpi = 300
+                        target_width_px = int(target_width * dpi / 72)
+                        target_height_px = int(target_height * dpi / 72)
+
+
+                        # Calculate aspect ratios
+                        img_aspect = orig_width / orig_height
+                        page_aspect = target_width / target_height
+
+                        # Resize image to fit within PDF page while maintaining aspect ratio
+                        if img_aspect > page_aspect:
+                            # Image is wider - fit to width
+                            new_width = target_width_px
+                            new_height = int(target_width_px / img_aspect)
+                        else:
+                            # Image is taller - fit to height
+                            new_height = target_height_px
+                            new_width = int(target_height_px * img_aspect)
+
+                        # Resize image with high-quality resampling
+                        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+                        # Create a new image with PDF page dimensions (white background)
+                        final_img = Image.new('RGB', (target_width_px, target_height_px), (255, 255, 255))
+
+                        # Calculate position to center the resized image
+                        paste_x = (target_width_px - new_width) // 2
+                        paste_y = (target_height_px - new_height) // 2
+
+                        # Convert to RGB if necessary
+                        if img.mode in ('RGBA', 'LA', 'P'):
+                            background = Image.new('RGB', img.size, (255, 255, 255))
+                            if img.mode == 'P':
+                                img = img.convert('RGBA')
+                            if img.mode == 'RGBA':
+                                background.paste(img, mask=img.split()[-1])
+                            else:
+                                background.paste(img)
+                            img = background
+                        elif img.mode != 'RGB':
+                            img = img.convert('RGB')
+
+                        # Paste resized image onto centered white background
+                        final_img.paste(img, (paste_x, paste_y))
+
+                        # Create PDF page from the properly sized image using reportlab
+                        packet = io.BytesIO()
+                        can = canvas.Canvas(packet, pagesize=(target_width, target_height))
+
+                        # Save final image to BytesIO
+                        img_buffer = io.BytesIO()
+                        final_img.save(img_buffer, format='JPEG', quality=95, dpi=(dpi, dpi))
+                        img_buffer.seek(0)
+
+                        # Draw image on canvas at exact PDF page size
+                        img_reader_obj = ImageReader(img_buffer)
+                        can.drawImage(img_reader_obj, 0, 0,
+                                      width=target_width,
+                                      height=target_height,
+                                      preserveAspectRatio=False)
+                        can.save()
+
+                        # Convert canvas to PDF page
+                        packet.seek(0)
+                        img_pdf_reader = PdfReader(packet)
+                        writer.add_page(img_pdf_reader.pages[0])
+
+
+                except Exception as insert_error:
+                    # Log error but continue processing
+                    print(f"Warning: Failed to insert file at position {i}: {str(insert_error)}", file=sys.stderr)
+            else:
+                # Add regular page from the reordered list
+                if page_index < len(page_order):
+                    page_num = page_order[page_index]
+                    if 0 <= page_num < total_pages:
+                        writer.add_page(reader.pages[page_num])
+                    page_index += 1
+
+        # Write output PDF
+        with open(output_path, 'wb') as output_file:
+            writer.write(output_file)
+
+        return {
+            "status": "success",
+            "output_path": output_path,
+            "total_pages": len(writer.pages),
+            "insertions_added": len(insertions),
+            "page_dimensions": f"{target_width} x {target_height} points"
+        }
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 def parse_page_ranges(pages_spec, total_pages):
     """Parse page range specification like '1-5,7,9-12'"""
@@ -617,6 +773,14 @@ def main():
             output_path = sys.argv[3]
             options = json.loads(sys.argv[4]) if len(sys.argv) > 4 else None
             result = lock_pdf(input_path, output_path, options)
+
+        # ADD THIS NEW CASE HERE ⬇️
+        elif operation == "REARRANGE_PDF":
+            input_path = sys.argv[2]
+            output_path = sys.argv[3]
+            options = json.loads(sys.argv[4]) if len(sys.argv) > 4 else None
+            result = rearrange_pdf(input_path, output_path, options)
+        # ⬆️ END OF NEW CASE
 
         else:
             result = {"status": "error", "message": f"Unknown operation: {operation}"}
