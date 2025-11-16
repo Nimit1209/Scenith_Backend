@@ -241,6 +241,45 @@ RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH 
     ln -sf /usr/local/bin/yt-dlp /usr/bin/yt-dlp && \
     echo "yt-dlp installed successfully"
 
+# ============================================================================
+# DOCUMENT CONVERSION DEPENDENCIES (MINIMAL - NO LIBREOFFICE)
+# ============================================================================
+# Install minimal dependencies for document conversion
+RUN yum install -y \
+    poppler-utils \
+    poppler-cpp-devel \
+    qpdf
+
+# Note: Word to PDF conversion will be disabled without LibreOffice
+# Users will get an error message suggesting to use PDF files directly
+
+# ============================================================================
+# PYTHON DOCUMENT PROCESSING LIBRARIES (SIMPLIFIED - NO C++20 DEPENDENCIES)
+# ============================================================================
+
+# Step 9: Install document conversion libraries (avoiding all C++20 requirements)
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "PyPDF2==3.0.1" && \
+    /usr/local/bin/pip3.11 install "python-docx==1.1.2" && \
+    /usr/local/bin/pip3.11 install "reportlab==4.2.5" && \
+    /usr/local/bin/pip3.11 install "pypdf==3.17.4"
+
+# Step 10: Install additional document utilities
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "python-pptx==1.0.2"
+
+# Verify document conversion tools (using command -v instead of which)
+RUN echo "Verifying document conversion tools..." && \
+    command -v pdftoppm && \
+    command -v qpdf && \
+    /usr/local/bin/python3.11 -c "import PyPDF2; from docx import Document; from reportlab.pdfgen import canvas; print('All document libraries loaded successfully')"
+
+# Set environment variable for document conversion script
+ENV DOCUMENT_CONVERSION_SCRIPT_PATH=/app/scripts/document_converter.py
+
+# ============================================================================
+# END OF DOCUMENT CONVERSION DEPENDENCIES
+# ============================================================================
 # Verify yt-dlp installation
 RUN /usr/local/bin/yt-dlp --version || echo "yt-dlp version check failed"
 # Clean up
@@ -292,6 +331,9 @@ COPY scripts/compress_media.py /app/scripts/compress_media.py
 COPY scripts/convert_media.py /app/scripts/convert_media.py
 COPY scripts/whisper_transcribe.py /app/scripts/whisper_transcribe.py
 COPY scripts/whisper_transcribe.py /temp/scripts/whisper_transcribe.py
+# Copy the document conversion script (NEW)
+COPY scripts/document_converter.py /app/scripts/document_converter.py
+COPY scripts/document_converter.py /temp/scripts/document_converter.py
 
 # Make the Python scripts executable
 RUN chmod +x /app/scripts/remove_background.py && \
@@ -300,6 +342,8 @@ RUN chmod +x /app/scripts/remove_background.py && \
     chmod +x /app/scripts/convert_media.py && \
     chmod +x /app/scripts/whisper_transcribe.py && \
     chmod +x /temp/scripts/whisper_transcribe.py && \
+    chmod +x /temp/scripts/document_converter.py && \
+    chmod +x /app/scripts/document_converter.py && \
     chmod +x /app/scripts/compress_media.py
 
 # Copy the .env file
