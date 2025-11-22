@@ -1,8 +1,8 @@
-package com.example.Scenith.service;
+package com.example.Scenith.sqs;
 
+import com.example.Scenith.service.VideoFilterJobService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -14,26 +14,30 @@ import java.util.List;
 import java.util.Map;
 
 @Component
-@RequiredArgsConstructor
-public class VideoSpeedWorker {
-    private static final Logger logger = LoggerFactory.getLogger(VideoSpeedWorker.class);
-
+public class VideoFilterJobWorker {
+    private static final Logger logger = LoggerFactory.getLogger(VideoFilterJobWorker.class);
     private final SqsService sqsService;
-    private final VideoSpeedService videoSpeedService;
+    private final VideoFilterJobService videoFilterJobService;
     private final ObjectMapper objectMapper;
 
     @Value("${sqs.queue.url}")
     private String videoExportQueueUrl;
 
-    @Scheduled(fixedDelay = 10000)
+    public VideoFilterJobWorker(SqsService sqsService, VideoFilterJobService videoFilterJobService, ObjectMapper objectMapper) {
+        this.sqsService = sqsService;
+        this.videoFilterJobService = videoFilterJobService;
+        this.objectMapper = objectMapper;
+    }
+
+    @Scheduled(fixedDelay = 1000) // Poll every second
     public void processQueue() {
         try {
             List<Message> messages = sqsService.receiveMessages(videoExportQueueUrl, 1);
             for (Message message : messages) {
                 try {
                     Map<String, String> taskDetails = objectMapper.readValue(message.body(), new TypeReference<>() {});
-                    logger.info("Processing speed task: videoId={}", taskDetails.get("videoId"));
-                    videoSpeedService.processSpeedTask(taskDetails);
+                    logger.info("Processing video filter job: jobId={}", taskDetails.get("jobId"));
+                    videoFilterJobService.processJobFromSqs(taskDetails);
                     sqsService.deleteMessage(message.receiptHandle(), videoExportQueueUrl);
                     logger.info("Successfully processed and deleted message: messageId={}", message.messageId());
                 } catch (Exception e) {

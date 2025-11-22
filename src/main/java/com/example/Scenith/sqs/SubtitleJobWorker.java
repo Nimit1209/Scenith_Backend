@@ -1,5 +1,6 @@
-package com.example.Scenith.service;
+package com.example.Scenith.sqs;
 
+import com.example.Scenith.service.SubtitleService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;

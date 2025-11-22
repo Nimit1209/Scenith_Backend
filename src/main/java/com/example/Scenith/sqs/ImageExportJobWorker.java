@@ -1,5 +1,6 @@
-package com.example.Scenith.service;
+package com.example.Scenith.sqs;
 
+import com.example.Scenith.service.ImageEditorService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -13,18 +14,19 @@ import java.util.List;
 import java.util.Map;
 
 @Component
-public class VideoExportWorker {
-    private static final Logger logger = LoggerFactory.getLogger(VideoExportWorker.class);
+public class ImageExportJobWorker {
+    private static final Logger logger = LoggerFactory.getLogger(ImageExportJobWorker.class);
+    
     private final SqsService sqsService;
-    private final VideoEditingService videoEditingService;
+    private final ImageEditorService imageEditorService;
     private final ObjectMapper objectMapper;
 
     @Value("${sqs.queue.url}")
     private String videoExportQueueUrl;
 
-    public VideoExportWorker(SqsService sqsService, VideoEditingService videoEditingService, ObjectMapper objectMapper) {
+    public ImageExportJobWorker(SqsService sqsService, ImageEditorService imageEditorService, ObjectMapper objectMapper) {
         this.sqsService = sqsService;
-        this.videoEditingService = videoEditingService;
+        this.imageEditorService = imageEditorService;
         this.objectMapper = objectMapper;
     }
 
@@ -34,10 +36,9 @@ public class VideoExportWorker {
             List<Message> messages = sqsService.receiveMessages(videoExportQueueUrl, 1);
             for (Message message : messages) {
                 try {
-                    Map<String, String> taskDetails = objectMapper.readValue(message.body(), new TypeReference<>() {});
-                    String sessionId = taskDetails.get("sessionId");
-                    logger.info("Processing export task: sessionId={}", sessionId);
-                    videoEditingService.processExportTask(taskDetails);
+                    Map<String, Object> taskDetails = objectMapper.readValue(message.body(), new TypeReference<>() {});
+                    logger.info("Processing image export job: projectId={}", taskDetails.get("projectId"));
+                    imageEditorService.processExportFromSqs(taskDetails);
                     sqsService.deleteMessage(message.receiptHandle(), videoExportQueueUrl);
                     logger.info("Successfully processed and deleted message: messageId={}", message.messageId());
                 } catch (Exception e) {

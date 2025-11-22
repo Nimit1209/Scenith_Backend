@@ -8,6 +8,7 @@ import com.example.Scenith.entity.User;
 import com.example.Scenith.repository.ImageProjectRepository;
 import com.example.Scenith.repository.UserRepository;
 import com.example.Scenith.security.JwtUtil;
+import com.example.Scenith.sqs.SqsService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

@@ -361,7 +361,7 @@ public class SubtitleService {
   }
 
   // Internal methods for SQS worker to process tasks
-  protected SubtitleMedia generateSubtitlesTask(Long mediaId, Long userId, Map<String, String> styleParams) throws IOException, InterruptedException {
+  public SubtitleMedia generateSubtitlesTask(Long mediaId, Long userId, Map<String, String> styleParams) throws IOException, InterruptedException {
     logger.info("Processing subtitle generation task for mediaId: {}, userId: {}", mediaId, userId);
 
     SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
@@ -483,7 +483,7 @@ public class SubtitleService {
     }
   }
 
-  protected SubtitleMedia processSubtitlesTask(Long mediaId, Long userId) throws IOException, InterruptedException {
+  public SubtitleMedia processSubtitlesTask(Long mediaId, Long userId) throws IOException, InterruptedException {
     logger.info("Processing subtitles task for mediaId: {}, userId: {}", mediaId, userId);
 
     SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)

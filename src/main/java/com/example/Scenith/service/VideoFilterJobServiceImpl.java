@@ -7,6 +7,7 @@ import com.example.Scenith.entity.User;
 import com.example.Scenith.entity.VideoFilterJob;
 import com.example.Scenith.entity.VideoFilterUpload;
 import com.example.Scenith.repository.VideoFilterJobRepository;
+import com.example.Scenith.sqs.SqsService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;

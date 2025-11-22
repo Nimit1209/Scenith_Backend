@@ -10,6 +10,7 @@ import com.example.Scenith.entity.UserTtsUsage;
 import com.example.Scenith.exception.SessionNotFoundException;
 import com.example.Scenith.repository.ProjectRepository;
 import com.example.Scenith.repository.UserTtsUsageRepository;
+import com.example.Scenith.sqs.SqsService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;

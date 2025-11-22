@@ -3,6 +3,7 @@ package com.example.Scenith.service;
 import com.example.Scenith.entity.User;
 import com.example.Scenith.entity.VideoSpeed;
 import com.example.Scenith.repository.VideoSpeedRepository;
+import com.example.Scenith.sqs.SqsService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;

@@ -1,4 +1,4 @@
-package com.example.Scenith.service;
+package com.example.Scenith.sqs;
 
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
