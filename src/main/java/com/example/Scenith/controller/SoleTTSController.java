@@ -34,16 +34,18 @@ public class SoleTTSController {
     @PostMapping("/generate")
     public ResponseEntity<?> generateTTS(
             @RequestHeader("Authorization") String token,
-            @RequestBody Map<String, String> request) {
+            @RequestBody Map<String, Object> request) {
         try {
             // Authenticate user
             User user = getUserFromToken(token);
 
             // Extract parameters
-            String text = request.get("text");
-            String voiceName = request.get("voiceName");
-            String languageCode = request.get("languageCode");
+            String text = (String) request.get("text");;
+            String voiceName = (String) request.get("voiceName");
+            String languageCode = (String) request.get("languageCode");
 
+            @SuppressWarnings("unchecked")
+            Map<String, String> ssmlConfig = (Map<String, String>)request.get("ssmlConfig");
             // Validate parameters
             if (text == null || text.trim().isEmpty()) {
                 return ResponseEntity.badRequest().body(Map.of("message", "Text is required and cannot be empty"));
@@ -56,7 +58,7 @@ public class SoleTTSController {
             }
 
             // Generate TTS
-            SoleTTS soleTTS = soleTTSService.generateTTS(user, text, voiceName, languageCode);
+            SoleTTS soleTTS = soleTTSService.generateTTS(user, text, voiceName, languageCode,ssmlConfig);
 
             // Prepare response
             Map<String, Object> response = new HashMap<>();

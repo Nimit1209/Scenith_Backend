@@ -22,7 +22,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Service
@@ -45,7 +47,8 @@ public class SoleTTSService {
             User user,
             String text,
             String voiceName,
-            String languageCode) throws IOException, InterruptedException {
+            String languageCode,
+            Map<String, String> ssmlConfig) throws IOException, InterruptedException {
         // Validate input
         if (text == null || text.trim().isEmpty()) {
             throw new IllegalArgumentException("Text is required and cannot be empty");
@@ -91,7 +94,18 @@ public class SoleTTSService {
         }
 
         try (TextToSpeechClient textToSpeechClient = TextToSpeechClient.create(settings)) {
-            SynthesisInput input = SynthesisInput.newBuilder().setText(text).build();
+            String inputText = (ssmlConfig != null && !ssmlConfig.isEmpty())
+                    ? buildSSMLText(text, ssmlConfig)
+                    : text;
+
+            // Use setSsml instead of setText when SSML is present
+            SynthesisInput.Builder inputBuilder = SynthesisInput.newBuilder();
+            if (ssmlConfig != null && !ssmlConfig.isEmpty()) {
+                inputBuilder.setSsml(inputText);
+            } else {
+                inputBuilder.setText(inputText);
+            }
+            SynthesisInput input = inputBuilder.build();
             VoiceSelectionParams voice = VoiceSelectionParams.newBuilder()
                     .setLanguageCode(languageCode)
                     .setName(voiceName)
@@ -221,5 +235,45 @@ public class SoleTTSService {
                 }
             }
         }
+    }
+
+    private String buildSSMLText(String text, Map<String, String> ssmlConfig) {
+        if (ssmlConfig == null || ssmlConfig.isEmpty()) {
+            return text;
+        }
+
+        StringBuilder ssml = new StringBuilder("<speak>");
+
+        // Build prosody tag attributes
+        List<String> prosodyAttrs = new ArrayList<>();
+        if (ssmlConfig.containsKey("rate")) {
+            prosodyAttrs.add("rate=\"" + ssmlConfig.get("rate") + "\"");
+        }
+        if (ssmlConfig.containsKey("pitch")) {
+            prosodyAttrs.add("pitch=\"" + ssmlConfig.get("pitch") + "\"");
+        }
+        if (ssmlConfig.containsKey("volume")) {
+            prosodyAttrs.add("volume=\"" + ssmlConfig.get("volume") + "\"");
+        }
+
+        if (!prosodyAttrs.isEmpty()) {
+            ssml.append("<prosody ").append(String.join(" ", prosodyAttrs)).append(">");
+        }
+
+        // Add emphasis if specified
+        if (ssmlConfig.containsKey("emphasis")) {
+            ssml.append("<emphasis level=\"").append(ssmlConfig.get("emphasis")).append("\">");
+            ssml.append(text);
+            ssml.append("</emphasis>");
+        } else {
+            ssml.append(text);
+        }
+
+        if (!prosodyAttrs.isEmpty()) {
+            ssml.append("</prosody>");
+        }
+
+        ssml.append("</speak>");
+        return ssml.toString();
     }
 }
