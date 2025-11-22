@@ -49,8 +49,9 @@ public class SqsService {
             ReceiveMessageRequest receiveRequest = ReceiveMessageRequest.builder()
                     .queueUrl(queueUrl)
                     .maxNumberOfMessages(maxMessages)
-                    .waitTimeSeconds(20) // Long polling for efficiency
-                    .visibilityTimeout(30)
+                    .waitTimeSeconds(20) // Long polling
+                    .visibilityTimeout(300) // 5 minutes for FFmpeg processing
+                    .attributeNames(QueueAttributeName.ALL) // Get all attributes including receive count
                     .build();
             List<Message> messages = sqsClient.receiveMessage(receiveRequest).messages();
             logger.debug("Received {} messages from queue {}", messages.size(), queueUrl);

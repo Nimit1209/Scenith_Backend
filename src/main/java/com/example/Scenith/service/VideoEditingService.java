@@ -4147,6 +4147,7 @@ public class VideoEditingService {
         // Create export task details
         Map<String, String> taskDetails = new HashMap<>();
         taskDetails.put("sessionId", sessionId);
+        taskDetails.put("taskType", "VIDEO_EXPORT");  // ← ADD THIS
         taskDetails.put("outputFileName", outputFileName);
         taskDetails.put("r2Path", r2Path);
         taskDetails.put("projectId", project.getId().toString());

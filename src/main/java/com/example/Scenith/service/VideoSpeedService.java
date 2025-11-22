@@ -95,6 +95,8 @@ public class VideoSpeedService {
         // Queue processing task
         Map<String, String> taskDetails = new HashMap<>();
         taskDetails.put("videoId", id.toString());
+        taskDetails.put("taskType", "VIDEO_SPEED");  // ← ADD THIS
+        taskDetails.put("userId", user.getId().toString());  // ← ADD THIS
         taskDetails.put("originalFilePath", video.getOriginalFilePath());
         taskDetails.put("speed", String.valueOf(video.getSpeed()));
         String messageBody = objectMapper.writeValueAsString(taskDetails);

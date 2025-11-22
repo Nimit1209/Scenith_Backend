@@ -215,6 +215,7 @@ public class ImageEditorService {
             Map<String, Object> taskDetails = Map.of(
                     "projectId", projectId,
                     "userId", user.getId(),
+                    "taskType", "IMAGE_EXPORT",
                     "format", format,
                     "quality", request.getQuality() != null ? request.getQuality() : 90,
                     "designJson", project.getDesignJson()

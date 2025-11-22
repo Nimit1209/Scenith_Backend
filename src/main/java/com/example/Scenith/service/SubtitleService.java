@@ -7,6 +7,7 @@ import com.example.Scenith.entity.User;
 import com.example.Scenith.repository.SubtitleMediaRepository;
 import com.example.Scenith.repository.UserRepository;
 import com.example.Scenith.security.JwtUtil;
+import com.example.Scenith.sqs.SqsService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -48,6 +49,7 @@ public class SubtitleService {
   private final ObjectMapper objectMapper;
   private final SqsClient sqsClient;
   private final EmailService emailService;
+  private final SqsService sqsService;
 
   @Value("${app.base-dir:/temp}")
   private String baseDir;
@@ -70,7 +72,7 @@ public class SubtitleService {
           UserRepository userRepository,
           CloudflareR2Service cloudflareR2Service,
           ObjectMapper objectMapper,
-          SqsClient sqsClient, EmailService emailService) {
+          SqsClient sqsClient, EmailService emailService, SqsService sqsService) {
     this.jwtUtil = jwtUtil;
     this.subtitleMediaRepository = subtitleMediaRepository;
     this.userRepository = userRepository;
@@ -78,6 +80,7 @@ public class SubtitleService {
     this.objectMapper = objectMapper;
     this.sqsClient = sqsClient;
       this.emailService = emailService;
+      this.sqsService = sqsService;
   }
 
   public SubtitleMedia uploadMedia(User user, MultipartFile mediaFile) throws IOException {
@@ -171,19 +174,20 @@ public class SubtitleService {
     subtitleMedia.setStatus("QUEUED");
     subtitleMedia.setProgress(0.0);
     subtitleMediaRepository.save(subtitleMedia);
-
     Map<String, String> taskDetails = new HashMap<>();
-    taskDetails.put("taskType", "PROCESS_SUBTITLES");
+    taskDetails.put("taskType", "PROCESS_SUBTITLES");  // ← ALREADY HAS THIS ✓
     taskDetails.put("mediaId", mediaId.toString());
     taskDetails.put("userId", user.getId().toString());
 
     String messageBody = objectMapper.writeValueAsString(taskDetails);
-    SendMessageRequest sendMsgRequest = SendMessageRequest.builder()
-            .queueUrl(videoExportQueueUrl)
-            .messageBody(messageBody)
-            .build();
+    sqsService.sendMessage(messageBody, videoExportQueueUrl);  // ← UPDATE THIS LINE
+    // Remove the old SendMessageRequest code below:
+    // SendMessageRequest sendMsgRequest = SendMessageRequest.builder()
+    //         .queueUrl(videoExportQueueUrl)
+    //         .messageBody(messageBody)
+    //         .build();
+    // sqsClient.sendMessage(sendMsgRequest);
 
-    sqsClient.sendMessage(sendMsgRequest);
     logger.info("Successfully queued subtitle processing for mediaId: {}", mediaId);
   }
 

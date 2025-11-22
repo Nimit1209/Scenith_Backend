@@ -144,7 +144,8 @@ public class VideoFilterJobServiceImpl implements VideoFilterJobService {
         try {
             Map<String, String> taskDetails = Map.of(
                     "jobId", String.valueOf(jobId),
-                    "userId", String.valueOf(user.getId())
+                    "userId", String.valueOf(user.getId()),
+                    "taskType","VIDEO_FILTER"
             );
             String messageBody = objectMapper.writeValueAsString(taskDetails);
             sqsService.sendMessage(messageBody, videoExportQueueUrl);
