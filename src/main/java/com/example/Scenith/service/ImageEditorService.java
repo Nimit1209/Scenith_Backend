@@ -1,18 +1,16 @@
 package com.example.Scenith.service;
 
-import com.example.Scenith.dto.CreateImageProjectRequest;
-import com.example.Scenith.dto.ExportImageRequest;
-import com.example.Scenith.dto.UpdateImageProjectRequest;
-import com.example.Scenith.entity.ImageProject;
+import com.example.Scenith.dto.imagedto.CreateImageProjectRequest;
+import com.example.Scenith.dto.imagedto.ExportImageRequest;
+import com.example.Scenith.dto.imagedto.UpdateImageProjectRequest;
 import com.example.Scenith.entity.User;
-import com.example.Scenith.repository.ImageProjectRepository;
+import com.example.Scenith.entity.imageentity.ImageProject;
 import com.example.Scenith.repository.UserRepository;
+import com.example.Scenith.repository.imagerepository.ImageProjectRepository;
 import com.example.Scenith.security.JwtUtil;
-import com.example.Scenith.sqs.SqsService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,32 +23,26 @@ public class ImageEditorService {
 
     private static final Logger logger = LoggerFactory.getLogger(ImageEditorService.class);
 
-    @Value("${sqs.queue.url}")
-    private String videoExportQueueUrl;
-
     private final ImageProjectRepository imageProjectRepository;
     private final UserRepository userRepository;
     private final ImageRenderService imageRenderService;
+    private final CloudflareR2Service cloudflareR2Service;
     private final JwtUtil jwtUtil;
     private final ObjectMapper objectMapper;
-    private final SqsService sqsService;
-    private final CloudflareR2Service cloudflareR2Service;
 
     public ImageEditorService(
             ImageProjectRepository imageProjectRepository,
             UserRepository userRepository,
             ImageRenderService imageRenderService,
+            CloudflareR2Service cloudflareR2Service,
             JwtUtil jwtUtil,
-            ObjectMapper objectMapper,
-            SqsService sqsService,
-            CloudflareR2Service cloudflareR2Service) {
+            ObjectMapper objectMapper) {
         this.imageProjectRepository = imageProjectRepository;
         this.userRepository = userRepository;
         this.imageRenderService = imageRenderService;
+        this.cloudflareR2Service = cloudflareR2Service;
         this.jwtUtil = jwtUtil;
         this.objectMapper = objectMapper;
-        this.sqsService = sqsService;
-        this.cloudflareR2Service = cloudflareR2Service;
     }
 
     /**
@@ -60,7 +52,6 @@ public class ImageEditorService {
     public ImageProject createProject(User user, CreateImageProjectRequest request) {
         logger.info("Creating new project for user: {}", user.getId());
 
-        // Validate input
         if (request.getProjectName() == null || request.getProjectName().trim().isEmpty()) {
             throw new IllegalArgumentException("Project name is required");
         }
@@ -80,16 +71,21 @@ public class ImageEditorService {
                 request.getCanvasBackgroundColor() : "#FFFFFF");
         project.setStatus("DRAFT");
 
-        // Initialize empty design JSON
+        // Initialize with pages array containing one page
         try {
             Map<String, Object> initialDesign = Map.of(
                     "version", "1.0",
-                    "canvas", Map.of(
-                            "width", request.getCanvasWidth(),
-                            "height", request.getCanvasHeight(),
-                            "backgroundColor", project.getCanvasBackgroundColor()
-                    ),
-                    "layers", List.of()
+                    "pages", List.of(
+                            Map.of(
+                                    "id", "page-" + System.currentTimeMillis(),
+                                    "canvas", Map.of(
+                                            "width", request.getCanvasWidth(),
+                                            "height", request.getCanvasHeight(),
+                                            "backgroundColor", project.getCanvasBackgroundColor()
+                                    ),
+                                    "layers", List.of()
+                            )
+                    )
             );
             project.setDesignJson(objectMapper.writeValueAsString(initialDesign));
         } catch (IOException e) {
@@ -110,7 +106,7 @@ public class ImageEditorService {
         logger.info("Updating project: {} for user: {}", projectId, user.getId());
 
         ImageProject project = imageProjectRepository.findByIdAndUser(projectId, user)
-                .orElseThrow(() -> new IllegalArgumentException("Project not found"));
+            .orElseThrow(() -> new IllegalArgumentException("Project not found"));
 
         if (request.getProjectName() != null && !request.getProjectName().trim().isEmpty()) {
             project.setProjectName(request.getProjectName());
@@ -136,43 +132,15 @@ public class ImageEditorService {
      * Get project by ID
      */
     public ImageProject getProject(User user, Long projectId) {
-        ImageProject project = imageProjectRepository.findByIdAndUser(projectId, user)
-                .orElseThrow(() -> new IllegalArgumentException("Project not found"));
-
-        // Refresh CDN URL if export exists
-        if (project.getLastExportedUrl() != null && project.getOutputVideoPath() != null) {
-            try {
-                String cdnUrl = cloudflareR2Service.generateDownloadUrl(project.getOutputVideoPath(), 3600);
-                project.setLastExportedUrl(cdnUrl);
-                imageProjectRepository.save(project);
-            } catch (Exception e) {
-                logger.warn("Failed to refresh CDN URL for project: {}", projectId);
-            }
-        }
-
-        return project;
+        return imageProjectRepository.findByIdAndUser(projectId, user)
+            .orElseThrow(() -> new IllegalArgumentException("Project not found"));
     }
 
     /**
      * Get all projects for user
      */
     public List<ImageProject> getUserProjects(User user) {
-        List<ImageProject> projects = imageProjectRepository.findByUserOrderByUpdatedAtDesc(user);
-
-        // Refresh CDN URLs for projects with exports
-        for (ImageProject project : projects) {
-            if (project.getLastExportedUrl() != null && project.getOutputVideoPath() != null) {
-                try {
-                    String cdnUrl = cloudflareR2Service.generateDownloadUrl(project.getOutputVideoPath(), 3600);
-                    project.setLastExportedUrl(cdnUrl);
-                    imageProjectRepository.save(project);
-                } catch (Exception e) {
-                    logger.warn("Failed to refresh CDN URL for project: {}", project.getId());
-                }
-            }
-        }
-
-        return projects;
+        return imageProjectRepository.findByUserOrderByUpdatedAtDesc(user);
     }
 
     /**
@@ -183,13 +151,13 @@ public class ImageEditorService {
     }
 
     /**
-     * Export project to image - sends to SQS queue for async processing
+     * Export project to image
      */
     @Transactional
-    public ImageProject exportProject(User user, Long projectId, ExportImageRequest request)
-            throws IOException {
+    public ImageProject exportProject(User user, Long projectId, ExportImageRequest request, Integer pageIndex)
+            throws IOException, InterruptedException {
 
-        logger.info("Exporting project: {} for user: {}", projectId, user.getId());
+        logger.info("Exporting project: {} page: {} for user: {}", projectId, pageIndex, user.getId());
 
         ImageProject project = imageProjectRepository.findByIdAndUser(projectId, user)
                 .orElseThrow(() -> new IllegalArgumentException("Project not found"));
@@ -198,91 +166,63 @@ public class ImageEditorService {
             throw new IllegalArgumentException("Project has no design to export");
         }
 
-        // Validate export format
+        // Parse the design JSON to extract specific page
+        Map<String, Object> fullDesign = objectMapper.readValue(project.getDesignJson(), Map.class);
+        List<Map<String, Object>> pages = (List<Map<String, Object>>) fullDesign.get("pages");
+
+        if (pages == null || pages.isEmpty()) {
+            throw new IllegalArgumentException("No pages found in project");
+        }
+
+        // Get the specific page to export (default to 0 if not specified)
+        int targetPageIndex = pageIndex != null ? pageIndex : 0;
+        if (targetPageIndex < 0 || targetPageIndex >= pages.size()) {
+            throw new IllegalArgumentException("Invalid page index");
+        }
+
+        Map<String, Object> targetPage = pages.get(targetPageIndex);
+
+        // Create a single-page design for export
+        Map<String, Object> exportDesign = Map.of(
+                "version", fullDesign.get("version"),
+                "canvas", targetPage.get("canvas"),
+                "layers", targetPage.get("layers")
+        );
+
         String format = request.getFormat() != null ? request.getFormat().toUpperCase() : "PNG";
         if (!format.equals("PNG") && !format.equals("JPG") && !format.equals("JPEG") && !format.equals("PDF")) {
             throw new IllegalArgumentException("Invalid export format. Supported: PNG, JPG, PDF");
         }
 
-        // Set status to PROCESSING
         project.setStatus("PROCESSING");
-        project.setProgressPercentage(0);
-        project.setLastExportedUrl(null);
         imageProjectRepository.save(project);
 
         try {
-            // Send job to SQS
-            Map<String, Object> taskDetails = Map.of(
-                    "projectId", projectId,
-                    "userId", user.getId(),
-                    "taskType", "IMAGE_EXPORT",
-                    "format", format,
-                    "quality", request.getQuality() != null ? request.getQuality() : 90,
-                    "designJson", project.getDesignJson()
-            );
-            String messageBody = objectMapper.writeValueAsString(taskDetails);
-            sqsService.sendMessage(messageBody, videoExportQueueUrl);
-            logger.info("Sent image export job {} to SQS queue {}", projectId, videoExportQueueUrl);
-
-            return project;
-        } catch (Exception e) {
-            logger.error("Failed to send export job to SQS: {}", projectId, e);
-            project.setStatus("FAILED");
-            project.setProgressPercentage(0);
-            imageProjectRepository.save(project);
-            throw new IOException("Failed to queue export job: " + e.getMessage(), e);
-        }
-    }
-
-    /**
-     * Process export job from SQS (called by ImageExportJobWorker)
-     */
-    @Transactional
-    public void processExportFromSqs(Map<String, Object> taskDetails) {
-        Long projectId = Long.valueOf(taskDetails.get("projectId").toString());
-        Long userId = Long.valueOf(taskDetails.get("userId").toString());
-        String format = taskDetails.get("format").toString();
-        Integer quality = Integer.valueOf(taskDetails.get("quality").toString());
-        String designJson = taskDetails.get("designJson").toString();
-
-        ImageProject project = imageProjectRepository.findById(projectId)
-                .filter(p -> p.getUser().getId().equals(userId))
-                .orElseThrow(() -> new RuntimeException("Project not found or unauthorized"));
-
-        if (!project.getStatus().equals("PROCESSING")) {
-            logger.warn("Project {} is not in PROCESSING state, current state: {}", projectId, project.getStatus());
-            return;
-        }
-
-        try {
-            // Render the design
-            String r2Path = imageRenderService.renderDesign(
-                    designJson,
+            String exportR2Path = imageRenderService.renderDesign(
+                    objectMapper.writeValueAsString(exportDesign),
                     format,
-                    quality,
-                    userId,
+                    request.getQuality(),
+                    user.getId(),
                     projectId
             );
 
-            // Generate CDN URL
-            String cdnUrl = cloudflareR2Service.generateDownloadUrl(r2Path, 3600);
-
-            // Update project with export info
-            project.setOutputVideoPath(r2Path);
-            project.setLastExportedUrl(cdnUrl);
+            // Generate URLs for the exported image
+            Map<String, String> urls = cloudflareR2Service.generateUrls(exportR2Path, 3600);
+            
+            project.setLastExportedUrl(urls.get("cdnUrl"));
             project.setLastExportFormat(format);
             project.setStatus("COMPLETED");
-            project.setProgressPercentage(100);
 
             imageProjectRepository.save(project);
-            logger.info("Project exported successfully: {}", projectId);
+            logger.info("Project page {} exported successfully: {}", targetPageIndex, projectId);
+
+            return project;
 
         } catch (Exception e) {
-            logger.error("Failed to export project: {}", projectId, e);
+            logger.error("Failed to export project page: {}", projectId, e);
             project.setStatus("FAILED");
-            project.setProgressPercentage(0);
             imageProjectRepository.save(project);
-            throw new RuntimeException("Export processing failed: " + e.getMessage(), e);
+            throw e;
         }
     }
 
@@ -292,15 +232,20 @@ public class ImageEditorService {
     @Transactional
     public void deleteProject(User user, Long projectId) {
         ImageProject project = imageProjectRepository.findByIdAndUser(projectId, user)
-                .orElseThrow(() -> new IllegalArgumentException("Project not found"));
+            .orElseThrow(() -> new IllegalArgumentException("Project not found"));
 
-        // Delete exported file from R2 if exists
-        if (project.getOutputVideoPath() != null) {
+        // Delete last exported image from R2 if exists
+        if (project.getLastExportedUrl() != null) {
             try {
-                cloudflareR2Service.deleteFile(project.getOutputVideoPath());
-                logger.info("Deleted exported file from R2: {}", project.getOutputVideoPath());
+                // Extract R2 path from CDN URL
+                String cdnBaseUrl = cloudflareR2Service.generateUrls("dummy", 0).get("cdnUrl");
+                String baseUrl = cdnBaseUrl.substring(0, cdnBaseUrl.lastIndexOf("/"));
+                String r2Path = project.getLastExportedUrl().replace(baseUrl + "/", "");
+                
+                cloudflareR2Service.deleteFile(r2Path);
+                logger.info("Deleted exported image from R2: {}", r2Path);
             } catch (Exception e) {
-                logger.warn("Failed to delete exported file from R2: {}", project.getOutputVideoPath());
+                logger.warn("Failed to delete exported image from R2: {}", project.getLastExportedUrl(), e);
             }
         }
 
@@ -314,6 +259,6 @@ public class ImageEditorService {
     public User getUserFromToken(String token) {
         String email = jwtUtil.extractEmail(token.substring(7));
         return userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("User not found"));
+            .orElseThrow(() -> new RuntimeException("User not found"));
     }
 }
