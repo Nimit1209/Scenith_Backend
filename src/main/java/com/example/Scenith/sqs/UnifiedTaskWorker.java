@@ -139,10 +139,6 @@ public class UnifiedTaskWorker {
                     handleVideoSpeed(taskDetails);
                     return true;
                     
-                case "IMAGE_EXPORT":
-                    handleImageExport(taskDetails);
-                    return true;
-                    
                 case "PODCAST_CLIP":
                     handlePodcastClip(taskDetails);
                     return true;
@@ -181,10 +177,6 @@ public class UnifiedTaskWorker {
     private void handleVideoSpeed(Map<String, Object> taskDetails) throws IOException, InterruptedException {
         Map<String, String> stringMap = convertToStringMap(taskDetails);
         videoSpeedService.processSpeedTask(stringMap);
-    }
-
-    private void handleImageExport(Map<String, Object> taskDetails) {
-        imageEditorService.processExportFromSqs(taskDetails);
     }
 
     private void handlePodcastClip(Map<String, Object> taskDetails) throws IOException, InterruptedException {

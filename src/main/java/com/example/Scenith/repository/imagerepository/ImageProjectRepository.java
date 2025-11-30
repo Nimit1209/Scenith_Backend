@@ -1,7 +1,7 @@
-package com.example.Scenith.repository;
+package com.example.Scenith.repository.imagerepository;
 
 
-import com.example.Scenith.entity.ImageProject;
+import com.example.Scenith.entity.imageentity.ImageProject;
 import com.example.Scenith.entity.User;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;

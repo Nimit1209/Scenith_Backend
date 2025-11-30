@@ -1,5 +1,6 @@
-package com.example.Scenith.entity;
+package com.example.Scenith.entity.imageentity;
 
+import com.example.Scenith.entity.User;
 import jakarta.persistence.*;
 import lombok.Data;
 import java.time.LocalDateTime;
@@ -8,7 +9,7 @@ import java.time.LocalDateTime;
 @Data
 @Table(name = "image_assets")
 public class ImageAsset {
-    
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

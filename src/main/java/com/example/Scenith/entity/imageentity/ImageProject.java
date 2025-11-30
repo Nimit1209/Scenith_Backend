@@ -1,5 +1,6 @@
-package com.example.Scenith.entity;
+package com.example.Scenith.entity.imageentity;
 
+import com.example.Scenith.entity.User;
 import jakarta.persistence.*;
 import lombok.Data;
 import java.time.LocalDateTime;
@@ -8,7 +9,7 @@ import java.time.LocalDateTime;
 @Data
 @Table(name = "image_projects")
 public class ImageProject {
-    
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -38,17 +39,11 @@ public class ImageProject {
     @Column(name = "status", nullable = false)
     private String status; // DRAFT, PROCESSING, COMPLETED, FAILED
 
-    @Column(name = "output_video_path")
-    private String outputVideoPath; // R2 path for the exported file
-
     @Column(name = "last_exported_url")
-    private String lastExportedUrl; // CDN URL for the exported file
+    private String lastExportedUrl;
 
     @Column(name = "last_export_format")
     private String lastExportFormat; // PNG, JPG, PDF
-
-    @Column(name = "progress_percentage")
-    private Integer progressPercentage; // Export progress (0-100)
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
@@ -62,9 +57,6 @@ public class ImageProject {
         updatedAt = LocalDateTime.now();
         if (status == null) {
             status = "DRAFT";
-        }
-        if (progressPercentage == null) {
-            progressPercentage = 0;
         }
     }
 

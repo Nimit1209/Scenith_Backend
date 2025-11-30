@@ -1,14 +1,16 @@
 package com.example.Scenith.controller;
 
-import com.example.Scenith.dto.CreateImageProjectRequest;
-import com.example.Scenith.dto.ExportImageRequest;
-import com.example.Scenith.dto.UpdateImageProjectRequest;
-import com.example.Scenith.entity.ImageAsset;
-import com.example.Scenith.entity.ImageProject;
+import com.example.Scenith.dto.imagedto.CreateImageProjectRequest;
+import com.example.Scenith.dto.imagedto.ExportImageRequest;
+import com.example.Scenith.dto.imagedto.UpdateImageProjectRequest;
 import com.example.Scenith.entity.User;
+import com.example.Scenith.entity.imageentity.ImageAsset;
+import com.example.Scenith.entity.imageentity.ImageElement;
+import com.example.Scenith.entity.imageentity.ImageProject;
 import com.example.Scenith.service.ImageAssetService;
 import com.example.Scenith.service.ImageEditorService;
-import org.springframework.beans.factory.annotation.Autowired;
+import com.example.Scenith.service.ImageElementService;
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -19,14 +21,14 @@ import java.util.List;
 import java.util.Map;
 
 @RestController
+@RequiredArgsConstructor
 @RequestMapping("/api/image-editor")
 public class ImageEditorController {
 
-    @Autowired
-    private ImageEditorService imageEditorService;
+    private final ImageEditorService imageEditorService;
+    private final ImageAssetService imageAssetService;
+    private final ImageElementService imageElementService;
 
-    @Autowired
-    private ImageAssetService imageAssetService;
 
     /**
      * Create new project
@@ -109,28 +111,26 @@ public class ImageEditorController {
     }
 
     /**
-     * Export project to image (async via SQS)
+     * Export project to image
      * POST /api/image-editor/projects/{id}/export
      */
-    @PostMapping("/projects/{id}/export")
-    public ResponseEntity<?> exportProject(
+    @PostMapping("/projects/{projectId}/export")
+    public ResponseEntity<Map<String, String>> exportProject(
             @RequestHeader("Authorization") String token,
-            @PathVariable Long id,
-            @RequestBody ExportImageRequest request) {
+            @PathVariable Long projectId,
+            @RequestBody ExportImageRequest request,
+            @RequestParam(required = false) Integer pageIndex) {
+
         try {
             User user = imageEditorService.getUserFromToken(token);
-            ImageProject project = imageEditorService.exportProject(user, id, request);
+            ImageProject project = imageEditorService.exportProject(user, projectId, request, pageIndex);
+
             return ResponseEntity.ok(Map.of(
-                    "message", "Export job queued successfully",
-                    "status", project.getStatus(),
-                    "projectId", project.getId()
+                    "message", "Export successful",
+                    "exportUrl", project.getLastExportedUrl()
             ));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(Map.of("message", e.getMessage()));
-        } catch (IOException e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("message", "Export failed: " + e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
         }
     }
 
@@ -239,6 +239,45 @@ public class ImageEditorController {
         } catch (IOException e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("message", "Failed to delete asset: " + e.getMessage()));
+        }
+    }
+
+    @GetMapping("/elements")
+    public ResponseEntity<?> getElements(
+            @RequestHeader("Authorization") String token,
+            @RequestParam(value = "category", required = false) String category) {
+        try {
+            List<ImageElement> elements;
+            if (category != null) {
+                elements = imageElementService.getElementsByCategory(category);
+            } else {
+                elements = imageElementService.getAllActiveElements();
+            }
+            return ResponseEntity.ok(elements);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("message", "Failed to retrieve elements: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Remove background from an asset
+     * POST /api/image-editor/assets/{id}/remove-background
+     */
+    @PostMapping("/assets/{id}/remove-background")
+    public ResponseEntity<?> removeBackground(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long id) {
+        try {
+            User user = imageEditorService.getUserFromToken(token);
+            ImageAsset newAsset = imageAssetService.removeBackground(user, id);
+            return ResponseEntity.ok(newAsset);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(Map.of("message", e.getMessage()));
+        } catch (IOException | InterruptedException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("message", "Background removal failed: " + e.getMessage()));
         }
     }
 }

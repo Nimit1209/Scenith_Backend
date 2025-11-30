@@ -1,4 +1,4 @@
-package com.example.Scenith.dto;
+package com.example.Scenith.dto.imagedto;
 
 import lombok.Data;
 
