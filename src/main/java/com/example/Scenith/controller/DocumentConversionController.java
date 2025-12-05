@@ -28,67 +28,67 @@ public class DocumentConversionController {
 // ============================================================================
 // ADD/UPDATE THESE METHODS IN DocumentConversionController.java
 // ============================================================================
-
-    /**
-     * Convert Word to PDF - NOT AVAILABLE (UPDATED)
-     * Replace the existing convertWordToPdf method
-     */
-    @PostMapping("/word-to-pdf")
-    public ResponseEntity<?> convertWordToPdf(
-            @RequestHeader("Authorization") String token,
-            @RequestParam("file") MultipartFile wordFile) {
-        try {
-            User user = documentConversionService.getUserFromToken(token);
-            DocumentConversion result = documentConversionService.convertWordToPdf(user, wordFile);
-            return ResponseEntity.status(501).body(Map.of(
-                    "message", "Word to PDF conversion is not available",
-                    "error", "This feature requires LibreOffice which is not installed. Please convert your Word document to PDF using Microsoft Word, Google Docs, or an online converter before uploading.",
-                    "status", "NOT_IMPLEMENTED",
-                    "availableOperations", Arrays.asList(
-                            "PDF to Word",
-                            "Merge PDFs",
-                            "Split PDF",
-                            "Compress PDF",
-                            "Rotate PDF",
-                            "Images to PDF",
-                            "PDF to Images",
-                            "Add Watermark",
-                            "Lock/Unlock PDF",
-                            "Rearrange PDF Pages"
-                    )
-            ));
-        } catch (Exception e) {
-            return ResponseEntity.status(501).body(Map.of(
-                    "message", "Word to PDF conversion not available",
-                    "error", e.getMessage()
-            ));
-        }
-    }
-
-    /**
-     * Convert PDF to Word - Enhanced (UPDATED)
-     * Replace the existing convertPdfToWord method
-     */
-    @PostMapping("/pdf-to-word")
-    public ResponseEntity<?> convertPdfToWord(
-            @RequestHeader("Authorization") String token,
-            @RequestParam("file") MultipartFile pdfFile) {
-        try {
-            User user = documentConversionService.getUserFromToken(token);
-            DocumentConversion result = documentConversionService.convertPdfToWord(user, pdfFile);
-            return ResponseEntity.ok(Map.of(
-                    "message", "PDF to Word conversion completed successfully",
-                    "data", result,
-                    "note", "Formatting may differ from original PDF. Complex layouts, images, and tables may not be preserved."
-            ));
-        } catch (Exception e) {
-            return ResponseEntity.status(500).body(Map.of(
-                    "message", "PDF to Word conversion failed",
-                    "error", e.getMessage(),
-                    "suggestion", "Make sure your PDF contains extractable text content"
-            ));
-        }
-    }
+//
+//    /**
+//     * Convert Word to PDF - NOT AVAILABLE (UPDATED)
+//     * Replace the existing convertWordToPdf method
+//     */
+//    @PostMapping("/word-to-pdf")
+//    public ResponseEntity<?> convertWordToPdf(
+//            @RequestHeader("Authorization") String token,
+//            @RequestParam("file") MultipartFile wordFile) {
+//        try {
+//            User user = documentConversionService.getUserFromToken(token);
+//            DocumentConversion result = documentConversionService.convertWordToPdf(user, wordFile);
+//            return ResponseEntity.status(501).body(Map.of(
+//                    "message", "Word to PDF conversion is not available",
+//                    "error", "This feature requires LibreOffice which is not installed. Please convert your Word document to PDF using Microsoft Word, Google Docs, or an online converter before uploading.",
+//                    "status", "NOT_IMPLEMENTED",
+//                    "availableOperations", Arrays.asList(
+//                            "PDF to Word",
+//                            "Merge PDFs",
+//                            "Split PDF",
+//                            "Compress PDF",
+//                            "Rotate PDF",
+//                            "Images to PDF",
+//                            "PDF to Images",
+//                            "Add Watermark",
+//                            "Lock/Unlock PDF",
+//                            "Rearrange PDF Pages"
+//                    )
+//            ));
+//        } catch (Exception e) {
+//            return ResponseEntity.status(501).body(Map.of(
+//                    "message", "Word to PDF conversion not available",
+//                    "error", e.getMessage()
+//            ));
+//        }
+//    }
+//
+//    /**
+//     * Convert PDF to Word - Enhanced (UPDATED)
+//     * Replace the existing convertPdfToWord method
+//     */
+//    @PostMapping("/pdf-to-word")
+//    public ResponseEntity<?> convertPdfToWord(
+//            @RequestHeader("Authorization") String token,
+//            @RequestParam("file") MultipartFile pdfFile) {
+//        try {
+//            User user = documentConversionService.getUserFromToken(token);
+//            DocumentConversion result = documentConversionService.convertPdfToWord(user, pdfFile);
+//            return ResponseEntity.ok(Map.of(
+//                    "message", "PDF to Word conversion completed successfully",
+//                    "data", result,
+//                    "note", "Formatting may differ from original PDF. Complex layouts, images, and tables may not be preserved."
+//            ));
+//        } catch (Exception e) {
+//            return ResponseEntity.status(500).body(Map.of(
+//                    "message", "PDF to Word conversion failed",
+//                    "error", e.getMessage(),
+//                    "suggestion", "Make sure your PDF contains extractable text content"
+//            ));
+//        }
+//    }
 
     /**
      * Merge multiple PDFs with optional page arrangement (UPDATED)
