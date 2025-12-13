@@ -96,6 +96,30 @@ public class SoleTTSController {
         }
     }
 
+    @GetMapping("/usage")
+    public ResponseEntity<?> getTtsUsage(@RequestHeader("Authorization") String token) {
+        try {
+            User user = getUserFromToken(token);
+            long usage = soleTTSService.getUserTtsUsage(user);
+            long limit = user.getMonthlyTtsLimit();
+            long remaining = limit - usage;
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("used", usage);
+            response.put("limit", limit);
+            response.put("remaining", remaining);
+            response.put("role", user.getRole().toString());
+
+            return ResponseEntity.ok(response);
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body("Unauthorized: " + e.getMessage());
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Unexpected error: " + e.getMessage());
+        }
+    }
+
     private User getUserFromToken(String token) {
         String email = jwtUtil.extractEmail(token.substring(7));
         return userRepository.findByEmail(email)

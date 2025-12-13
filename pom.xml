@@ -251,6 +251,27 @@
 		<groupId>io.grpc</groupId>
 		<artifactId>grpc-stub</artifactId>
 	</dependency>
+
+		<!-- Razorpay Java SDK (latest) -->
+		<dependency>
+			<groupId>com.razorpay</groupId>
+			<artifactId>razorpay-java</artifactId>
+			<version>1.4.8</version>
+		</dependency>
+
+		<!-- PayPal Checkout SDK (v2 Orders API) -->
+		<dependency>
+			<groupId>com.paypal.sdk</groupId>
+			<artifactId>checkout-sdk</artifactId>
+			<version>2.0.0</version>
+		</dependency>
+
+		<!-- For JSON handling (org.json) - Razorpay uses it -->
+		<dependency>
+			<groupId>org.json</groupId>
+			<artifactId>json</artifactId>
+			<version>20230227</version>
+		</dependency>
 	</dependencies>
 
 	<repositories>

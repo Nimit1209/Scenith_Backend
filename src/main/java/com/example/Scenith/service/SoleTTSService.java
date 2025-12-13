@@ -61,16 +61,20 @@ public class SoleTTSService {
         }
 
         // Enforce 15-minute limit (~13,500 characters/user/month)
-        if (text.length() > 13_500) {
-            throw new IllegalArgumentException("Text exceeds 15-minute limit (~13,500 characters)");
+        if (text.length() > 5000) {
+            throw new IllegalArgumentException("Text exceeds max characters allowed per request limit (~5,000 characters)");
         }
 
         // Check user TTS usage
         long userUsage = getUserTtsUsage(user);
-        if (userUsage + text.length() > 13_500) {
-            throw new IllegalStateException("User exceeded monthly TTS limit (13,500 characters)");
-        }
+        long monthlyLimit = user.getMonthlyTtsLimit();
 
+        if (userUsage + text.length() > monthlyLimit) {
+            throw new IllegalStateException(
+                    "AI Voice Generation limit exceeded for plan: " + user.getRole() +
+                            " (Limit: " + monthlyLimit + ", Used: " + userUsage + ")"
+            );
+        }
         // Generate audio using Google Cloud TTS
         GoogleCredentials credentials = GoogleCredentials.fromStream(new FileInputStream(credentialsPath));
         TextToSpeechSettings settings = TextToSpeechSettings.newBuilder()
@@ -171,7 +175,7 @@ public class SoleTTSService {
         }
     }
 
-    private long getUserTtsUsage(User user) {
+    public long getUserTtsUsage(User user) {
         YearMonth currentMonth = YearMonth.now();
         return userTtsUsageRepository.findByUserAndMonth(user, currentMonth)
                 .map(UserTtsUsage::getCharactersUsed)
