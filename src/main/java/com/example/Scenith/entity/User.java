@@ -146,8 +146,24 @@ public class User {
     public long getMonthlyTtsLimit() {
         return switch (this.role) {
             case BASIC -> 5000;
-            case CREATOR -> 10000;
-            case STUDIO -> 20000;
+            case CREATOR -> 50000;
+            case STUDIO -> 150000;
+        };
+    }
+
+    public long getDailyTtsLimit() {
+        return switch (this.role) {
+            case BASIC -> 1000;      // 1,000 characters/day
+            case CREATOR -> 5000;    // 5,000 characters/day
+            case STUDIO -> -1;       // -1 means no daily limit
+        };
+    }
+
+    public long getMaxCharsPerRequest() {
+        return switch (this.role) {
+            case BASIC -> 500;
+            case CREATOR -> 2500;
+            case STUDIO -> 5000;
         };
     }
 

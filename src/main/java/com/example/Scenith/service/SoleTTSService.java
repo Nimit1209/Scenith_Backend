@@ -2,8 +2,10 @@ package com.example.Scenith.service;
 
 import com.example.Scenith.entity.SoleTTS;
 import com.example.Scenith.entity.User;
+import com.example.Scenith.entity.UserDailyTtsUsage;
 import com.example.Scenith.entity.UserTtsUsage;
 import com.example.Scenith.repository.SoleTTSRepository;
+import com.example.Scenith.repository.UserDailyTtsUsageRepository;
 import com.example.Scenith.repository.UserTtsUsageRepository;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.texttospeech.v1.*;
@@ -20,6 +22,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.util.ArrayList;
@@ -36,6 +39,7 @@ public class SoleTTSService {
     private final SoleTTSRepository soleTTSRepository;
     private final UserTtsUsageRepository userTtsUsageRepository;
     private final CloudflareR2Service cloudflareR2Service;
+    private final UserDailyTtsUsageRepository userDailyTtsUsageRepository;
 
     @Value("${app.base-dir:/tmp}")
     private String baseDir;
@@ -60,9 +64,12 @@ public class SoleTTSService {
             throw new IllegalArgumentException("Language code is required");
         }
 
-        // Enforce 15-minute limit (~13,500 characters/user/month)
-        if (text.length() > 5000) {
-            throw new IllegalArgumentException("Text exceeds max characters allowed per request limit (~5,000 characters)");
+        long maxCharsPerRequest = user.getMaxCharsPerRequest();
+        if (text.length() > maxCharsPerRequest) {
+            throw new IllegalArgumentException(
+                    "Text exceeds max characters allowed per request for " + user.getRole() +
+                            " plan (Limit: " + maxCharsPerRequest + " characters per request)"
+            );
         }
 
         // Check user TTS usage
@@ -74,6 +81,16 @@ public class SoleTTSService {
                     "AI Voice Generation limit exceeded for plan: " + user.getRole() +
                             " (Limit: " + monthlyLimit + ", Used: " + userUsage + ")"
             );
+        }
+        long dailyLimit = user.getDailyTtsLimit();
+        if (dailyLimit > 0) { // -1 means no daily limit (STUDIO plan)
+            long dailyUsage = getUserDailyTtsUsage(user);
+            if (dailyUsage + text.length() > dailyLimit) {
+                throw new IllegalStateException(
+                        "Daily AI Voice Generation limit exceeded for plan: " + user.getRole() +
+                                " (Daily Limit: " + dailyLimit + ", Used Today: " + dailyUsage + ")"
+                );
+            }
         }
         // Generate audio using Google Cloud TTS
         GoogleCredentials credentials = GoogleCredentials.fromStream(new FileInputStream(credentialsPath));
@@ -155,6 +172,7 @@ public class SoleTTSService {
 
             // Update TTS usage
             updateUserTtsUsage(user, text.length());
+            updateUserDailyTtsUsage(user, text.length());
 
             // Generate and set URLs
             Map<String, String> urls = cloudflareR2Service.generateUrls(audioR2Path, 3600); // 1 hour expiration for presigned
@@ -279,5 +297,19 @@ public class SoleTTSService {
 
         ssml.append("</speak>");
         return ssml.toString();
+    }
+    public long getUserDailyTtsUsage(User user) {
+        LocalDate today = LocalDate.now();
+        return userDailyTtsUsageRepository.findByUserAndUsageDate(user, today)
+                .map(UserDailyTtsUsage::getCharactersUsed)
+                .orElse(0L);
+    }
+
+    private void updateUserDailyTtsUsage(User user, long characters) {
+        LocalDate today = LocalDate.now();
+        UserDailyTtsUsage usage = userDailyTtsUsageRepository.findByUserAndUsageDate(user, today)
+                .orElseGet(() -> new UserDailyTtsUsage(user, today));
+        usage.setCharactersUsed(usage.getCharactersUsed() + characters);
+        userDailyTtsUsageRepository.save(usage);
     }
 }

@@ -95,19 +95,28 @@ public class SoleTTSController {
                     .body(Map.of("message", "Error fetching TTS: " + e.getMessage()));
         }
     }
-
     @GetMapping("/usage")
     public ResponseEntity<?> getTtsUsage(@RequestHeader("Authorization") String token) {
         try {
             User user = getUserFromToken(token);
-            long usage = soleTTSService.getUserTtsUsage(user);
-            long limit = user.getMonthlyTtsLimit();
-            long remaining = limit - usage;
+            long monthlyUsage = soleTTSService.getUserTtsUsage(user);
+            long monthlyLimit = user.getMonthlyTtsLimit();
+            long monthlyRemaining = monthlyLimit - monthlyUsage;
+            long dailyUsage = soleTTSService.getUserDailyTtsUsage(user);
+            long dailyLimit = user.getDailyTtsLimit();
+            long dailyRemaining = dailyLimit > 0 ? dailyLimit - dailyUsage : -1; // -1 means unlimited
 
             Map<String, Object> response = new HashMap<>();
-            response.put("used", usage);
-            response.put("limit", limit);
-            response.put("remaining", remaining);
+            response.put("monthly", Map.of(
+                    "used", monthlyUsage,
+                    "limit", monthlyLimit,
+                    "remaining", monthlyRemaining
+            ));
+            response.put("daily", Map.of(
+                    "used", dailyUsage,
+                    "limit", dailyLimit,
+                    "remaining", dailyRemaining
+            ));
             response.put("role", user.getRole().toString());
 
             return ResponseEntity.ok(response);
@@ -119,7 +128,6 @@ public class SoleTTSController {
                     .body("Unexpected error: " + e.getMessage());
         }
     }
-
     private User getUserFromToken(String token) {
         String email = jwtUtil.extractEmail(token.substring(7));
         return userRepository.findByEmail(email)
