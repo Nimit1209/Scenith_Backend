@@ -443,12 +443,12 @@ public class SubtitleService {
                   styleParams.get("backgroundColor") : "white");
           subtitle.setBackgroundOpacity(1.0);
           subtitle.setPositionX(0);
-          subtitle.setPositionY(350);
+          subtitle.setPositionY(500);
           subtitle.setAlignment("center");
           subtitle.setScale(1.5);
-          subtitle.setBackgroundH(50);
-          subtitle.setBackgroundW(50);
-          subtitle.setBackgroundBorderRadius(15);
+          subtitle.setBackgroundH(20);
+          subtitle.setBackgroundW(40);
+          subtitle.setBackgroundBorderRadius(12);
 
           subtitles.add(subtitle);
         }

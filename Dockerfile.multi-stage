@@ -1,0 +1,287 @@
+# ============================================================================
+# STAGE 1: Base Image with FFmpeg, Python, and AI Dependencies
+# Build once, reuse forever
+# ============================================================================
+FROM amazonlinux:2 AS base-ai
+
+# Install system dependencies (EXACTLY as your original)
+RUN yum update -y && \
+    yum groupinstall -y "Development Tools" && \
+    yum install -y wget tar gzip bzip2-devel nasm pkg-config cmake3 unzip \
+                   fribidi-devel fontconfig-devel freetype-devel \
+                   iputils bind-utils mysql \
+                   openssl11 openssl11-devel ca-certificates \
+                   zlib-devel libffi-devel sqlite-devel readline-devel xz-devel \
+                   libjpeg-turbo-devel libpng-devel libtiff-devel giflib-devel \
+                   libwebp-devel openjpeg2-devel lcms2-devel libxml2-devel \
+                   librsvg2-devel libtool-ltdl-devel perl poppler-utils \
+                   poppler-cpp-devel qpdf pkgconfig && \
+    ln -sf /usr/bin/cmake3 /usr/bin/cmake && \
+    yum clean all
+
+# Install ghostscript
+RUN yum install -y --setopt=protected_multilib=false \
+    ghostscript-9.54.0-9.amzn2.0.13.x86_64 || \
+    yum install -y ghostscript.x86_64
+
+# Create working directory
+RUN mkdir -p /tmp/ffmpeg_sources
+
+# Install ImageMagick
+RUN cd /tmp && \
+    wget https://github.com/ImageMagick/ImageMagick/archive/refs/tags/7.1.2-2.tar.gz && \
+    tar -xzf 7.1.2-2.tar.gz && \
+    cd ImageMagick-7.1.2-2 && \
+    ./configure \
+        --prefix=/usr/local \
+        --with-quantum-depth=16 \
+        --enable-hdri \
+        --with-modules \
+        --with-perl=no \
+        --enable-shared \
+        --enable-static \
+        --with-webp=yes \
+        --with-openjp2=yes \
+        --with-gslib=yes \
+        --with-rsvg=yes && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/7.1.2-2.tar.gz /tmp/ImageMagick-7.1.2-2
+
+# Install LAME
+RUN cd /tmp/ffmpeg_sources && \
+    wget https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz && \
+    tar -xzf lame-3.100.tar.gz && \
+    cd lame-3.100 && \
+    ./configure --prefix=/usr/local --enable-shared --enable-nasm && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Install Opus
+RUN cd /tmp/ffmpeg_sources && \
+    wget https://github.com/xiph/opus/releases/download/v1.4/opus-1.4.tar.gz && \
+    tar -xzf opus-1.4.tar.gz && \
+    cd opus-1.4 && \
+    ./configure --prefix=/usr/local --enable-shared && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Install harfbuzz
+RUN cd /tmp/ffmpeg_sources && \
+    wget https://github.com/harfbuzz/harfbuzz/releases/download/8.5.0/harfbuzz-8.5.0.tar.xz && \
+    tar -xJf harfbuzz-8.5.0.tar.xz && \
+    cd harfbuzz-8.5.0 && \
+    ./configure --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Install libass
+RUN cd /tmp/ffmpeg_sources && \
+    wget https://github.com/libass/libass/releases/download/0.17.3/libass-0.17.3.tar.gz && \
+    tar -xzf libass-0.17.3.tar.gz && \
+    cd libass-0.17.3 && \
+    PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig" ./configure --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Install x264
+RUN cd /tmp/ffmpeg_sources && \
+    wget https://code.videolan.org/videolan/x264/-/archive/master/x264-master.tar.bz2 && \
+    tar xjvf x264-master.tar.bz2 && \
+    cd x264-master && \
+    ./configure --enable-shared --enable-pic --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Install x265
+RUN cd /tmp/ffmpeg_sources && \
+    wget https://github.com/videolan/x265/archive/master.zip && \
+    unzip master.zip && \
+    cd x265-master/build/linux && \
+    cmake -G "Unix Makefiles" -DCMAKE_INSTALL_PREFIX="/usr/local" -DENABLE_SHARED=ON ../../source && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Install FFmpeg
+RUN cd /tmp/ffmpeg_sources && \
+    wget https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.gz && \
+    tar -xzf ffmpeg-7.1.1.tar.gz && \
+    cd ffmpeg-7.1.1 && \
+    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig" && \
+    export CFLAGS="-I/usr/include/openssl11" && \
+    export LDFLAGS="-L/usr/lib64/openssl11" && \
+    ./configure \
+        --prefix=/usr/local \
+        --enable-gpl \
+        --enable-nonfree \
+        --enable-libx264 \
+        --enable-libx265 \
+        --enable-libass \
+        --enable-libfreetype \
+        --enable-libmp3lame \
+        --enable-libopus \
+        --enable-openssl \
+        --extra-ldflags="-L/usr/local/lib -L/usr/lib64 -L/usr/lib64/openssl11" \
+        --extra-cflags="-I/usr/local/include -I/usr/include -I/usr/include/openssl11" && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Build Python 3.11
+RUN cd /tmp && \
+    wget https://www.python.org/ftp/python/3.11.10/Python-3.11.10.tgz && \
+    tar -xzf Python-3.11.10.tgz && \
+    cd Python-3.11.10 && \
+    export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    export CPPFLAGS="-I/usr/include/openssl11" && \
+    export LDFLAGS="-L/usr/lib64/openssl11 -Wl,-rpath,/usr/lib64/openssl11" && \
+    export PKG_CONFIG_PATH="/usr/lib64/openssl11/pkgconfig:$PKG_CONFIG_PATH" && \
+    ./configure \
+        --prefix=/usr/local \
+        --enable-optimizations \
+        --enable-shared \
+        --with-openssl=/usr \
+        --with-openssl-rpath=auto \
+        --enable-loadable-sqlite-extensions && \
+    LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib make -j$(nproc) && \
+    LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib make altinstall && \
+    ldconfig && \
+    ln -sf /usr/local/bin/python3.11 /usr/local/bin/python3 && \
+    ln -sf /usr/local/bin/python3.11 /usr/local/bin/python && \
+    ln -sf /usr/local/bin/pip3.11 /usr/local/bin/pip3 && \
+    ln -sf /usr/local/bin/pip3.11 /usr/local/bin/pip
+
+# Install Python AI dependencies (EXACTLY as your original)
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install --upgrade pip setuptools wheel
+
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "torch==2.6.0+cpu" --index-url https://download.pytorch.org/whl/cpu && \
+    /usr/local/bin/pip3.11 install "torchaudio==2.6.0+cpu" --index-url https://download.pytorch.org/whl/cpu
+
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "numpy<2.0" "numpy>=1.21.0"
+
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "onnxruntime==1.16.3"
+
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "Pillow==11.3.0" && \
+    /usr/local/bin/pip3.11 install "opencv-python-headless" && \
+    /usr/local/bin/pip3.11 install "scipy"
+
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "pymatting" "pooch" "tqdm" "requests" && \
+    /usr/local/bin/pip3.11 install "jsonschema" "click" "aiohttp" && \
+    /usr/local/bin/pip3.11 install "rembg==2.0.67"
+
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "tiktoken==0.7.0"
+
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    echo "numpy<2.0" > /tmp/constraints.txt && \
+    /usr/local/bin/pip3.11 install "openai-whisper==20250625" --constraint /tmp/constraints.txt
+
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install ffmpeg-python python-dotenv requests
+
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install yt-dlp && \
+    ln -sf /usr/local/bin/yt-dlp /usr/bin/yt-dlp
+
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "PyPDF2==3.0.1" && \
+    /usr/local/bin/pip3.11 install "python-docx==1.1.2" && \
+    /usr/local/bin/pip3.11 install "reportlab==4.2.5" && \
+    /usr/local/bin/pip3.11 install "pypdf==3.17.4"
+
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install "python-pptx==1.0.2"
+
+# Clean up build files
+RUN rm -rf /tmp/ffmpeg_sources /tmp/Python-3.11.10* /tmp/*.tar.gz
+
+# Configure library paths
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local-libs.conf && \
+    echo "/usr/lib64/openssl11" >> /etc/ld.so.conf.d/local-libs.conf && \
+    ldconfig
+
+# Set base environment variables
+ENV LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:/usr/lib:/lib
+ENV PATH=/usr/local/bin:$PATH
+ENV FFMPEG_PATH=/usr/local/bin/ffmpeg
+ENV FFPROBE_PATH=/usr/local/bin/ffprobe
+ENV PYTHON_PATH=/usr/local/bin/python3.11
+ENV YT_DLP_PATH=/usr/local/bin/yt-dlp
+ENV IMAGEMAGICK_PATH=/usr/local/bin/magick
+ENV OMP_NUM_THREADS=1
+ENV OPENCV_IO_MAX_IMAGE_PIXELS=1073741824
+ENV SSL_CERT_DIR=/etc/pki/tls/certs
+ENV SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
+
+# Verify installations
+RUN echo "Verifying installations..." && \
+    /usr/local/bin/ffmpeg -version | head -1 && \
+    /usr/local/bin/python3.11 --version && \
+    /usr/local/bin/python3.11 -c "import ssl; print('SSL module available')" && \
+    /usr/local/bin/python3.11 -c "import rembg; print('Rembg module available')" && \
+    /usr/local/bin/python3.11 -c "import torch; print('PyTorch version:', torch.__version__)" && \
+    /usr/local/bin/python3.11 -c "import PIL; print('Pillow version:', PIL.__version__)" && \
+    echo "Setup verification complete."
+
+# ============================================================================
+# STAGE 2: Application Image (Lightweight - Spring Boot + Scripts)
+# ============================================================================
+FROM base-ai AS app
+
+# Install Java 21
+RUN rpm --import https://yum.corretto.aws/corretto.key && \
+    curl -L -o /etc/yum.repos.d/corretto.repo https://yum.corretto.aws/corretto.repo && \
+    yum install -y java-21-amazon-corretto java-21-amazon-corretto-devel mysql && \
+    yum clean all
+
+# Set Java environment
+ENV JAVA_OPTS="-Xms512m -Xmx1024m"
+ENV SPRING_PROFILES_ACTIVE=prod
+ENV DOCUMENT_CONVERSION_SCRIPT_PATH=/app/scripts/document_converter.py
+
+# Create application directories
+RUN mkdir -p /app/scripts /temp/videoeditor/logs /temp/videoeditor/temp /temp/scripts && \
+    chmod -R 777 /temp
+
+WORKDIR /app
+
+# Copy Python scripts
+COPY scripts/remove_background.py /app/scripts/
+COPY scripts/whisper_subtitle.py /app/scripts/
+COPY scripts/whisper_subtitle.py /temp/scripts/
+COPY scripts/compress_media.py /app/scripts/
+COPY scripts/convert_media.py /app/scripts/
+COPY scripts/whisper_transcribe.py /app/scripts/
+COPY scripts/whisper_transcribe.py /temp/scripts/
+COPY scripts/document_converter.py /app/scripts/
+COPY scripts/document_converter.py /temp/scripts/
+
+# Make scripts executable
+RUN chmod +x /app/scripts/*.py /temp/scripts/*.py
+
+# Copy application configuration
+COPY .env /app/.env
+COPY credentials/video-editor-tts-24b472478ab838d2168992684517cacfab4c11da.json /app/credentials/video-editor-tts.json
+COPY src/main/resources/email-templates/ /app/resources/email-templates/
+
+# Copy Spring Boot JAR (this changes most frequently)
+COPY target/Scenith-0.0.1-SNAPSHOT.jar app.jar
+
+# Expose application port
+EXPOSE 1000
+
+# Run the application
+ENTRYPOINT ["sh", "-c", "export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:/usr/lib:/lib && export OMP_NUM_THREADS=1 && echo 'Starting application...' && echo 'Environment check:' && ls -la /usr/local/bin/ffmpeg && ls -la /usr/local/bin/python3.11 && ls -la /usr/local/bin/magick && ls -la /app/scripts/ && java $JAVA_OPTS -jar app.jar"]
