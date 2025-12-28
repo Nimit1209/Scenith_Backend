@@ -1,13 +1,15 @@
-package com.example.Scenith.service;
+package com.example.Scenith.service.imageService;
 
 import com.example.Scenith.dto.imagedto.CreateImageProjectRequest;
 import com.example.Scenith.dto.imagedto.ExportImageRequest;
 import com.example.Scenith.dto.imagedto.UpdateImageProjectRequest;
 import com.example.Scenith.entity.User;
 import com.example.Scenith.entity.imageentity.ImageProject;
+import com.example.Scenith.entity.imageentity.ImageTemplate;
 import com.example.Scenith.repository.UserRepository;
 import com.example.Scenith.repository.imagerepository.ImageProjectRepository;
 import com.example.Scenith.security.JwtUtil;
+import com.example.Scenith.service.CloudflareR2Service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +31,7 @@ public class ImageEditorService {
     private final CloudflareR2Service cloudflareR2Service;
     private final JwtUtil jwtUtil;
     private final ObjectMapper objectMapper;
+    private final ImageTemplateService templateService;
 
     public ImageEditorService(
             ImageProjectRepository imageProjectRepository,
@@ -36,13 +39,14 @@ public class ImageEditorService {
             ImageRenderService imageRenderService,
             CloudflareR2Service cloudflareR2Service,
             JwtUtil jwtUtil,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper, ImageTemplateService templateService) {
         this.imageProjectRepository = imageProjectRepository;
         this.userRepository = userRepository;
         this.imageRenderService = imageRenderService;
         this.cloudflareR2Service = cloudflareR2Service;
         this.jwtUtil = jwtUtil;
         this.objectMapper = objectMapper;
+        this.templateService = templateService;
     }
 
     /**
@@ -260,5 +264,47 @@ public class ImageEditorService {
         String email = jwtUtil.extractEmail(token.substring(7));
         return userRepository.findByEmail(email)
             .orElseThrow(() -> new RuntimeException("User not found"));
+    }
+    /**
+     * Apply template to project
+     */
+    @Transactional
+    public ImageProject applyTemplateToProject(User user, Long projectId, Long templateId) {
+        logger.info("Applying template {} to project: {}", templateId, projectId);
+
+        ImageProject project = imageProjectRepository.findByIdAndUser(projectId, user)
+                .orElseThrow(() -> new IllegalArgumentException("Project not found"));
+
+        ImageTemplate template = templateService.getTemplateById(templateId);
+
+        // Update project with template data
+        project.setCanvasWidth(template.getCanvasWidth());
+        project.setCanvasHeight(template.getCanvasHeight());
+        project.setDesignJson(template.getDesignJson());
+
+        // Parse and update canvas background color from template
+        try {
+            Map<String, Object> design = objectMapper.readValue(template.getDesignJson(), Map.class);
+            if (design.containsKey("pages")) {
+                List<Map<String, Object>> pages = (List<Map<String, Object>>) design.get("pages");
+                if (!pages.isEmpty()) {
+                    Map<String, Object> firstPage = pages.get(0);
+                    Map<String, Object> canvas = (Map<String, Object>) firstPage.get("canvas");
+                    if (canvas != null && canvas.containsKey("backgroundColor")) {
+                        project.setCanvasBackgroundColor((String) canvas.get("backgroundColor"));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("Could not parse canvas background from template", e);
+        }
+
+        imageProjectRepository.save(project);
+
+        // Increment template usage
+        templateService.incrementUsageCount(templateId);
+
+        logger.info("Template applied successfully to project: {}", projectId);
+        return project;
     }
 }

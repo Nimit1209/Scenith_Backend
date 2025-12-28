@@ -1,9 +1,10 @@
-package com.example.Scenith.service;
+package com.example.Scenith.service.imageService;
 
 import com.example.Scenith.dto.imagedto.CanvasDTO;
 import com.example.Scenith.dto.imagedto.DesignDTO;
 import com.example.Scenith.dto.imagedto.LayerDTO;
 import com.example.Scenith.dto.imagedto.ShadowDTO;
+import com.example.Scenith.service.CloudflareR2Service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

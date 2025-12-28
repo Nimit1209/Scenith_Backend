@@ -1,6 +1,7 @@
 package com.example.Scenith.sqs;
 
 import com.example.Scenith.service.*;
+import com.example.Scenith.service.imageService.ImageEditorService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;

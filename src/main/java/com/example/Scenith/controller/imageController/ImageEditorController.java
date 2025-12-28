@@ -1,4 +1,4 @@
-package com.example.Scenith.controller;
+package com.example.Scenith.controller.imageController;
 
 import com.example.Scenith.dto.imagedto.CreateImageProjectRequest;
 import com.example.Scenith.dto.imagedto.ExportImageRequest;
@@ -7,9 +7,9 @@ import com.example.Scenith.entity.User;
 import com.example.Scenith.entity.imageentity.ImageAsset;
 import com.example.Scenith.entity.imageentity.ImageElement;
 import com.example.Scenith.entity.imageentity.ImageProject;
-import com.example.Scenith.service.ImageAssetService;
-import com.example.Scenith.service.ImageEditorService;
-import com.example.Scenith.service.ImageElementService;
+import com.example.Scenith.service.imageService.ImageAssetService;
+import com.example.Scenith.service.imageService.ImageEditorService;
+import com.example.Scenith.service.imageService.ImageElementService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -278,6 +278,27 @@ public class ImageEditorController {
         } catch (IOException | InterruptedException e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("message", "Background removal failed: " + e.getMessage()));
+        }
+    }
+    /**
+     * Apply template to project
+     * POST /api/image-editor/projects/{projectId}/apply-template/{templateId}
+     */
+    @PostMapping("/projects/{projectId}/apply-template/{templateId}")
+    public ResponseEntity<?> applyTemplate(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long projectId,
+            @PathVariable Long templateId) {
+        try {
+            User user = imageEditorService.getUserFromToken(token);
+            ImageProject project = imageEditorService.applyTemplateToProject(user, projectId, templateId);
+            return ResponseEntity.ok(project);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("message", "Failed to apply template: " + e.getMessage()));
         }
     }
 }

@@ -10,7 +10,8 @@ public class User {
     public enum Role {
         BASIC,
         CREATOR,
-        STUDIO
+        STUDIO,
+        ADMIN
     }
 
     @Id
@@ -148,6 +149,7 @@ public class User {
             case BASIC -> 5000;
             case CREATOR -> 50000;
             case STUDIO -> 150000;
+            case ADMIN -> -1;
         };
     }
 
@@ -156,6 +158,7 @@ public class User {
             case BASIC -> 1000;      // 1,000 characters/day
             case CREATOR -> 5000;    // 5,000 characters/day
             case STUDIO -> -1;       // -1 means no daily limit
+            case ADMIN -> -1;
         };
     }
 
@@ -164,7 +167,11 @@ public class User {
             case BASIC -> 500;
             case CREATOR -> 2500;
             case STUDIO -> 5000;
+            case ADMIN -> 10000;
         };
     }
 
+    public boolean isAdmin() {
+        return this.role == Role.ADMIN;
+    }
 }

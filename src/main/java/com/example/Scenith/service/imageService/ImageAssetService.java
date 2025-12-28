@@ -1,8 +1,9 @@
-package com.example.Scenith.service;
+package com.example.Scenith.service.imageService;
 
 import com.example.Scenith.entity.User;
 import com.example.Scenith.entity.imageentity.ImageAsset;
 import com.example.Scenith.repository.imagerepository.ImageAssetRepository;
+import com.example.Scenith.service.CloudflareR2Service;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
