@@ -58,9 +58,9 @@ public class VideoEditingService {
     private final ProjectRepository projectRepository;
     private final ObjectMapper objectMapper;
     private final GlobalElementRepository globalElementRepository;
-    private final CloudflareR2Service cloudflareR2Service; // Updated to CloudflareR2Service
-    private final SqsService sqsService; // New dependency
-    private UserTtsUsageRepository userTtsUsageRepository;
+    private final CloudflareR2Service cloudflareR2Service;
+    private final SqsService sqsService;
+    private final UserTtsUsageRepository userTtsUsageRepository;
 
     private static final Logger logger = LoggerFactory.getLogger(VideoEditingService.class);
 
@@ -91,8 +91,8 @@ public class VideoEditingService {
             ObjectMapper objectMapper,
             GlobalElementRepository globalElementRepository,
             CloudflareR2Service cloudflareR2Service, SqsService sqsService, // Updated to CloudflareR2Service
-            UserTtsUsageRepository userTtsUsageRepository
-            ) {
+            UserTtsUsageRepository userTtsUsageRepository, ProcessingEmailHelper emailHelper
+    ) {
         this.projectRepository = projectRepository;
         this.objectMapper = objectMapper;
         this.globalElementRepository = globalElementRepository;

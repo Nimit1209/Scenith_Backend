@@ -38,6 +38,7 @@ public class MediaConversionService {
     private final UserRepository userRepository;
     private final ConvertedMediaRepository convertedMediaRepository;
     private final CloudflareR2Service cloudflareR2Service;
+    private final ProcessingEmailHelper emailHelper;
 
     @Value("${app.ffmpeg-path:/usr/local/bin/ffmpeg}")
     private String ffmpegPath;
@@ -184,6 +185,14 @@ public class MediaConversionService {
             convertedMedia.setProcessedCdnUrl(processedCdnUrl);
             convertedMedia.setStatus("SUCCESS");
             convertedMediaRepository.save(convertedMedia);
+            // NEW: Send completion email
+            emailHelper.sendProcessingCompleteEmail(
+                    user,
+                    ProcessingEmailHelper.ServiceType.CONVERSION,
+                    convertedMedia.getOriginalFileName(),
+                    convertedMedia.getProcessedCdnUrl(),
+                    mediaId
+            );
 
             logger.info("Successfully converted media for user: {}, mediaId: {}", user.getId(), mediaId);
             return convertedMedia;

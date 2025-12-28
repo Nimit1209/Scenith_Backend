@@ -50,6 +50,7 @@ public class SubtitleService {
   private final SqsClient sqsClient;
   private final EmailService emailService;
   private final SqsService sqsService;
+  private final ProcessingEmailHelper emailHelper;
 
   @Value("${app.base-dir:/temp}")
   private String baseDir;
@@ -72,7 +73,7 @@ public class SubtitleService {
           UserRepository userRepository,
           CloudflareR2Service cloudflareR2Service,
           ObjectMapper objectMapper,
-          SqsClient sqsClient, EmailService emailService, SqsService sqsService) {
+          SqsClient sqsClient, EmailService emailService, SqsService sqsService, ProcessingEmailHelper emailHelper) {
     this.jwtUtil = jwtUtil;
     this.subtitleMediaRepository = subtitleMediaRepository;
     this.userRepository = userRepository;
@@ -81,6 +82,7 @@ public class SubtitleService {
     this.sqsClient = sqsClient;
       this.emailService = emailService;
       this.sqsService = sqsService;
+      this.emailHelper = emailHelper;
   }
 
   public SubtitleMedia uploadMedia(User user, MultipartFile mediaFile) throws IOException {
@@ -570,11 +572,12 @@ public class SubtitleService {
                 "downloadUrl",      subtitleMedia.getProcessedCdnUrl()
         );
 
-        emailService.sendTemplateEmail(
-                user.getEmail(),
-                "ai-voice-generation-campaign",       // This file exists
-                "subtitle-processing-complete",       // New template ID we just added
-                vars
+        emailHelper.sendProcessingCompleteEmail(
+                subtitleMedia.getUser(),
+                ProcessingEmailHelper.ServiceType.SUBTITLE,
+                subtitleMedia.getOriginalFileName(),
+                subtitleMedia.getProcessedCdnUrl(),
+                mediaId
         );
 
         logger.info("Processing-complete email sent to {} for mediaId {}", user.getEmail(), mediaId);

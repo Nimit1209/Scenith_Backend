@@ -40,6 +40,7 @@ public class SoleTTSService {
     private final UserTtsUsageRepository userTtsUsageRepository;
     private final CloudflareR2Service cloudflareR2Service;
     private final UserDailyTtsUsageRepository userDailyTtsUsageRepository;
+    private final ProcessingEmailHelper emailHelper;
 
     @Value("${app.base-dir:/tmp}")
     private String baseDir;
@@ -178,6 +179,14 @@ public class SoleTTSService {
             Map<String, String> urls = cloudflareR2Service.generateUrls(audioR2Path, 3600); // 1 hour expiration for presigned
             soleTTS.setCdnUrl(urls.get("cdnUrl"));
             soleTTS.setPresignedUrl(urls.get("presignedUrl"));
+            // Send completion email
+            emailHelper.sendProcessingCompleteEmail(
+                    user,
+                    ProcessingEmailHelper.ServiceType.TTS,
+                    audioFileName,
+                    urls.get("cdnUrl"),
+                    soleTTS.getId()
+            );
 
             return soleTTS;
         } finally {

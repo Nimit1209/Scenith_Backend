@@ -29,6 +29,7 @@ public class CompressionService {
     private final UserRepository userRepository;
     private final CloudflareR2Service cloudflareR2Service;
     private final CompressedMediaRepository compressedMediaRepository;
+    private final  ProcessingEmailHelper emailHelper;
 
     @Value("${app.base-dir:/tmp}")
     private String baseDir;
@@ -43,11 +44,12 @@ public class CompressionService {
             JwtUtil jwtUtil,
             UserRepository userRepository,
             CloudflareR2Service cloudflareR2Service,
-            CompressedMediaRepository compressedMediaRepository) {
+            CompressedMediaRepository compressedMediaRepository, ProcessingEmailHelper emailHelper) {
         this.jwtUtil = jwtUtil;
         this.userRepository = userRepository;
         this.cloudflareR2Service = cloudflareR2Service;
         this.compressedMediaRepository = compressedMediaRepository;
+        this.emailHelper = emailHelper;
     }
 
     public CompressedMedia uploadMedia(User user, MultipartFile mediaFile, String targetSize) throws IOException {
@@ -218,6 +220,14 @@ public class CompressionService {
             compressedMedia.setStatus("SUCCESS");
             compressedMediaRepository.save(compressedMedia);
 
+            // NEW: Send completion email
+            emailHelper.sendProcessingCompleteEmail(
+                    user,
+                    ProcessingEmailHelper.ServiceType.COMPRESSION,
+                    compressedMedia.getOriginalFileName(),
+                    compressedMedia.getProcessedCdnUrl(),
+                    mediaId
+            );
             logger.info("Successfully compressed media for user: {}, mediaId: {}", user.getId(), mediaId);
             return compressedMedia;
 

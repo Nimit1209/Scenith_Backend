@@ -32,6 +32,7 @@ public class VideoSpeedService {
     private final CloudflareR2Service cloudflareR2Service;
     private final SqsService sqsService;
     private final ObjectMapper objectMapper;
+    private final ProcessingEmailHelper emailHelper;
 
     @Value("${app.ffmpeg-path}")
     private String ffmpegPath;
@@ -147,6 +148,14 @@ public class VideoSpeedService {
             video.setProgress(100.0);
             video.setLastModified(LocalDateTime.now());
             videoSpeedRepository.save(video);
+            // NEW: Send completion email
+            emailHelper.sendProcessingCompleteEmail(
+                    video.getUser(),
+                    ProcessingEmailHelper.ServiceType.VIDEO_SPEED,
+                    outputFileName,
+                    cdnUrl,
+                    videoId
+            );
         } catch (Exception e) {
             logger.error("Failed to process video speed task: {}", e.getMessage(), e);
             video.setStatus("FAILED");
