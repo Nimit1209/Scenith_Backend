@@ -20,10 +20,6 @@ public class ImageTemplateAdminController {
     private final ImageTemplateService templateService;
     private final ImageEditorService editorService;
 
-    /**
-     * Create new template
-     * POST /api/admin/image-templates
-     */
     @PostMapping
     public ResponseEntity<?> createTemplate(
             @RequestHeader("Authorization") String token,
@@ -35,26 +31,37 @@ public class ImageTemplateAdminController {
             @RequestParam("designJson") String designJson,
             @RequestParam(value = "tags", required = false) String tags) {
         try {
-            // TODO: Add admin role check using token
             User user = editorService.getUserFromToken(token);
 
             if (!user.isAdmin()) {
                 return ResponseEntity.status(HttpStatus.FORBIDDEN)
                         .body(Map.of("message", "Access denied: Admin role required"));
             }
-            
+
+            // Log the received designJson for debugging
+            System.out.println("Received designJson: " + designJson);
+
+            // Validate that designJson is valid JSON
+            try {
+                new com.fasterxml.jackson.databind.ObjectMapper().readTree(designJson);
+            } catch (Exception e) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                        .body(Map.of("message", "Invalid JSON format in designJson: " + e.getMessage()));
+            }
+
             ImageTemplate template = templateService.createTemplate(
-                user, templateName, description, category,
-                canvasWidth, canvasHeight, designJson, tags
+                    user, templateName, description, category,
+                    canvasWidth, canvasHeight, designJson, tags
             );
-            
+
             return ResponseEntity.ok(template);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(Map.of("message", e.getMessage()));
+                    .body(Map.of("message", e.getMessage()));
         } catch (Exception e) {
+            e.printStackTrace(); // Add this for debugging
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("message", "Failed to create template: " + e.getMessage()));
+                    .body(Map.of("message", "Failed to create template: " + e.getMessage()));
         }
     }
 
@@ -136,6 +143,33 @@ public class ImageTemplateAdminController {
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(Map.of("message", "Failed to delete template: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Get template by ID
+     * GET /api/admin/image-templates/{id}
+     */
+    @GetMapping("/{id}")
+    public ResponseEntity<?> getTemplateById(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long id) {
+        try {
+            User user = editorService.getUserFromToken(token);
+
+            if (!user.isAdmin()) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                        .body(Map.of("message", "Access denied: Admin role required"));
+            }
+
+            ImageTemplate template = templateService.getTemplateById(id);
+            return ResponseEntity.ok(template);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("message", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("message", "Failed to retrieve template: " + e.getMessage()));
         }
     }
 }

@@ -41,6 +41,7 @@ public class SoleTTSService {
     private final CloudflareR2Service cloudflareR2Service;
     private final UserDailyTtsUsageRepository userDailyTtsUsageRepository;
     private final ProcessingEmailHelper emailHelper;
+    private final UpgradeEmailSchedulerService upgradeEmailSchedulerService;
 
     @Value("${app.base-dir:/tmp}")
     private String baseDir;
@@ -65,26 +66,30 @@ public class SoleTTSService {
             throw new IllegalArgumentException("Language code is required");
         }
 
+        // Check max chars per request
         long maxCharsPerRequest = user.getMaxCharsPerRequest();
-        if (text.length() > maxCharsPerRequest) {
+        if (maxCharsPerRequest > 0 && text.length() > maxCharsPerRequest) {
             throw new IllegalArgumentException(
                     "Text exceeds max characters allowed per request for " + user.getRole() +
                             " plan (Limit: " + maxCharsPerRequest + " characters per request)"
             );
         }
 
-        // Check user TTS usage
-        long userUsage = getUserTtsUsage(user);
+        // Check monthly TTS usage (skip if unlimited)
         long monthlyLimit = user.getMonthlyTtsLimit();
-
-        if (userUsage + text.length() > monthlyLimit) {
-            throw new IllegalStateException(
-                    "AI Voice Generation limit exceeded for plan: " + user.getRole() +
-                            " (Limit: " + monthlyLimit + ", Used: " + userUsage + ")"
-            );
+        if (monthlyLimit > 0) { // Only check if there's a limit (-1 means unlimited)
+            long userUsage = getUserTtsUsage(user);
+            if (userUsage + text.length() > monthlyLimit) {
+                throw new IllegalStateException(
+                        "AI Voice Generation limit exceeded for plan: " + user.getRole() +
+                                " (Limit: " + monthlyLimit + ", Used: " + userUsage + ")"
+                );
+            }
         }
+
+        // Check daily TTS usage (skip if unlimited)
         long dailyLimit = user.getDailyTtsLimit();
-        if (dailyLimit > 0) { // -1 means no daily limit (STUDIO plan)
+        if (dailyLimit > 0) { // -1 means no daily limit
             long dailyUsage = getUserDailyTtsUsage(user);
             if (dailyUsage + text.length() > dailyLimit) {
                 throw new IllegalStateException(
@@ -187,6 +192,8 @@ public class SoleTTSService {
                     urls.get("cdnUrl"),
                     soleTTS.getId()
             );
+
+            upgradeEmailSchedulerService.scheduleUpgradeEmail(user, "TTS_GENERATION");
 
             return soleTTS;
         } finally {

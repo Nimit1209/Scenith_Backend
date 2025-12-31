@@ -101,7 +101,7 @@ public class SoleTTSController {
             User user = getUserFromToken(token);
             long monthlyUsage = soleTTSService.getUserTtsUsage(user);
             long monthlyLimit = user.getMonthlyTtsLimit();
-            long monthlyRemaining = monthlyLimit - monthlyUsage;
+            long monthlyRemaining = monthlyLimit > 0 ? monthlyLimit - monthlyUsage : -1;
             long dailyUsage = soleTTSService.getUserDailyTtsUsage(user);
             long dailyLimit = user.getDailyTtsLimit();
             long dailyRemaining = dailyLimit > 0 ? dailyLimit - dailyUsage : -1; // -1 means unlimited
