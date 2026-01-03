@@ -91,20 +91,18 @@ public class DocumentConversionController {
 //    }
 
     /**
-     * Merge multiple PDFs with optional page arrangement (UPDATED)
-     * Replace the existing mergePdfs method
+     * Merge multiple PDFs with optional page arrangement
      */
     @PostMapping("/merge-pdf")
     public ResponseEntity<?> mergePdfs(
             @RequestHeader("Authorization") String token,
-            @RequestParam("files") List<MultipartFile> pdfFiles,
+            @RequestParam("uploadIds") List<Long> uploadIds,
             @RequestParam(required = false) String pageOrder) {
         try {
             User user = documentConversionService.getUserFromToken(token);
 
             Map<String, Object> options = new HashMap<>();
             if (pageOrder != null && !pageOrder.isEmpty()) {
-                // Parse page order JSON array: e.g., "[0,2,1,3]"
                 try {
                     List<Integer> orderList = objectMapper.readValue(pageOrder,
                             objectMapper.getTypeFactory().constructCollectionType(List.class, Integer.class));
@@ -114,8 +112,11 @@ public class DocumentConversionController {
                 }
             }
 
-            DocumentConversion result = documentConversionService.mergePdfs(user, pdfFiles, options);
-            return ResponseEntity.ok(result);
+            DocumentConversion result = documentConversionService.mergePdfs(user, uploadIds, options);
+            return ResponseEntity.ok(Map.of(
+                    "message", "PDFs merged successfully",
+                    "data", result
+            ));
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
                     "message", "PDF merge failed",
@@ -131,19 +132,19 @@ public class DocumentConversionController {
     @PostMapping("/split-pdf")
     public ResponseEntity<?> splitPdf(
             @RequestHeader("Authorization") String token,
-            @RequestParam("file") MultipartFile pdfFile,
+            @RequestParam("uploadId") Long uploadId,
             @RequestParam(required = false) String splitType,
             @RequestParam(required = false) String pages) {
         try {
             User user = documentConversionService.getUserFromToken(token);
-            
+
             Map<String, Object> options = new HashMap<>();
-            options.put("splitType", splitType != null ? splitType : "all"); // all, range, extract
+            options.put("splitType", splitType != null ? splitType : "all");
             if (pages != null) {
-                options.put("pages", pages); // e.g., "1-5,7,9-12"
+                options.put("pages", pages);
             }
-            
-            DocumentConversion result = documentConversionService.splitPdf(user, pdfFile, options);
+
+            DocumentConversion result = documentConversionService.splitPdf(user, uploadId, options);
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
@@ -154,20 +155,25 @@ public class DocumentConversionController {
     }
 
     /**
-     * Compress PDF
+     * Compress PDF - simplified with 3 levels
      */
     @PostMapping("/compress-pdf")
     public ResponseEntity<?> compressPdf(
             @RequestHeader("Authorization") String token,
-            @RequestParam("file") MultipartFile pdfFile,
+            @RequestParam("uploadId") Long uploadId,
             @RequestParam(required = false, defaultValue = "medium") String compressionLevel) {
         try {
             User user = documentConversionService.getUserFromToken(token);
-            
+
+            // Validate compression level
+            if (!List.of("low", "medium", "high").contains(compressionLevel.toLowerCase())) {
+                compressionLevel = "medium";
+            }
+
             Map<String, Object> options = new HashMap<>();
-            options.put("compressionLevel", compressionLevel); // low, medium, high
-            
-            DocumentConversion result = documentConversionService.compressPdf(user, pdfFile, options);
+            options.put("compressionLevel", compressionLevel.toLowerCase());
+
+            DocumentConversion result = documentConversionService.compressPdf(user, uploadId, options);
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
@@ -178,22 +184,41 @@ public class DocumentConversionController {
     }
 
     /**
-     * Rotate PDF pages
+     * Rotate PDF pages - simplified with 4 directions
      */
     @PostMapping("/rotate-pdf")
     public ResponseEntity<?> rotatePdf(
             @RequestHeader("Authorization") String token,
-            @RequestParam("file") MultipartFile pdfFile,
-            @RequestParam(defaultValue = "90") int degrees,
+            @RequestParam("uploadId") Long uploadId,
+            @RequestParam(defaultValue = "right") String direction,
             @RequestParam(required = false) String pages) {
         try {
             User user = documentConversionService.getUserFromToken(token);
-            
+
+            // Map direction to degrees
+            int degrees;
+            switch (direction.toLowerCase()) {
+                case "right":
+                    degrees = 90;
+                    break;
+                case "left":
+                    degrees = -90;
+                    break;
+                case "top":
+                    degrees = 180;
+                    break;
+                case "bottom":
+                    degrees = 180;
+                    break;
+                default:
+                    degrees = 90;
+            }
+
             Map<String, Object> options = new HashMap<>();
-            options.put("degrees", degrees); // 90, 180, 270
-            options.put("pages", pages != null ? pages : "all"); // all, or specific pages like "1,3,5"
-            
-            DocumentConversion result = documentConversionService.rotatePdf(user, pdfFile, options);
+            options.put("degrees", degrees);
+            options.put("pages", pages != null ? pages : "all");
+
+            DocumentConversion result = documentConversionService.rotatePdf(user, uploadId, options);
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
@@ -204,20 +229,18 @@ public class DocumentConversionController {
     }
 
     /**
-     * Convert images to PDF with optional page arrangement (UPDATED)
-     * Replace the existing imagesToPdf method
+     * Convert images to PDF with optional page arrangement
      */
     @PostMapping("/images-to-pdf")
     public ResponseEntity<?> imagesToPdf(
             @RequestHeader("Authorization") String token,
-            @RequestParam("files") List<MultipartFile> imageFiles,
+            @RequestParam("uploadIds") List<Long> uploadIds,
             @RequestParam(required = false) String pageOrder) {
         try {
             User user = documentConversionService.getUserFromToken(token);
 
             Map<String, Object> options = new HashMap<>();
             if (pageOrder != null && !pageOrder.isEmpty()) {
-                // Parse page order JSON array
                 try {
                     List<Integer> orderList = objectMapper.readValue(pageOrder,
                             objectMapper.getTypeFactory().constructCollectionType(List.class, Integer.class));
@@ -227,7 +250,7 @@ public class DocumentConversionController {
                 }
             }
 
-            DocumentConversion result = documentConversionService.imagesToPdf(user, imageFiles, options);
+            DocumentConversion result = documentConversionService.imagesToPdf(user, uploadIds, options);
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
@@ -236,16 +259,17 @@ public class DocumentConversionController {
             ));
         }
     }
+
     /**
      * Extract images from PDF
      */
     @PostMapping("/pdf-to-images")
     public ResponseEntity<?> extractImagesFromPdf(
             @RequestHeader("Authorization") String token,
-            @RequestParam("file") MultipartFile pdfFile) {
+            @RequestParam("uploadId") Long uploadId) {
         try {
             User user = documentConversionService.getUserFromToken(token);
-            DocumentConversion result = documentConversionService.extractImagesFromPdf(user, pdfFile);
+            DocumentConversion result = documentConversionService.extractImagesFromPdf(user, uploadId);
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
@@ -256,24 +280,22 @@ public class DocumentConversionController {
     }
 
     /**
-     * Add watermark to PDF
+     * Add watermark to PDF - simplified
      */
     @PostMapping("/add-watermark")
     public ResponseEntity<?> addWatermarkToPdf(
             @RequestHeader("Authorization") String token,
-            @RequestParam("file") MultipartFile pdfFile,
-            @RequestParam("watermarkText") String watermarkText,
-            @RequestParam(required = false, defaultValue = "0.3") float opacity,
-            @RequestParam(required = false, defaultValue = "center") String position) {
+            @RequestParam("uploadId") Long uploadId,
+            @RequestParam("watermarkText") String watermarkText) {
         try {
             User user = documentConversionService.getUserFromToken(token);
 
             Map<String, Object> options = new HashMap<>();
             options.put("watermarkText", watermarkText);
-            options.put("opacity", opacity);
-            options.put("position", position); // center, top-left, top-right, bottom-left, bottom-right
+            options.put("opacity", 0.5f);
+            options.put("position", "center");
 
-            DocumentConversion result = documentConversionService.addWatermarkToPdf(user, pdfFile, options);
+            DocumentConversion result = documentConversionService.addWatermarkToPdf(user, uploadId, options);
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
@@ -289,7 +311,7 @@ public class DocumentConversionController {
     @PostMapping("/unlock-pdf")
     public ResponseEntity<?> unlockPdf(
             @RequestHeader("Authorization") String token,
-            @RequestParam("file") MultipartFile pdfFile,
+            @RequestParam("uploadId") Long uploadId,
             @RequestParam("password") String password) {
         try {
             User user = documentConversionService.getUserFromToken(token);
@@ -297,7 +319,7 @@ public class DocumentConversionController {
             Map<String, Object> options = new HashMap<>();
             options.put("password", password);
 
-            DocumentConversion result = documentConversionService.unlockPdf(user, pdfFile, options);
+            DocumentConversion result = documentConversionService.unlockPdf(user, uploadId, options);
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
@@ -313,7 +335,7 @@ public class DocumentConversionController {
     @PostMapping("/lock-pdf")
     public ResponseEntity<?> lockPdf(
             @RequestHeader("Authorization") String token,
-            @RequestParam("file") MultipartFile pdfFile,
+            @RequestParam("uploadId") Long uploadId,
             @RequestParam("password") String password,
             @RequestParam(required = false) String ownerPassword) {
         try {
@@ -325,7 +347,7 @@ public class DocumentConversionController {
                 options.put("ownerPassword", ownerPassword);
             }
 
-            DocumentConversion result = documentConversionService.lockPdf(user, pdfFile, options);
+            DocumentConversion result = documentConversionService.lockPdf(user, uploadId, options);
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
@@ -370,40 +392,18 @@ public class DocumentConversionController {
             ));
         }
     }
-
     /**
-     * Delete conversion
+     * Rearrange and merge PDFs with custom page ordering
      */
-    @DeleteMapping("/{id}")
-    public ResponseEntity<?> deleteConversion(
+    @PostMapping("/rearrange-merge-pdf")
+    public ResponseEntity<?> rearrangeMergePdfs(
             @RequestHeader("Authorization") String token,
-            @PathVariable Long id) {
-        try {
-            User user = documentConversionService.getUserFromToken(token);
-            documentConversionService.deleteConversion(user, id);
-            return ResponseEntity.ok(Map.of("message", "Conversion deleted successfully"));
-        } catch (Exception e) {
-            return ResponseEntity.status(500).body(Map.of(
-                    "message", "Failed to delete conversion",
-                    "error", e.getMessage()
-            ));
-        }
-    }
-    /**
-     * Rearrange PDF pages with optional insertions (FIXED)
-     */
-    @PostMapping("/rearrange-pdf")
-    public ResponseEntity<?> rearrangePdfPages(
-            @RequestHeader("Authorization") String token,
-            @RequestParam("file") MultipartFile pdfFile,
+            @RequestParam("uploadIds") List<Long> uploadIds,
             @RequestParam(required = false) String pageOrder,
-            @RequestParam(required = false) List<MultipartFile> insertFiles,
-            @RequestParam(required = false) String insertPositions,
-            @RequestParam(required = false) String insertTypes) {
+            @RequestParam(required = false) String insertions) {
         try {
             User user = documentConversionService.getUserFromToken(token);
 
-            // Build options
             Map<String, Object> options = new HashMap<>();
 
             // Parse page order
@@ -417,56 +417,28 @@ public class DocumentConversionController {
                 }
             }
 
-            // Handle insertions if provided - DON'T PUT FILES IN OPTIONS!
-            if (insertFiles != null && !insertFiles.isEmpty()) {
-                // Parse insert positions
-                List<Integer> positions = new ArrayList<>();
-                if (insertPositions != null && !insertPositions.isEmpty()) {
-                    try {
-                        positions = objectMapper.readValue(insertPositions,
-                                objectMapper.getTypeFactory().constructCollectionType(List.class, Integer.class));
-                    } catch (Exception e) {
-                        logger.warn("Failed to parse insertPositions: {}", e.getMessage());
-                    }
+            // Parse insertions for adding pages from other PDFs
+            if (insertions != null && !insertions.isEmpty()) {
+                try {
+                    List<Map<String, Object>> insertionList = objectMapper.readValue(insertions,
+                            objectMapper.getTypeFactory().constructCollectionType(
+                                    List.class,
+                                    objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Object.class)
+                            ));
+                    options.put("insertions", insertionList);
+                } catch (Exception e) {
+                    logger.warn("Failed to parse insertions: {}", e.getMessage());
                 }
-
-                // Parse insert types
-                List<String> types = new ArrayList<>();
-                if (insertTypes != null && !insertTypes.isEmpty()) {
-                    try {
-                        types = objectMapper.readValue(insertTypes,
-                                objectMapper.getTypeFactory().constructCollectionType(List.class, String.class));
-                    } catch (Exception e) {
-                        logger.warn("Failed to parse insertTypes: {}", e.getMessage());
-                    }
-                }
-
-                // Store metadata only (not the actual files)
-                List<Map<String, Object>> insertionMetadata = new ArrayList<>();
-                for (int i = 0; i < insertFiles.size(); i++) {
-                    Map<String, Object> insertion = new HashMap<>();
-                    insertion.put("position", i < positions.size() ? positions.get(i) : i);
-                    insertion.put("type", i < types.size() ? types.get(i) : "image");
-                    insertion.put("fileName", insertFiles.get(i).getOriginalFilename());
-                    insertionMetadata.add(insertion);
-                }
-
-                options.put("insertions", insertionMetadata);
-                // NOTE: Don't put insertFiles in options - pass separately!
             }
 
-            // Pass insertFiles separately to the service method
-            DocumentConversion result = documentConversionService.rearrangePdfPages(
-                    user, pdfFile, insertFiles, options);
-
+            DocumentConversion result = documentConversionService.rearrangeMergePdfs(user, uploadIds, options);
             return ResponseEntity.ok(Map.of(
-                    "message", "PDF pages rearranged successfully",
+                    "message", "PDFs rearranged and merged successfully",
                     "data", result
             ));
         } catch (Exception e) {
-            logger.error("PDF rearrangement failed", e);
             return ResponseEntity.status(500).body(Map.of(
-                    "message", "PDF rearrangement failed",
+                    "message", "PDF rearrange-merge failed",
                     "error", e.getMessage()
             ));
         }

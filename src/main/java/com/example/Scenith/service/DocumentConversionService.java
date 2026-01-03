@@ -1,8 +1,10 @@
 package com.example.Scenith.service;
 
 import com.example.Scenith.entity.DocumentConversion;
+import com.example.Scenith.entity.DocumentUpload;
 import com.example.Scenith.entity.User;
 import com.example.Scenith.repository.DocumentConversionRepository;
+import com.example.Scenith.repository.DocumentUploadRepository;
 import com.example.Scenith.repository.UserRepository;
 import com.example.Scenith.security.JwtUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -30,6 +32,7 @@ public class DocumentConversionService {
     private final CloudflareR2Service cloudflareR2Service;
     private final DocumentConversionRepository documentConversionRepository;
     private final ObjectMapper objectMapper;
+    private final DocumentUploadRepository documentUploadRepository;
 
     @Value("${app.base-dir:/tmp}")
     private String baseDir;
@@ -48,12 +51,13 @@ public class DocumentConversionService {
             UserRepository userRepository,
             CloudflareR2Service cloudflareR2Service,
             DocumentConversionRepository documentConversionRepository,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper, DocumentUploadRepository documentUploadRepository) {
         this.jwtUtil = jwtUtil;
         this.userRepository = userRepository;
         this.cloudflareR2Service = cloudflareR2Service;
         this.documentConversionRepository = documentConversionRepository;
         this.objectMapper = objectMapper;
+        this.documentUploadRepository = documentUploadRepository;
     }
 
     /**
@@ -67,7 +71,6 @@ public class DocumentConversionService {
         DocumentConversion conversion = new DocumentConversion();
         conversion.setUser(user);
         conversion.setOperationType("WORD_TO_PDF");
-        conversion.setOriginalFileNames(objectMapper.writeValueAsString(Collections.singletonList(wordFile.getOriginalFilename())));
         conversion.setStatus("FAILED");
         conversion.setErrorMessage(
                 "Word to PDF conversion is not available. " +
@@ -84,109 +87,162 @@ public class DocumentConversionService {
         );
     }
 
-    /**
-     * PDF to Word Conversion - Enhanced with better error handling (UPDATED)
-     * Replace the existing convertPdfToWord method
-     */
-    public DocumentConversion convertPdfToWord(User user, MultipartFile pdfFile) throws IOException, InterruptedException {
-        logger.info("Converting PDF to Word for user: {}", user.getId());
-        try {
-            return processDocumentConversion(user, Collections.singletonList(pdfFile), "PDF_TO_WORD", null);
-        } catch (IOException e) {
-            // Log the error and create a failed conversion record
-            logger.error("PDF to Word conversion failed for user {}: {}", user.getId(), e.getMessage());
-
-            // Create failed conversion record
-            DocumentConversion conversion = new DocumentConversion();
-            conversion.setUser(user);
-            conversion.setOperationType("PDF_TO_WORD");
-            conversion.setOriginalFileNames(objectMapper.writeValueAsString(Collections.singletonList(pdfFile.getOriginalFilename())));
-            conversion.setStatus("FAILED");
-            conversion.setErrorMessage(e.getMessage());
-            conversion.setCreatedAt(LocalDateTime.now());
-
-            documentConversionRepository.save(conversion);
-
-            throw e;
-        }
-    }
-    /**
-     * Merge PDFs with page rearrangement - UPDATED VERSION
-     * Replace the existing mergePdfs method with this enhanced version
-     */
-    public DocumentConversion mergePdfs(User user, List<MultipartFile> pdfFiles, Map<String, Object> options)
+//    /**
+//     * PDF to Word Conversion - Enhanced with better error handling (UPDATED)
+//     * Replace the existing convertPdfToWord method
+//     */
+//    public DocumentConversion convertPdfToWord(User user, MultipartFile pdfFile) throws IOException, InterruptedException {
+//        logger.info("Converting PDF to Word for user: {}", user.getId());
+//        try {
+//            return processDocumentConversion(user, Collections.singletonList(pdfFile), "PDF_TO_WORD", null);
+//        } catch (IOException e) {
+//            // Log the error and create a failed conversion record
+//            logger.error("PDF to Word conversion failed for user {}: {}", user.getId(), e.getMessage());
+//
+//            // Create failed conversion record
+//            DocumentConversion conversion = new DocumentConversion();
+//            conversion.setUser(user);
+//            conversion.setOperationType("PDF_TO_WORD");
+//            conversion.setOriginalFileNames(objectMapper.writeValueAsString(Collections.singletonList(pdfFile.getOriginalFilename())));
+//            conversion.setStatus("FAILED");
+//            conversion.setErrorMessage(e.getMessage());
+//            conversion.setCreatedAt(LocalDateTime.now());
+//
+//            documentConversionRepository.save(conversion);
+//
+//            throw e;
+//        }
+//    }
+    public DocumentConversion mergePdfs(User user, List<Long> uploadIds, Map<String, Object> options)
             throws IOException, InterruptedException {
-        logger.info("Merging {} PDFs for user: {} with options", pdfFiles.size(), user.getId());
-        if (pdfFiles.size() < 2) {
+        logger.info("Merging {} PDFs for user: {}", uploadIds.size(), user.getId());
+        if (uploadIds.size() < 2) {
             throw new IllegalArgumentException("At least 2 PDF files are required for merging");
         }
-        return processDocumentConversion(user, pdfFiles, "MERGE_PDF", options);
+
+        // Get uploaded files
+        List<DocumentUpload> uploads = new ArrayList<>();
+        for (Long uploadId : uploadIds) {
+            DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                    .orElseThrow(() -> new RuntimeException("Upload not found: " + uploadId));
+            if (!upload.getUser().getId().equals(user.getId())) {
+                throw new RuntimeException("Unauthorized access to upload: " + uploadId);
+            }
+            uploads.add(upload);
+        }
+
+        return processDocumentConversion(user, uploads, "MERGE_PDF", options);
     }
 
-    /**
-     * Split PDF into multiple files
-     */
-    public DocumentConversion splitPdf(User user, MultipartFile pdfFile, Map<String, Object> options) throws IOException, InterruptedException {
-        logger.info("Splitting PDF for user: {}", user.getId());
-        return processDocumentConversion(user, Collections.singletonList(pdfFile), "SPLIT_PDF", options);
-    }
-
-    /**
-     * Compress PDF
-     */
-    public DocumentConversion compressPdf(User user, MultipartFile pdfFile, Map<String, Object> options) throws IOException, InterruptedException {
-        logger.info("Compressing PDF for user: {}", user.getId());
-        return processDocumentConversion(user, Collections.singletonList(pdfFile), "COMPRESS_PDF", options);
-    }
-
-    /**
-     * Rotate PDF pages
-     */
-    public DocumentConversion rotatePdf(User user, MultipartFile pdfFile, Map<String, Object> options) throws IOException, InterruptedException {
-        logger.info("Rotating PDF for user: {}", user.getId());
-        return processDocumentConversion(user, Collections.singletonList(pdfFile), "ROTATE_PDF", options);
-    }
-
-    /**
-     * Convert images to PDF with page arrangement - UPDATED VERSION
-     * Replace the existing imagesToPdf method with this enhanced version
-     */
-    public DocumentConversion imagesToPdf(User user, List<MultipartFile> imageFiles, Map<String, Object> options)
+    public DocumentConversion splitPdf(User user, Long uploadId, Map<String, Object> options)
             throws IOException, InterruptedException {
-        logger.info("Converting {} images to PDF for user: {} with options", imageFiles.size(), user.getId());
-        return processDocumentConversion(user, imageFiles, "IMAGES_TO_PDF", options);
+        logger.info("Splitting PDF for user: {}", user.getId());
+
+        DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                .orElseThrow(() -> new RuntimeException("Upload not found"));
+        if (!upload.getUser().getId().equals(user.getId())) {
+            throw new RuntimeException("Unauthorized access");
+        }
+
+        return processDocumentConversion(user, List.of(upload), "SPLIT_PDF", options);
     }
 
-    /**
-     * Extract images from PDF
-     */
-    public DocumentConversion extractImagesFromPdf(User user, MultipartFile pdfFile) throws IOException, InterruptedException {
+    public DocumentConversion compressPdf(User user, Long uploadId, Map<String, Object> options)
+            throws IOException, InterruptedException {
+        logger.info("Compressing PDF for user: {}", user.getId());
+
+        DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                .orElseThrow(() -> new RuntimeException("Upload not found"));
+        if (!upload.getUser().getId().equals(user.getId())) {
+            throw new RuntimeException("Unauthorized access");
+        }
+
+        return processDocumentConversion(user, List.of(upload), "COMPRESS_PDF", options);
+    }
+
+    public DocumentConversion rotatePdf(User user, Long uploadId, Map<String, Object> options)
+            throws IOException, InterruptedException {
+        logger.info("Rotating PDF for user: {}", user.getId());
+
+        DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                .orElseThrow(() -> new RuntimeException("Upload not found"));
+        if (!upload.getUser().getId().equals(user.getId())) {
+            throw new RuntimeException("Unauthorized access");
+        }
+
+        return processDocumentConversion(user, List.of(upload), "ROTATE_PDF", options);
+    }
+
+    public DocumentConversion imagesToPdf(User user, List<Long> uploadIds, Map<String, Object> options)
+            throws IOException, InterruptedException {
+        logger.info("Converting {} images to PDF for user: {}", uploadIds.size(), user.getId());
+
+        List<DocumentUpload> uploads = new ArrayList<>();
+        for (Long uploadId : uploadIds) {
+            DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                    .orElseThrow(() -> new RuntimeException("Upload not found: " + uploadId));
+            if (!upload.getUser().getId().equals(user.getId())) {
+                throw new RuntimeException("Unauthorized access to upload: " + uploadId);
+            }
+            uploads.add(upload);
+        }
+
+        return processDocumentConversion(user, uploads, "IMAGES_TO_PDF", options);
+    }
+
+    public DocumentConversion extractImagesFromPdf(User user, Long uploadId)
+            throws IOException, InterruptedException {
         logger.info("Extracting images from PDF for user: {}", user.getId());
-        return processDocumentConversion(user, Collections.singletonList(pdfFile), "PDF_TO_IMAGES", null);
+
+        DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                .orElseThrow(() -> new RuntimeException("Upload not found"));
+        if (!upload.getUser().getId().equals(user.getId())) {
+            throw new RuntimeException("Unauthorized access");
+        }
+
+        return processDocumentConversion(user, List.of(upload), "PDF_TO_IMAGES", null);
     }
 
-    /**
-     * Add watermark to PDF
-     */
-    public DocumentConversion addWatermarkToPdf(User user, MultipartFile pdfFile, Map<String, Object> options) throws IOException, InterruptedException {
+    public DocumentConversion addWatermarkToPdf(User user, Long uploadId, Map<String, Object> options)
+            throws IOException, InterruptedException {
         logger.info("Adding watermark to PDF for user: {}", user.getId());
-        return processDocumentConversion(user, Collections.singletonList(pdfFile), "ADD_WATERMARK", options);
+
+        DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                .orElseThrow(() -> new RuntimeException("Upload not found"));
+        if (!upload.getUser().getId().equals(user.getId())) {
+            throw new RuntimeException("Unauthorized access");
+        }
+
+        return processDocumentConversion(user, List.of(upload), "ADD_WATERMARK", options);
     }
 
-    /**
-     * Unlock PDF (remove password)
-     */
-    public DocumentConversion unlockPdf(User user, MultipartFile pdfFile, Map<String, Object> options) throws IOException, InterruptedException {
+    public DocumentConversion unlockPdf(User user, Long uploadId, Map<String, Object> options)
+            throws IOException, InterruptedException {
         logger.info("Unlocking PDF for user: {}", user.getId());
-        return processDocumentConversion(user, Collections.singletonList(pdfFile), "UNLOCK_PDF", options);
+
+        DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                .orElseThrow(() -> new RuntimeException("Upload not found"));
+        if (!upload.getUser().getId().equals(user.getId())) {
+            throw new RuntimeException("Unauthorized access");
+        }
+
+        return processDocumentConversion(user, List.of(upload), "UNLOCK_PDF", options);
     }
 
     /**
      * Lock PDF (add password)
      */
-    public DocumentConversion lockPdf(User user, MultipartFile pdfFile, Map<String, Object> options) throws IOException, InterruptedException {
+    public DocumentConversion lockPdf(User user, Long uploadId, Map<String, Object> options)
+            throws IOException, InterruptedException {
         logger.info("Locking PDF for user: {}", user.getId());
-        return processDocumentConversion(user, Collections.singletonList(pdfFile), "LOCK_PDF", options);
+
+        DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                .orElseThrow(() -> new RuntimeException("Upload not found"));
+        if (!upload.getUser().getId().equals(user.getId())) {
+            throw new RuntimeException("Unauthorized access");
+        }
+
+        return processDocumentConversion(user, List.of(upload), "LOCK_PDF", options);
     }
 
     /**
@@ -194,13 +250,12 @@ public class DocumentConversionService {
      */
     private DocumentConversion processDocumentConversion(
             User user,
-            List<MultipartFile> files,
+            List<DocumentUpload> uploads,
             String operationType,
             Map<String, Object> options) throws IOException, InterruptedException {
 
-        // Validate input
-        if (files == null || files.isEmpty()) {
-            throw new IllegalArgumentException("No files provided");
+        if (uploads == null || uploads.isEmpty()) {
+            throw new IllegalArgumentException("No uploads provided");
         }
 
         String absoluteBaseDir = baseDir.startsWith("/") ? baseDir : "/" + baseDir;
@@ -211,81 +266,31 @@ public class DocumentConversionService {
         File outputFile = null;
 
         try {
-            // Create working directory
             Files.createDirectories(Paths.get(workDir));
 
-            // Save input files
+            // Download files from R2 to temp directory
             List<String> inputPaths = new ArrayList<>();
-            List<String> originalFileNames = new ArrayList<>();
-            List<String> r2OriginalPaths = new ArrayList<>();
+            List<Long> uploadIds = new ArrayList<>();
 
-            for (int i = 0; i < files.size(); i++) {
-                MultipartFile file = files.get(i);
-                String fileName = file.getOriginalFilename();
-                String tempFilePath = workDir + File.separator + "input_" + i + "_" + fileName;
+            for (int i = 0; i < uploads.size(); i++) {
+                DocumentUpload upload = uploads.get(i);
+                uploadIds.add(upload.getId());
 
-                File inputFile = cloudflareR2Service.saveMultipartFileToTemp(file, tempFilePath);
+                String tempFilePath = workDir + File.separator + "input_" + i + "_" + upload.getFileName();
+
+                // Download from R2
+                File inputFile = cloudflareR2Service.downloadFile(upload.getFilePath(), tempFilePath);
                 inputFiles.add(inputFile);
                 inputPaths.add(inputFile.getAbsolutePath());
-                originalFileNames.add(fileName);
-
-                // Upload original to R2
-                String r2Path = String.format("documents/%s/%s/original/%s", user.getId(), timestamp, fileName);
-                cloudflareR2Service.uploadFile(r2Path, inputFile);
-                r2OriginalPaths.add(r2Path);
-                logger.info("Uploaded original file to R2: {}", r2Path);
             }
-
-            // ============================================================================
-            // ADD THIS SECTION: Handle insertion files for REARRANGE_PDF operation
-            // ============================================================================
-            if (options != null && options.containsKey("insertions") && "REARRANGE_PDF".equals(operationType)) {
-                @SuppressWarnings("unchecked")
-                List<Map<String, Object>> insertions = (List<Map<String, Object>>) options.get("insertions");
-
-                logger.info("Processing {} insertion files for PDF rearrangement", insertions.size());
-
-                // The insert files start after the main PDF (index 1 onwards)
-                for (int i = 0; i < insertions.size(); i++) {
-                    Map<String, Object> insertion = insertions.get(i);
-
-                    // inputFiles[0] is the main PDF
-                    // inputFiles[1], inputFiles[2], etc. are the insertion files
-                    if (i + 1 < inputFiles.size()) {
-                        String insertFilePath = inputFiles.get(i + 1).getAbsolutePath();
-                        insertion.put("filePath", insertFilePath);
-
-                        logger.debug("Insertion {} - Type: {}, Position: {}, File: {}",
-                                i,
-                                insertion.get("type"),
-                                insertion.get("position"),
-                                insertFilePath);
-                    } else {
-                        logger.warn("Insertion {} specified but no corresponding file found", i);
-                    }
-                }
-
-                // Update options with file paths included
-                options.put("insertions", insertions);
-                logger.info("Updated insertions with file paths: {}", insertions);
-            }
-            // ============================================================================
-            // END OF INSERTION HANDLING
-            // ============================================================================
 
             // Determine output file name and path
-            String outputFileName = generateOutputFileName(originalFileNames.get(0), operationType);
+            String outputFileName = generateOutputFileName(uploads.get(0).getFileName(), operationType);
             String outputPath = workDir + File.separator + outputFileName;
             outputFile = new File(outputPath);
 
-            // Verify Python script exists
-            File scriptFile = new File(documentConversionScriptPath);
-            if (!scriptFile.exists()) {
-                logger.error("Python script not found: {}", scriptFile.getAbsolutePath());
-                throw new IOException("Document conversion script not found");
-            }
-
-            // Build command
+            // Build and execute command
+            // Build and execute command
             List<String> command = buildConversionCommand(
                     operationType,
                     inputPaths,
@@ -317,7 +322,7 @@ public class DocumentConversionService {
                 throw new IOException("Document conversion failed: " + output);
             }
 
-            // Verify output file(s) exist
+            // Verify output file exists
             if (!outputFile.exists()) {
                 logger.error("Output file not created: {}", outputFile.getAbsolutePath());
                 throw new IOException("Output file not created");
@@ -329,29 +334,16 @@ public class DocumentConversionService {
             logger.info("Uploaded output file to R2: {}", r2OutputPath);
 
             // Generate URLs
-            List<Map<String, String>> originalUrls = new ArrayList<>();
-            for (String r2Path : r2OriginalPaths) {
-                originalUrls.add(cloudflareR2Service.generateUrls(r2Path, 3600));
-            }
-
             Map<String, String> outputUrls = cloudflareR2Service.generateUrls(r2OutputPath, 3600);
 
             // Create and save DocumentConversion entity
             DocumentConversion conversion = new DocumentConversion();
             conversion.setUser(user);
             conversion.setOperationType(operationType);
-            conversion.setOriginalFileNames(objectMapper.writeValueAsString(originalFileNames));
-            conversion.setOriginalPaths(objectMapper.writeValueAsString(r2OriginalPaths));
+            conversion.setSourceUploadIds(objectMapper.writeValueAsString(uploadIds));
             conversion.setOutputFileName(outputFileName);
             conversion.setOutputPath(r2OutputPath);
             conversion.setFileSizeBytes(outputFile.length());
-
-            // Store original URLs as JSON
-            List<String> cdnUrls = originalUrls.stream().map(u -> u.get("cdnUrl")).collect(Collectors.toList());
-            List<String> presignedUrls = originalUrls.stream().map(u -> u.get("presignedUrl")).collect(Collectors.toList());
-            conversion.setOriginalCdnUrls(objectMapper.writeValueAsString(cdnUrls));
-            conversion.setOriginalPresignedUrls(objectMapper.writeValueAsString(presignedUrls));
-
             conversion.setOutputCdnUrl(outputUrls.get("cdnUrl"));
             conversion.setOutputPresignedUrl(outputUrls.get("presignedUrl"));
 
@@ -424,13 +416,14 @@ public class DocumentConversionService {
         command.add(operationType);
 
         switch (operationType) {
-            case "WORD_TO_PDF":
-            case "PDF_TO_WORD":
             case "COMPRESS_PDF":
             case "UNLOCK_PDF":
             case "LOCK_PDF":
             case "PDF_TO_IMAGES":
-            case "REARRANGE_PDF":  // NEW
+            case "SPLIT_PDF":
+            case "ROTATE_PDF":
+            case "ADD_WATERMARK":
+            case "REARRANGE_PDF":  // Add this!
                 command.add(inputPaths.get(0));
                 command.add(outputPath);
                 break;
@@ -439,13 +432,6 @@ public class DocumentConversionService {
             case "IMAGES_TO_PDF":
                 command.add(outputPath);
                 command.addAll(inputPaths);
-                break;
-
-            case "SPLIT_PDF":
-            case "ROTATE_PDF":
-            case "ADD_WATERMARK":
-                command.add(inputPaths.get(0));
-                command.add(outputPath);
                 break;
 
             default:
@@ -465,11 +451,8 @@ public class DocumentConversionService {
         String timestamp = String.valueOf(System.currentTimeMillis());
 
         switch (operationType) {
-            case "WORD_TO_PDF":
             case "IMAGES_TO_PDF":
                 return baseName + "_" + timestamp + ".pdf";
-            case "PDF_TO_WORD":
-                return baseName + "_" + timestamp + ".docx";
             case "MERGE_PDF":
                 return "merged_" + timestamp + ".pdf";
             case "SPLIT_PDF":
@@ -486,12 +469,11 @@ public class DocumentConversionService {
                 return baseName + "_unlocked_" + timestamp + ".pdf";
             case "LOCK_PDF":
                 return baseName + "_locked_" + timestamp + ".pdf";
-            case "REARRANGE_PDF":  // NEW
-                return baseName + "_rearranged_" + timestamp + ".pdf";
             default:
                 return "output_" + timestamp + ".pdf";
         }
     }
+
     /**
      * Get user from JWT token
      */
@@ -526,58 +508,112 @@ public class DocumentConversionService {
     }
 
     /**
-     * Delete conversion and associated files
+     * Rearrange and merge PDFs - uses Python script to count pages
      */
-    public void deleteConversion(User user, Long id) throws IOException {
-        DocumentConversion conversion = getConversionById(user, id);
+    public DocumentConversion rearrangeMergePdfs(User user, List<Long> uploadIds, Map<String, Object> options)
+            throws IOException, InterruptedException {
+        logger.info("Rearranging and merging {} PDFs for user: {}", uploadIds.size(), user.getId());
+
+        if (uploadIds.isEmpty()) {
+            throw new IllegalArgumentException("At least 1 PDF file is required");
+        }
+
+        // Get the first PDF (base PDF for rearranging)
+        DocumentUpload baseUpload = documentUploadRepository.findById(uploadIds.get(0))
+                .orElseThrow(() -> new RuntimeException("Base upload not found: " + uploadIds.get(0)));
+        if (!baseUpload.getUser().getId().equals(user.getId())) {
+            throw new RuntimeException("Unauthorized access to upload: " + uploadIds.get(0));
+        }
+
+        // If there are additional PDFs to merge, prepare insertions
+        if (uploadIds.size() > 1 && options != null) {
+            List<Map<String, Object>> insertions = new ArrayList<>();
+
+            // Get the base PDF's page count using Python
+            String tempDir = baseDir + File.separator + "temp_" + System.currentTimeMillis();
+            Files.createDirectories(Paths.get(tempDir));
+
+            try {
+                String tempBasePath = tempDir + File.separator + baseUpload.getFileName();
+                File tempBaseFile = cloudflareR2Service.downloadFile(baseUpload.getFilePath(), tempBasePath);
+
+                // Count pages using Python script
+                int basePdfPageCount = countPdfPagesUsingPython(tempBaseFile);
+
+                // Clean up temp file
+                Files.delete(tempBaseFile.toPath());
+                Files.delete(Paths.get(tempDir));
+
+                // Process additional PDFs as insertions
+                for (int i = 1; i < uploadIds.size(); i++) {
+                    final Long currentUploadId = uploadIds.get(i); // Make it final
+                    DocumentUpload additionalUpload = documentUploadRepository.findById(currentUploadId)
+                            .orElseThrow(() -> new RuntimeException("Upload not found: " + currentUploadId));
+                    if (!additionalUpload.getUser().getId().equals(user.getId())) {
+                        throw new RuntimeException("Unauthorized access to upload: " + currentUploadId);
+                    }
+
+                    // Download the additional PDF to get its absolute path
+                    String workDir = baseDir + File.separator + "videoeditor" + File.separator + "merge_" + System.currentTimeMillis();
+                    Files.createDirectories(Paths.get(workDir));
+
+                    String tempFilePath = workDir + File.separator + "additional_" + i + "_" + additionalUpload.getFileName();
+                    File additionalFile = cloudflareR2Service.downloadFile(additionalUpload.getFilePath(), tempFilePath);
+
+                    // Create insertion to add at the end (or specified position)
+                    Map<String, Object> insertion = new HashMap<>();
+                    insertion.put("position", basePdfPageCount + i - 1);
+                    insertion.put("type", "pdf");
+                    insertion.put("filePath", additionalFile.getAbsolutePath());
+                    insertions.add(insertion);
+                }
+
+                options.put("insertions", insertions);
+
+            } catch (Exception e) {
+                logger.error("Failed to prepare insertions: {}", e.getMessage());
+                throw new IOException("Failed to prepare PDF merging: " + e.getMessage());
+            }
+        }
+
+        return processDocumentConversion(user, List.of(baseUpload), "REARRANGE_PDF", options);
+    }
+
+    /**
+     * Count PDF pages using Python script (since we can't use PyPDF2 in Java)
+     */
+    private int countPdfPagesUsingPython(File pdfFile) throws IOException, InterruptedException {
+        // Create a simple Python script to count pages
+        String countScript = "import sys; from PyPDF2 import PdfReader; reader = PdfReader(sys.argv[1]); print(len(reader.pages))";
+
+        List<String> command = new ArrayList<>();
+        command.add(pythonPath);
+        command.add("-c");
+        command.add(countScript);
+        command.add(pdfFile.getAbsolutePath());
+
+        ProcessBuilder pb = new ProcessBuilder(command);
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+
+        StringBuilder output = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
+            }
+        }
+
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new IOException("Failed to count PDF pages: " + output);
+        }
 
         try {
-            // Delete from R2
-            List<String> originalPaths = objectMapper.readValue(
-                    conversion.getOriginalPaths(),
-                    objectMapper.getTypeFactory().constructCollectionType(List.class, String.class)
-            );
-
-            for (String path : originalPaths) {
-                cloudflareR2Service.deleteFile(path);
-            }
-
-            cloudflareR2Service.deleteFile(conversion.getOutputPath());
-
-            // Delete from database
-            documentConversionRepository.delete(conversion);
-
-            logger.info("Deleted conversion {} for user {}", id, user.getId());
-        } catch (Exception e) {
-            logger.error("Error deleting conversion: {}", e.getMessage());
-            throw new IOException("Failed to delete conversion", e);
+            return Integer.parseInt(output.toString().trim());
+        } catch (NumberFormatException e) {
+            throw new IOException("Invalid page count returned: " + output);
         }
     }
-    // ============================================================================
-// ADD THESE NEW METHODS TO DocumentConversionService.java
-// ============================================================================
-    /**
-     * Rearrange PDF pages with optional insertions
-     * This is the main method for page rearrangement that all other operations can use
-     */
-    /**
-     * Rearrange PDF pages with optional insertions (FIXED)
-     */
-    public DocumentConversion rearrangePdfPages(
-            User user,
-            MultipartFile pdfFile,
-            List<MultipartFile> insertFiles,
-            Map<String, Object> options) throws IOException, InterruptedException {
 
-        logger.info("Rearranging PDF pages for user: {}", user.getId());
-
-        // Combine the main PDF and insert files into one list
-        List<MultipartFile> allFiles = new ArrayList<>();
-        allFiles.add(pdfFile);
-        if (insertFiles != null && !insertFiles.isEmpty()) {
-            allFiles.addAll(insertFiles);
-        }
-
-        return processDocumentConversion(user, allFiles, "REARRANGE_PDF", options);
-    }
 }
