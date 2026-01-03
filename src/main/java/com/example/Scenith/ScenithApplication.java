@@ -5,7 +5,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.io.File;
 
@@ -99,5 +101,18 @@ public class ScenithApplication {
 	private static String maskUrl(String url) {
 		if (url == null) return "NOT SET";
 		return url.replaceAll(":[^@]+@", ":***@");
+	}
+
+	@Bean
+	public ThreadPoolTaskExecutor campaignEmailExecutor() {
+		ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+		executor.setCorePoolSize(4);
+		executor.setMaxPoolSize(12);
+		executor.setQueueCapacity(300);
+		executor.setThreadNamePrefix("Campaign-Email-");
+		executor.setWaitForTasksToCompleteOnShutdown(true);
+		executor.setAwaitTerminationSeconds(60);
+		executor.initialize();
+		return executor;
 	}
 }

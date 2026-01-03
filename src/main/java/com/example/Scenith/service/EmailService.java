@@ -1,21 +1,28 @@
 package com.example.Scenith.service;
 
+import com.example.Scenith.repository.UserRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.text.StringEscapeUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.mail.MailException;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.MimeMessageHelper;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import jakarta.mail.MessagingException;
 import jakarta.mail.internet.MimeMessage;
 
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 public class EmailService {
@@ -28,11 +35,13 @@ public class EmailService {
     private String fromEmail;
 
     private final ObjectMapper objectMapper;
+    private final UserRepository userRepository;
     private static final Logger logger = LoggerFactory.getLogger(EmailService.class);
 
-    public EmailService(JavaMailSender mailSender, ObjectMapper objectMapper) {
+    public EmailService(JavaMailSender mailSender, ObjectMapper objectMapper, UserRepository userRepository) {
         this.mailSender = mailSender;
         this.objectMapper = objectMapper;
+        this.userRepository = userRepository;
     }
 
     public void sendVerificationEmail(String to, String firstName, String token) throws MessagingException {
@@ -101,11 +110,11 @@ public class EmailService {
         mailSender.send(message);
     }
 
-    public void sendHtmlEmail(String to, String subject, String htmlContent) throws MessagingException {
+    public void sendHtmlEmail(String to, String subject, String htmlContent) throws MessagingException, UnsupportedEncodingException {
         MimeMessage message = mailSender.createMimeMessage();
         MimeMessageHelper helper = new MimeMessageHelper(message, true, StandardCharsets.UTF_8.name());
 
-        helper.setFrom(fromEmail);
+        helper.setFrom(fromEmail, "Scenith AI");
         helper.setTo(to);
         helper.setSubject(subject);
         helper.setText(htmlContent, true);
@@ -151,4 +160,92 @@ public class EmailService {
 
         sendHtmlEmail(to, subject, htmlContent);
     }
+    // ───────────────────────────────────────────────────────────────
+    //               IMPORTANT: Background Campaign Method
+    // ───────────────────────────────────────────────────────────────
+    @Async("campaignEmailExecutor")
+    public CompletableFuture<CampaignResult> sendAiVoiceCampaignBackground(String templateId) {
+
+        long start = System.currentTimeMillis();
+
+        CampaignResult result = new CampaignResult();
+
+        try {
+            // 1. Load template ONCE
+            Map<String, Object> template = loadSpecificTemplate("ai-voice-generation-campaign", templateId);
+            String subject = (String) template.get("subject");
+            String baseHtml = (String) template.get("htmlContent");
+
+            // 2. Load only necessary data (very important!)
+            List<Object[]> usersData = userRepository.findAllEmailAndName();
+
+            result.totalUsers = usersData.size();
+
+            if (result.totalUsers == 0) {
+                return CompletableFuture.completedFuture(result);
+            }
+
+            // 3. Prepare and send in batches
+            int batchSize = 80;          // tune between 50–150
+            int throttleMs = 1200;       // ~50–80 emails/minute → Gmail safe zone
+
+            for (int i = 0; i < usersData.size(); i += batchSize) {
+                int end = Math.min(i + batchSize, usersData.size());
+                List<Object[]> batch = usersData.subList(i, end);
+
+                List<MimeMessage> messages = new ArrayList<>(batch.size());
+
+                // Prepare messages (still sequential in batch – fast enough)
+                for (Object[] row : batch) {
+                    String email = (String) row[0];
+                    String name = row[1] != null ? (String) row[1] : "Creator";
+
+                    String html = baseHtml
+                            .replace("{{userName}}", StringEscapeUtils.escapeHtml4(name))
+                            .replace("{{userEmail}}", StringEscapeUtils.escapeHtml4(email));
+
+                    MimeMessage msg = mailSender.createMimeMessage();
+                    MimeMessageHelper helper = new MimeMessageHelper(msg, true, StandardCharsets.UTF_8.name());
+
+                    helper.setFrom(fromEmail, "Scenith AI");
+                    helper.setTo(email);
+                    helper.setSubject(subject);
+                    helper.setText(html, true);
+
+                    messages.add(msg);
+                }
+
+                // Send batch
+                try {
+                    mailSender.send(messages.toArray(new MimeMessage[0]));
+                    result.successCount += messages.size();
+                } catch (MailException e) {
+                    result.failureCount += messages.size();
+                }
+
+                // Very important - Gmail throttle protection
+                Thread.sleep(throttleMs);
+            }
+        } catch (Exception e) {
+            result.failureCount = result.totalUsers - result.successCount;
+        }
+
+        result.durationSeconds = (System.currentTimeMillis() - start) / 1000;
+        return CompletableFuture.completedFuture(result);
+    }
+
+    // Simple DTO for result tracking
+    public static class CampaignResult {
+        public int totalUsers = 0;
+        public int successCount = 0;
+        public int failureCount = 0;
+        public long durationSeconds = 0;
+
+        @Override
+        public String toString() {
+            return String.format("CampaignResult{total=%d, success=%d, failed=%d, time=%ds}",
+                    totalUsers, successCount, failureCount, durationSeconds);
+        }
+    }
+
 }

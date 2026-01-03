@@ -20,4 +20,7 @@ public interface UserRepository extends JpaRepository<User, Long> {
     // Add this method inside your UserRepository interface
     @Query("SELECT u FROM User u WHERE u.planExpiresAt IS NOT NULL AND u.planExpiresAt < :now AND u.role != 'BASIC'")
     List<User> findAllExpiredPremiumUsers(@Param("now") LocalDateTime now);
+
+    @Query("SELECT u.email, u.name FROM User u")
+    List<Object[]> findAllEmailAndName();
 }

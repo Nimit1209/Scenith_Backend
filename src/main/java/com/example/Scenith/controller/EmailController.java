@@ -25,46 +25,17 @@ public class EmailController {
         this.emailService = emailService;
         this.userRepository = userRepository;
     }
-    
-    @PostMapping("/send-ai-voice-campaign")
-    public ResponseEntity<?> sendAiVoiceCampaign(@RequestParam(defaultValue = "ai-voice-promo") String templateId) {
-        try {
-            List<User> users = userRepository.findAll();
-            int successCount = 0;
-            int failureCount = 0;
-            
-            for (User user : users) {
-                try {
-                    Map<String, String> variables = new HashMap<>();
-                    variables.put("userName", user.getName() != null ? user.getName() : "Creator");
-                    variables.put("userEmail", user.getEmail());
 
-                    emailService.sendTemplateEmail(
-                            user.getEmail(),
-                            "ai-voice-generation-campaign",
-                            templateId,
-                            variables
-                    );
-                    successCount++;
-                    logger.info("AI Voice campaign email sent to: {}", user.getEmail());
-                } catch (Exception e) {
-                    failureCount++;
-                    logger.error("Failed to send email to {}: {}", user.getEmail(), e.getMessage());
-                }
-            }
-            
-            Map<String, Object> response = new HashMap<>();
-            response.put("message", "AI Voice campaign completed");
-            response.put("totalUsers", users.size());
-            response.put("successCount", successCount);
-            response.put("failureCount", failureCount);
-            
-            return ResponseEntity.ok(response);
-        } catch (Exception e) {
-            logger.error("Error sending AI Voice campaign: {}", e.getMessage());
-            return ResponseEntity.status(500)
-                .body(Map.of("message", "Error sending campaign: " + e.getMessage()));
-        }
+    @PostMapping("/send-ai-voice-campaign")
+    public ResponseEntity<Map<String, Object>> sendAiVoiceCampaign(
+            @RequestParam(defaultValue = "ai-voice-promo") String templateId) {
+
+        emailService.sendAiVoiceCampaignBackground(templateId);
+
+        return ResponseEntity.accepted().body(
+                Map.of("message", "Campaign successfully started in background",
+                        "status", "QUEUED")
+        );
     }
     
     @PostMapping("/send-custom")

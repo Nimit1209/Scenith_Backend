@@ -31,6 +31,9 @@ public class ImageRenderService {
     @Value("${app.imagemagick-path:/usr/local/bin/magick}")
     private String imageMagickPath;
 
+    @Value("${app.base-dir:/tmp}")
+    private String baseDir;
+
     private final ObjectMapper objectMapper;
     private final CloudflareR2Service cloudflareR2Service;
 
@@ -166,32 +169,45 @@ public class ImageRenderService {
         return outputPath;
     }
 
-    /**
-     * Process IMAGE layer
-     */
-    /**
-     * Process IMAGE layer
-     */
     private String processImageLayer(LayerDTO layer, String tempDirPath, Integer canvasWidth, Integer canvasHeight)
-        throws IOException, InterruptedException {
+            throws IOException, InterruptedException {
 
         String outputPath = tempDirPath + File.separator + "layer_" + layer.getId() + "_image.png";
         String sourceImagePath = downloadOrCopyImage(layer.getSrc(), tempDirPath, layer.getId());
 
+        boolean isSvg = sourceImagePath.toLowerCase().endsWith(".svg");
+
         List<String> command = new ArrayList<>();
         command.add(imageMagickPath);
+
+        // For SVG, specify density BEFORE reading the file
+        if (isSvg) {
+            command.add("-density");
+            command.add("300");  // High DPI for quality
+            command.add("-background");
+            command.add("transparent");
+        }
+
         command.add(sourceImagePath);
         command.add("-set");
         command.add("colorspace");
         command.add("sRGB");
 
+        // Get dimensions
         double naturalWidth;
         double naturalHeight;
 
-        if (sourceImagePath.toLowerCase().endsWith(".svg")) {
-            // For SVG, use layer dimensions directly (SVGs are scalable)
+        if (isSvg) {
+            // For SVG, try to read viewBox if layer dimensions aren't set
             naturalWidth = layer.getWidth();
             naturalHeight = layer.getHeight();
+
+            // Fallback to reasonable defaults if not set
+            if (naturalWidth == 0 || naturalHeight == 0) {
+                logger.warn("SVG layer {} has no dimensions set, using defaults", layer.getId());
+                naturalWidth = 500;  // Reasonable default
+                naturalHeight = 500;
+            }
         } else {
             BufferedImage sourceImg = ImageIO.read(new File(sourceImagePath));
             if (sourceImg == null) {
@@ -200,7 +216,6 @@ public class ImageRenderService {
             naturalWidth = sourceImg.getWidth();
             naturalHeight = sourceImg.getHeight();
         }
-
 
         // Get scale and crop values
         double scale = layer.getScale() != null ? layer.getScale() : 1.0;
@@ -1630,39 +1645,23 @@ public class ImageRenderService {
      * Download image from URL or R2 path
      */
     private String downloadOrCopyImage(String src, String tempDirPath, String layerId) throws IOException, InterruptedException {
-        String outputPath = tempDirPath + File.separator + "source_" + layerId + ".png";
+        String outputPath = tempDirPath + File.separator + "source_" + layerId;
 
+        // Preserve original extension
         if (src.startsWith("http://") || src.startsWith("https://")) {
-            // Download from URL (CDN) - don't check R2, just download directly
-            logger.debug("Downloading image from URL: {}", src);
+            String extension = src.substring(src.lastIndexOf('.'));
+            outputPath += extension;
             try (InputStream in = new URL(src).openStream()) {
                 Files.copy(in, Paths.get(outputPath), StandardCopyOption.REPLACE_EXISTING);
-            } catch (IOException e) {
-                logger.error("Failed to download image from URL: {}", src, e);
-                throw new IOException("Failed to download image from URL: " + src, e);
             }
         } else {
-            // Download from R2 path
-            logger.debug("Downloading image from R2: {}", src);
-            try {
-                File downloadedFile = cloudflareR2Service.downloadFile(src, outputPath);
-                if (!downloadedFile.exists()) {
-                    throw new IOException("Failed to download file from R2: " + src);
-                }
-            } catch (IOException e) {
-                logger.error("Failed to download image from R2: {}", src, e);
-                throw new IOException("Failed to download file from R2: " + src, e);
-            }
+            String fullPath = baseDir + File.separator + src;
+            String extension = src.substring(src.lastIndexOf('.'));
+            outputPath += extension;
+            Files.copy(Paths.get(fullPath), Paths.get(outputPath), StandardCopyOption.REPLACE_EXISTING);
         }
 
-        // Convert SVG to PNG if needed
-        if (outputPath.toLowerCase().endsWith(".svg") || src.toLowerCase().endsWith(".svg")) {
-            String pngOutputPath = tempDirPath + File.separator + "source_" + layerId + "_converted.png";
-            convertSvgToPng(outputPath, pngOutputPath);
-            Files.deleteIfExists(Paths.get(outputPath));
-            return pngOutputPath;
-        }
-
+        // NO conversion here - keep SVG as SVG
         return outputPath;
     }
 
@@ -1726,22 +1725,5 @@ public class ImageRenderService {
         } catch (IOException e) {
             logger.warn("Failed to cleanup temp directory: {}", e.getMessage());
         }
-    }
-
-    /**
-     * Convert SVG to PNG using ImageMagick
-     */
-    private void convertSvgToPng(String svgPath, String pngPath) throws IOException, InterruptedException {
-        List<String> command = new ArrayList<>();
-        command.add(imageMagickPath);
-        command.add("-density");
-        command.add("300"); // High DPI for quality
-        command.add("-background");
-        command.add("transparent");
-        command.add(svgPath);
-        command.add("-flatten");
-        command.add(pngPath);
-
-        executeImageMagickCommand(command, "Convert SVG to PNG");
     }
 }
