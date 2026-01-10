@@ -7,4 +7,5 @@ public class CanvasDTO {
     private Integer width;
     private Integer height;
     private String backgroundColor;
+    private Boolean transparent;
 }

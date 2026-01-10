@@ -115,17 +115,24 @@ public class ImageRenderService {
      * Create base canvas with background color
      */
     private void createBaseCanvas(CanvasDTO canvas, String outputPath) throws IOException, InterruptedException {
-        String bgColor = canvas.getBackgroundColor() != null ? canvas.getBackgroundColor() : "#FFFFFF";
-
         List<String> command = new ArrayList<>();
         command.add(imageMagickPath);
-        command.add("-size");
-        command.add(canvas.getWidth() + "x" + canvas.getHeight());
-        command.add("xc:" + bgColor);
+        Boolean isTransparent = canvas.getTransparent();
+        if (isTransparent != null && isTransparent) {
+            command.add("-size");
+            command.add(canvas.getWidth() + "x" + canvas.getHeight());
+            command.add("xc:transparent");
+        } else {
+            String bgColor = canvas.getBackgroundColor() != null ? canvas.getBackgroundColor() : "#FFFFFF";
+            command.add("-size");
+            command.add(canvas.getWidth() + "x" + canvas.getHeight());
+            command.add("xc:" + bgColor);
+        }
         command.add("-set");
         command.add("colorspace");
         command.add("sRGB");
-        command.add(outputPath);
+
+        command.add("PNG32:" + outputPath);
 
         executeImageMagickCommand(command, "Create base canvas");
     }
@@ -1616,7 +1623,7 @@ public class ImageRenderService {
      * Export final image in specified format
      */
     private void exportFinalImage(String inputPath, String outputPath, String format, Integer quality)
-        throws IOException, InterruptedException {
+            throws IOException, InterruptedException {
 
         List<String> command = new ArrayList<>();
         command.add(imageMagickPath);
@@ -1626,17 +1633,26 @@ public class ImageRenderService {
         command.add("sRGB");
 
         if ("JPG".equalsIgnoreCase(format) || "JPEG".equalsIgnoreCase(format)) {
+            // JPG doesn't support transparency - flatten with white background
             command.add("-background");
             command.add("white");
             command.add("-flatten");
             command.add("-quality");
             command.add(String.valueOf(quality != null ? quality : 90));
+            command.add(outputPath);
+        } else if ("PNG".equalsIgnoreCase(format)) {
+            // PNG with transparency support - explicitly use PNG32 format
+            command.add("-quality");
+            command.add(String.valueOf(quality != null ? quality : 90));
+            command.add("PNG32:" + outputPath); // Force PNG32 format with alpha channel
         } else if ("PDF".equalsIgnoreCase(format)) {
             command.add("-density");
             command.add("300");
+            command.add(outputPath);
+        } else {
+            // Default case for other formats
+            command.add(outputPath);
         }
-
-        command.add(outputPath);
 
         executeImageMagickCommand(command, "Export final image");
     }
