@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.text.StringEscapeUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.mail.MailException;
@@ -29,7 +30,7 @@ public class EmailService {
     private final JavaMailSender mailSender;
 
     @Value("${app.frontend.url}")
-    private String frontendUrl; // e.g., http://localhost:3000
+    private String frontendUrl;
 
     @Value("${spring.mail.username}")
     private String fromEmail;
@@ -37,13 +38,26 @@ public class EmailService {
     private final ObjectMapper objectMapper;
     private final UserRepository userRepository;
     private static final Logger logger = LoggerFactory.getLogger(EmailService.class);
+    private final SesEmailService sesEmailService;
 
-    public EmailService(JavaMailSender mailSender, ObjectMapper objectMapper, UserRepository userRepository) {
+    public EmailService(
+            JavaMailSender mailSender,
+            ObjectMapper objectMapper,
+            UserRepository userRepository,
+            @Autowired(required = false) SesEmailService sesEmailService) {
         this.mailSender = mailSender;
         this.objectMapper = objectMapper;
         this.userRepository = userRepository;
+        this.sesEmailService = sesEmailService;
+
+        if (sesEmailService != null) {
+            logger.info("✅ Email Service initialized with Amazon SES support");
+        } else {
+            logger.info("⚠️ Email Service initialized with Gmail only (limited to 500/day)");
+        }
     }
 
+    // Keep all your existing methods (sendVerificationEmail, sendHtmlEmail, etc.)
     public void sendVerificationEmail(String to, String firstName, String token) throws MessagingException {
         MimeMessage message = mailSender.createMimeMessage();
         MimeMessageHelper helper = new MimeMessageHelper(message, true);
@@ -89,13 +103,13 @@ public class EmailService {
                         <p style="text-align: center;">
                             <a href="%s" class="cta-button">Verify My Email</a>
                         </p>
-                        <p>This link will take you to a secure page to complete the verification process. It’s quick, easy, and ensures your account is ready to dive into our intuitive timeline, dynamic transitions, and robust editing tools. The link will expire in 24 hours.</p>
-                        <p><strong>Why Scenith?</strong><br>At Scenith, we’re more than just a video editor—we’re your creative partner. Built by creators for creators, our platform empowers you to tell compelling stories with precision and flair.</p>
-                        <p><strong>What’s Next?</strong><br>Once verified, you’ll gain access to your personalized dashboard, where you can:<br>
+                        <p>This link will take you to a secure page to complete the verification process. It's quick, easy, and ensures your account is ready to dive into our intuitive timeline, dynamic transitions, and robust editing tools. The link will expire in 24 hours.</p>
+                        <p><strong>Why Scenith?</strong><br>At Scenith, we're more than just a video editor—we're your creative partner. Built by creators for creators, our platform empowers you to tell compelling stories with precision and flair.</p>
+                        <p><strong>What's Next?</strong><br>Once verified, you'll gain access to your personalized dashboard, where you can:<br>
                             - Start new projects with presets for YouTube, Instagram Reels, TikTok, and more.<br>
                             - Explore our comprehensive toolkit for audio, video, and keyframe editing.<br>
                             - Join a community passionate about visual storytelling.</p>
-                        <p>If you didn’t sign up for Scenith or have any questions, please contact us at <a href="mailto:scenith.spprt@gmail.com">scenith.spprt@gmail.com</a> </p>
+                        <p>If you didn't sign up for Scenith or have any questions, please contact us at <a href="mailto:scenith.spprt@gmail.com">scenith.spprt@gmail.com</a> </p>
                     </div>
                     <div class="footer">
                         <p><strong>Scenith</strong> – Elevating Visual Storytelling<br>
@@ -109,8 +123,24 @@ public class EmailService {
         helper.setText(htmlContent, true);
         mailSender.send(message);
     }
+    /**
+     * Send HTML email – prefers SES if available, falls back to Gmail
+     */
+    public void sendHtmlEmail(String to, String subject, String htmlContent)
+            throws MessagingException, UnsupportedEncodingException {
 
-    public void sendHtmlEmail(String to, String subject, String htmlContent) throws MessagingException, UnsupportedEncodingException {
+        if (sesEmailService != null) {
+            logger.info("Sending via SES: {}", to);
+            try {
+                sesEmailService.sendEmail(to, subject, htmlContent);
+                return;
+            } catch (Exception e) {
+                logger.error("SES failed for {}, falling back to Gmail: {}", to, e.getMessage());
+            }
+        }
+
+        // Gmail fallback
+        logger.info("Sending via Gmail fallback: {}", to);
         MimeMessage message = mailSender.createMimeMessage();
         MimeMessageHelper helper = new MimeMessageHelper(message, true, StandardCharsets.UTF_8.name());
 
@@ -120,9 +150,20 @@ public class EmailService {
         helper.setText(htmlContent, true);
 
         mailSender.send(message);
-        logger.info("Email sent successfully to: {}", to);
     }
 
+    /**
+     * Send templated email – now uses the improved sendHtmlEmail
+     */
+    public void sendTemplateEmail(String to, String templateName, String templateId, Map<String, String> variables)
+            throws IOException, MessagingException {
+
+        Map<String, Object> template = loadSpecificTemplate(templateName, templateId);
+        String subject = (String) template.get("subject");
+        String htmlContent = generateEmailHtml(template, variables);
+
+        sendHtmlEmail(to, subject, htmlContent);   // ← now smart, uses SES when possible
+    }
     public Map<String, Object> loadEmailTemplate(String templateName) throws IOException {
         ClassPathResource resource = new ClassPathResource("email-templates/" + templateName + ".json");
         return objectMapper.readValue(resource.getInputStream(), Map.class);
@@ -131,7 +172,6 @@ public class EmailService {
     public String generateEmailHtml(Map<String, Object> template, Map<String, String> variables) {
         String htmlContent = (String) template.get("htmlContent");
 
-        // Replace variables in template
         if (variables != null) {
             for (Map.Entry<String, String> entry : variables.entrySet()) {
                 htmlContent = htmlContent.replace("{{" + entry.getKey() + "}}", entry.getValue());
@@ -152,50 +192,69 @@ public class EmailService {
                 .orElseThrow(() -> new IOException("Template with id '" + templateId + "' not found"));
     }
 
-    public void sendTemplateEmail(String to, String templateName, String templateId, Map<String, String> variables)
-            throws IOException, MessagingException {
-        Map<String, Object> template = loadSpecificTemplate(templateName, templateId);
-        String subject = (String) template.get("subject");
-        String htmlContent = generateEmailHtml(template, variables);
 
-        sendHtmlEmail(to, subject, htmlContent);
-    }
-    // ───────────────────────────────────────────────────────────────
-    //               IMPORTANT: Background Campaign Method
-    // ───────────────────────────────────────────────────────────────
+
+    /**
+     * ⭐ UPDATED: Send to ALL users using SES (no limits!)
+     */
     @Async("campaignEmailExecutor")
-    public CompletableFuture<CampaignResult> sendAiVoiceCampaignBackground(String templateId) {
-
-        long start = System.currentTimeMillis();
-
-        CampaignResult result = new CampaignResult();
-
+    public CompletableFuture<Object> sendAiVoiceCampaignBackground(String templateId) {
         try {
-            // 1. Load template ONCE
+            // Load template
             Map<String, Object> template = loadSpecificTemplate("ai-voice-generation-campaign", templateId);
             String subject = (String) template.get("subject");
             String baseHtml = (String) template.get("htmlContent");
 
-            // 2. Load only necessary data (very important!)
+            // Get ALL users from database
             List<Object[]> usersData = userRepository.findAllEmailAndName();
 
-            result.totalUsers = usersData.size();
+            logger.info("📧 Campaign requested for {} users", usersData.size());
 
-            if (result.totalUsers == 0) {
-                return CompletableFuture.completedFuture(result);
+            // Use SES if available (sends to ALL users), otherwise Gmail (limited to 500)
+            if (sesEmailService != null) {
+                logger.info("✅ Using Amazon SES - Sending to ALL {} users", usersData.size());
+                // Cast to Object to match return type
+                return sesEmailService.sendBulkCampaign(subject, baseHtml, usersData)
+                        .thenApply(result -> (Object) result);
+            } else {
+                logger.warn("⚠️ SES not available - Using Gmail (limited to 500 users/day)");
+                // Cast to Object to match return type
+                return sendViaGmail(subject, baseHtml, usersData)
+                        .thenApply(result -> (Object) result);
             }
 
-            // 3. Prepare and send in batches
-            int batchSize = 80;          // tune between 50–150
-            int throttleMs = 1200;       // ~50–80 emails/minute → Gmail safe zone
+        } catch (Exception e) {
+            logger.error("❌ Campaign failed: {}", e.getMessage(), e);
+            CampaignResult errorResult = new CampaignResult();
+            errorResult.failureCount = (int) userRepository.count();
+            return CompletableFuture.completedFuture((Object) errorResult);
+        }
+    }
 
-            for (int i = 0; i < usersData.size(); i += batchSize) {
-                int end = Math.min(i + batchSize, usersData.size());
+    /**
+     * Gmail fallback (limited to 500/day - only used if SES is not available)
+     */
+    private CompletableFuture<CampaignResult> sendViaGmail(String subject, String baseHtml, List<Object[]> usersData) {
+        long start = System.currentTimeMillis();
+        CampaignResult result = new CampaignResult();
+        result.totalUsers = Math.min(usersData.size(), 500); // Gmail daily limit (FIXED - was 50000)
+
+        if (result.totalUsers == 0) {
+            return CompletableFuture.completedFuture(result);
+        }
+
+        logger.warn("⚠️ Gmail has a 500/day limit. Only sending to first {} users", result.totalUsers);
+
+        try {
+            int batchSize = 80;
+            int throttleMs = 1200;
+
+            for (int i = 0; i < result.totalUsers; i += batchSize) {
+                int end = Math.min(i + batchSize, result.totalUsers);
                 List<Object[]> batch = usersData.subList(i, end);
 
                 List<MimeMessage> messages = new ArrayList<>(batch.size());
 
-                // Prepare messages (still sequential in batch – fast enough)
                 for (Object[] row : batch) {
                     String email = (String) row[0];
                     String name = row[1] != null ? (String) row[1] : "Creator";
@@ -215,25 +274,24 @@ public class EmailService {
                     messages.add(msg);
                 }
 
-                // Send batch
                 try {
                     mailSender.send(messages.toArray(new MimeMessage[0]));
                     result.successCount += messages.size();
                 } catch (MailException e) {
+                    logger.error("Gmail batch failed: {}", e.getMessage());
                     result.failureCount += messages.size();
                 }
 
-                // Very important - Gmail throttle protection
                 Thread.sleep(throttleMs);
             }
         } catch (Exception e) {
+            logger.error("Gmail campaign error: {}", e.getMessage());
             result.failureCount = result.totalUsers - result.successCount;
         }
 
         result.durationSeconds = (System.currentTimeMillis() - start) / 1000;
         return CompletableFuture.completedFuture(result);
     }
-
     // Simple DTO for result tracking
     public static class CampaignResult {
         public int totalUsers = 0;
@@ -247,5 +305,4 @@ public class EmailService {
                     totalUsers, successCount, failureCount, durationSeconds);
         }
     }
-
 }

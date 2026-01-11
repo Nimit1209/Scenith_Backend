@@ -20,10 +20,14 @@ public class DocumentConversionController {
 
     private static final Logger logger = LoggerFactory.getLogger(DocumentConversionService.class);
 
+    private final DocumentConversionService documentConversionService;
+    private final ObjectMapper objectMapper;
+
     @Autowired
-    private DocumentConversionService documentConversionService;
-    @Autowired
-    private ObjectMapper objectMapper;
+    public DocumentConversionController(DocumentConversionService documentConversionService, ObjectMapper objectMapper) {
+        this.documentConversionService = documentConversionService;
+        this.objectMapper = objectMapper;
+    }
 
 // ============================================================================
 // ADD/UPDATE THESE METHODS IN DocumentConversionController.java

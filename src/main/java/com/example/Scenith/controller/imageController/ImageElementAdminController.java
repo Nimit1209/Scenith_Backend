@@ -11,8 +11,10 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/admin/image-elements")
@@ -30,28 +32,49 @@ public class ImageElementAdminController {
     @PostMapping("/upload")
     public ResponseEntity<?> uploadElement(
             @RequestHeader("Authorization") String token,
-            @RequestParam("file") MultipartFile file,
-            @RequestParam(value = "name", required = false) String name,
+            @RequestParam("files") List<MultipartFile> files,
             @RequestParam(value = "category", defaultValue = "general") String category,
             @RequestParam(value = "tags", required = false) String tags) {
         try {
             User user = imageEditorService.getUserFromToken(token);
             if (!user.isAdmin()) {
                 return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                    .body(Map.of("message", "Access denied: Admin role required"));
+                        .body(Map.of("message", "Access denied: Admin role required"));
             }
-            // TODO: Add admin role check using token
-            ImageElement element = imageElementService.uploadElement(file, name, category, tags);
-            return ResponseEntity.ok(element);
+            if (files == null || files.isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of("message", "No files provided"));
+            }
+
+            List<ImageElement> savedElements = new ArrayList<>();
+            for (MultipartFile file : files) {
+                if (file.isEmpty()) continue;
+
+                String originalName = file.getOriginalFilename();
+                String elementName = originalName != null
+                        ? originalName.replaceFirst("[.][^.]+$", "")  // remove extension
+                        : "unnamed_" + UUID.randomUUID().toString().substring(0, 8);
+
+                ImageElement element = imageElementService.uploadElement(
+                        file,
+                        elementName,           // ← original name without extension
+                        category,
+                        tags
+                );
+                savedElements.add(element);
+            }
+            if (savedElements.isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of("message", "No valid files uploaded"));
+            }
+            return ResponseEntity.ok(savedElements);
+
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(Map.of("message", e.getMessage()));
+                    .body(Map.of("message", e.getMessage()));
         } catch (IOException e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("message", "Upload failed: " + e.getMessage()));
+                    .body(Map.of("message", "Upload failed: " + e.getMessage()));
         }
     }
-
     /**
      * Get all elements (including inactive)
      * GET /api/admin/image-elements
