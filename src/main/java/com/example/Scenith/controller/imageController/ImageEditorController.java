@@ -7,14 +7,18 @@ import com.example.Scenith.entity.User;
 import com.example.Scenith.entity.imageentity.ImageAsset;
 import com.example.Scenith.entity.imageentity.ImageElement;
 import com.example.Scenith.entity.imageentity.ImageProject;
+import com.example.Scenith.service.imageService.ElementDownloadService;
 import com.example.Scenith.service.imageService.ImageAssetService;
 import com.example.Scenith.service.imageService.ImageEditorService;
 import com.example.Scenith.service.imageService.ImageElementService;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.core.io.Resource;
 
 import java.io.IOException;
 import java.util.List;
@@ -28,6 +32,7 @@ public class ImageEditorController {
     private final ImageEditorService imageEditorService;
     private final ImageAssetService imageAssetService;
     private final ImageElementService imageElementService;
+    private final ElementDownloadService elementDownloadService;
 
 
     /**
@@ -244,7 +249,6 @@ public class ImageEditorController {
 
     @GetMapping("/elements")
     public ResponseEntity<?> getElements(
-            @RequestHeader("Authorization") String token,
             @RequestParam(value = "category", required = false) String category) {
         try {
             List<ImageElement> elements;
@@ -299,6 +303,59 @@ public class ImageEditorController {
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("message", "Failed to apply template: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Download element in specified format
+     * GET /api/image-editor/elements/{id}/download
+     */
+    @GetMapping("/elements/{id}/download")
+    public ResponseEntity<Resource> downloadElement(
+            @PathVariable Long id,
+            @RequestParam String format,
+            @RequestParam(required = false) String resolution,
+            @RequestHeader(value = "Authorization", required = false) String token,
+            HttpServletRequest request) {
+        try {
+            User user = null;
+            if (token != null && !token.isEmpty()) {
+                try {
+                    user = imageEditorService.getUserFromToken(token);
+                } catch (Exception e) {
+                    // User not logged in, continue as anonymous
+                }
+            }
+
+            String ipAddress = request.getRemoteAddr();
+
+            ElementDownloadService.DownloadResult result =
+                    elementDownloadService.downloadElement(id, format, resolution, user, ipAddress);
+
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + result.getFilename() + "\"")
+                    .contentType(org.springframework.http.MediaType.parseMediaType(result.getContentType()))
+                    .body(result.getResource());
+
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().build();
+        } catch (IOException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * Get download statistics for element
+     * GET /api/image-editor/elements/{id}/stats
+     */
+    @GetMapping("/elements/{id}/stats")
+    public ResponseEntity<?> getElementStats(@PathVariable Long id) {
+        try {
+            Long downloadCount = elementDownloadService.getDownloadCount(id);
+            return ResponseEntity.ok(Map.of("downloads", downloadCount));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("message", "Failed to retrieve stats"));
         }
     }
 }
