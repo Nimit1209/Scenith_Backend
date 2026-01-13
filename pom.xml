@@ -278,6 +278,17 @@
 			<artifactId>ses</artifactId>
 			<version>2.20.26</version>
 		</dependency>
+
+		<dependency>
+			<groupId>org.apache.xmlgraphics</groupId>
+			<artifactId>batik-transcoder</artifactId>
+			<version>1.17</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.xmlgraphics</groupId>
+			<artifactId>batik-codec</artifactId>
+			<version>1.17</version>
+		</dependency>
 	</dependencies>
 
 	<repositories>

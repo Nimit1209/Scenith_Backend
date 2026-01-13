@@ -69,6 +69,8 @@ public class SecurityConfig implements WebMvcConfigurer {
                         .requestMatchers("/test-db").permitAll() // Allow public access to /test-db
                         .requestMatchers("/auth/**").permitAll()
                         .requestMatchers("/api/global-elements", "/api/global-elements/**").permitAll() // Public access
+                        .requestMatchers("/api/image-editor/elements").permitAll()  // Add this line
+                        .requestMatchers("/api/image-editor/elements/**").permitAll() // Add this line
                         .requestMatchers("/projects/{projectId}/waveforms/{filename}").permitAll()
                         .requestMatchers("/developer/**").authenticated() // Requires JWT, role checked in JwtFilter
                         .requestMatchers("/videos/upload", "/videos/my-videos", "/videos/merge", "/videos/edited-videos","/videos/trim", "/videos/split", "/videos/duration/**").authenticated()

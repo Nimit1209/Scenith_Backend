@@ -45,6 +45,7 @@ public class JwtFilter extends OncePerRequestFilter {
                 path.matches("/image/projects/\\d+/.*") ||
                 path.matches("/audio/projects/\\d+/.*") ||
                 path.matches("/videos/projects/\\d+/.*") ||
+                path.startsWith("/api/image-editor/elements") ||
                 path.startsWith("/videos/")) {
             filterChain.doFilter(request, response);
             return;

@@ -55,6 +55,9 @@ public class ImageElement {
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
 
+    @Column(name = "download_count", nullable = false)
+    private Long downloadCount = 0L;
+
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();
