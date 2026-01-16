@@ -113,32 +113,71 @@ def pdf_to_word(input_path, output_path):
         return {"status": "error", "message": str(e)}
 
 
-def merge_pdfs(output_path, input_paths):
-    """Merge multiple PDF files"""
+def merge_pdfs(output_path, input_paths, options=None):
+    """Merge multiple PDF files with optional page mapping"""
     try:
-        if not input_paths or len(input_paths) < 2:
-            raise Exception("At least 2 PDF files required for merging")
+        if not input_paths:
+            raise Exception("No PDF files provided for merging")
 
         merger = PdfMerger()
 
-        for pdf_path in input_paths:
-            if not os.path.exists(pdf_path):
-                raise Exception(f"Input file not found: {pdf_path}")
+        # Check if we have page mapping (custom page order)
+        page_mapping = options.get('pageMapping', []) if options else []
+
+        if page_mapping:
+            # Custom merge with specific pages in specific order
+            # Build a map of uploadId to file path
+            # Build upload_id_to_path by parsing filenames
+            upload_id_to_path = {}
+        for path in input_paths:
+            filename = os.path.basename(path)
+            if filename.startswith('input_'):
+                parts = filename.split('_', 2)  # Split into ['input', '70', 'file.pdf']
+                if len(parts) >= 2:
+                    try:
+                        uid = int(parts[1])
+                        upload_id_to_path[uid] = path
+                    except ValueError:
+                        pass
+
+        for page_info in page_mapping:
+            upload_id = page_info.get('uploadId')
+            page_number = page_info.get('pageNumber', 1)
+
+            file_path = upload_id_to_path.get(upload_id)
+            if not file_path or not os.path.exists(file_path):
+                print(f"Warning: File not found for uploadId {upload_id}", file=sys.stderr)
+                continue
+
+            # Append specific page (page_number - 1 because PyPDF2 uses 0-based indexing)
             try:
-                merger.append(pdf_path)
+                merger.append(file_path, pages=(page_number - 1, page_number))
             except Exception as e:
-                raise Exception(f"Error appending {pdf_path}: {str(e)}")
+                print(f"Warning: Failed to append page {page_number} from {file_path}: {str(e)}", file=sys.stderr)
+        else:
+            # Standard merge - all pages from all PDFs in order
+            for pdf_path in input_paths:
+                if not os.path.exists(pdf_path):
+                    raise Exception(f"Input file not found: {pdf_path}")
+                try:
+                    merger.append(pdf_path)
+                except Exception as e:
+                    raise Exception(f"Error appending {pdf_path}: {str(e)}")
 
         merger.write(output_path)
         merger.close()
 
-        return {"status": "success", "output_path": output_path}
+        return {
+            "status": "success",
+            "output_path": output_path,
+            "pages_merged": len(page_mapping) if page_mapping else "all"
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
 def split_pdf(input_path, output_path, options=None):
-    """Split PDF into multiple files"""
+    """Split PDF into multiple files - ENHANCED"""
     try:
         import zipfile
 
@@ -149,7 +188,6 @@ def split_pdf(input_path, output_path, options=None):
             raise Exception("PDF has no pages")
 
         split_type = options.get('splitType', 'all') if options else 'all'
-        pages_spec = options.get('pages', '') if options else ''
 
         # Create temporary directory for split files
         temp_dir = os.path.dirname(output_path)
@@ -169,20 +207,35 @@ def split_pdf(input_path, output_path, options=None):
                     writer.write(output_file)
                 files_created += 1
 
-        elif split_type == 'range' and pages_spec:
-            # Split specific page ranges
-            page_ranges = parse_page_ranges(pages_spec, total_pages)
+        elif split_type == 'range' and options and 'ranges' in options:
+            # NEW: Split using multiple custom ranges from frontend
+            ranges = options.get('ranges', [])
 
-            for idx, (start, end) in enumerate(page_ranges):
+            if not ranges:
+                raise Exception("No ranges provided for custom split")
+
+            for idx, range_item in enumerate(ranges):
+                start = range_item.get('from', 1)
+                end = range_item.get('to', total_pages)
+
+                # Validate range
+                if start < 1 or end > total_pages or start > end:
+                    print(f"Warning: Invalid range {start}-{end}, skipping", file=sys.stderr)
+                    continue
+
                 writer = PdfWriter()
-                for page_num in range(start - 1, end):
+                # Add pages from start to end (inclusive)
+                for page_num in range(start - 1, end):  # start-1 because pages are 0-indexed
                     if 0 <= page_num < total_pages:
                         writer.add_page(reader.pages[page_num])
 
-                range_output = os.path.join(split_dir, f'pages_{start}-{end}.pdf')
+                # Create filename for this split
+                range_output = os.path.join(split_dir, f'split_{idx+1}_pages_{start}-{end}.pdf')
                 with open(range_output, 'wb') as output_file:
                     writer.write(output_file)
                 files_created += 1
+                print(f"Created split {idx+1}: pages {start}-{end}", file=sys.stderr)
+
         else:
             # Default: split each page
             for i in range(total_pages):
@@ -208,24 +261,40 @@ def split_pdf(input_path, output_path, options=None):
         import shutil
         shutil.rmtree(split_dir)
 
-        return {"status": "success", "output_path": output_path, "files_created": files_created}
+        return {
+            "status": "success",
+            "output_path": output_path,
+            "files_created": files_created,
+            "split_type": split_type
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
 def compress_pdf(input_path, output_path, options=None):
-    """Compress PDF file using PyPDF2"""
+    """Compress PDF file - ENHANCED with percentage control"""
     try:
-        compression_level = options.get('compressionLevel', 'medium') if options else 'medium'
+        compression_percentage = options.get('compressionPercentage', 50) if options else 50
+
+        # Validate percentage
+        if compression_percentage < 1 or compression_percentage > 99:
+            compression_percentage = 50
 
         reader = PdfReader(input_path)
         writer = PdfWriter()
 
         # Add all pages with compression
         for page in reader.pages:
+            page.compress_content_streams()
             writer.add_page(page)
 
-        # Enable compression
+        # Enable compression based on percentage
+        # Lower percentage = more compression
+        if compression_percentage <= 30:
+            # High compression
+            for page in writer.pages:
+                page.compress_content_streams()
+
         writer.add_metadata(reader.metadata)
 
         # Write compressed PDF
@@ -235,18 +304,18 @@ def compress_pdf(input_path, output_path, options=None):
         # Calculate compression ratio
         original_size = os.path.getsize(input_path)
         compressed_size = os.path.getsize(output_path)
-        compression_ratio = (1 - compressed_size / original_size) * 100 if original_size > 0 else 0
+        actual_compression_ratio = (1 - compressed_size / original_size) * 100 if original_size > 0 else 0
 
         return {
             "status": "success",
             "output_path": output_path,
             "original_size": original_size,
             "compressed_size": compressed_size,
-            "compression_ratio": f"{compression_ratio:.2f}%"
+            "target_percentage": compression_percentage,
+            "actual_compression_ratio": f"{actual_compression_ratio:.2f}%"
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 
 def rotate_pdf(input_path, output_path, options=None):
     """Rotate PDF pages"""
@@ -725,8 +794,18 @@ def main():
 
         elif operation == "MERGE_PDF":
             output_path = sys.argv[2]
-            input_paths = sys.argv[3:]
-            result = merge_pdfs(output_path, input_paths)
+            args = sys.argv[3:]
+            options = None
+            if args and args[-1].startswith('{') and args[-1].endswith('}'):
+                try:
+                    options = json.loads(args[-1])
+                    input_paths = args[:-1]
+                except json.JSONDecodeError:
+                    input_paths = args
+                    options = None
+            else:
+                input_paths = args
+            result = merge_pdfs(output_path, input_paths, options)
 
         elif operation == "SPLIT_PDF":
             input_path = sys.argv[2]
@@ -748,7 +827,17 @@ def main():
 
         elif operation == "IMAGES_TO_PDF":
             output_path = sys.argv[2]
-            input_paths = sys.argv[3:]
+            args = sys.argv[3:]
+            options = None
+            if args and args[-1].startswith('{') and args[-1].endswith('}'):
+                try:
+                    options = json.loads(args[-1])
+                    input_paths = args[:-1]
+                except json.JSONDecodeError:
+                    input_paths = args
+                    options = None
+            else:
+                input_paths = args
             result = images_to_pdf(output_path, input_paths)
 
         elif operation == "PDF_TO_IMAGES":

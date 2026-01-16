@@ -276,7 +276,7 @@ public class DocumentConversionService {
                 DocumentUpload upload = uploads.get(i);
                 uploadIds.add(upload.getId());
 
-                String tempFilePath = workDir + File.separator + "input_" + i + "_" + upload.getFileName();
+                String tempFilePath = workDir + File.separator + "input_" + upload.getId() + "_" + upload.getFileName();
 
                 // Download from R2
                 File inputFile = cloudflareR2Service.downloadFile(upload.getFilePath(), tempFilePath);
@@ -616,4 +616,31 @@ public class DocumentConversionService {
         }
     }
 
+    /**
+     * Get PDF page count for validation
+     */
+    public int getPdfPageCount(User user, Long uploadId) throws IOException, InterruptedException {
+        DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                .orElseThrow(() -> new RuntimeException("Upload not found"));
+        if (!upload.getUser().getId().equals(user.getId())) {
+            throw new RuntimeException("Unauthorized access");
+        }
+
+        String tempDir = baseDir + File.separator + "temp_" + System.currentTimeMillis();
+        Files.createDirectories(Paths.get(tempDir));
+
+        try {
+            String tempFilePath = tempDir + File.separator + upload.getFileName();
+            File tempFile = cloudflareR2Service.downloadFile(upload.getFilePath(), tempFilePath);
+
+            int pageCount = countPdfPagesUsingPython(tempFile);
+
+            Files.delete(tempFile.toPath());
+            Files.delete(Paths.get(tempDir));
+
+            return pageCount;
+        } catch (Exception e) {
+            throw new IOException("Failed to get PDF page count: " + e.getMessage());
+        }
+    }
 }

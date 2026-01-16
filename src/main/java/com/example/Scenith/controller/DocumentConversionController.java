@@ -101,18 +101,23 @@ public class DocumentConversionController {
     public ResponseEntity<?> mergePdfs(
             @RequestHeader("Authorization") String token,
             @RequestParam("uploadIds") List<Long> uploadIds,
-            @RequestParam(required = false) String pageOrder) {
+            @RequestParam(required = false) String pageMapping) {
         try {
             User user = documentConversionService.getUserFromToken(token);
 
             Map<String, Object> options = new HashMap<>();
-            if (pageOrder != null && !pageOrder.isEmpty()) {
+
+            // Parse page mapping if provided
+            if (pageMapping != null && !pageMapping.isEmpty()) {
                 try {
-                    List<Integer> orderList = objectMapper.readValue(pageOrder,
-                            objectMapper.getTypeFactory().constructCollectionType(List.class, Integer.class));
-                    options.put("pageOrder", orderList);
+                    List<Map<String, Object>> mappingList = objectMapper.readValue(pageMapping,
+                            objectMapper.getTypeFactory().constructCollectionType(
+                                    List.class,
+                                    objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Object.class)
+                            ));
+                    options.put("pageMapping", mappingList);
                 } catch (Exception e) {
-                    logger.warn("Failed to parse pageOrder: {}", e.getMessage());
+                    logger.warn("Failed to parse pageMapping: {}", e.getMessage());
                 }
             }
 
@@ -131,25 +136,44 @@ public class DocumentConversionController {
 
 
     /**
-     * Split PDF
+     * Split PDF - ENHANCED with multiple range support
      */
     @PostMapping("/split-pdf")
     public ResponseEntity<?> splitPdf(
             @RequestHeader("Authorization") String token,
             @RequestParam("uploadId") Long uploadId,
             @RequestParam(required = false) String splitType,
-            @RequestParam(required = false) String pages) {
+            @RequestParam(required = false) String ranges) {
         try {
             User user = documentConversionService.getUserFromToken(token);
 
             Map<String, Object> options = new HashMap<>();
             options.put("splitType", splitType != null ? splitType : "all");
-            if (pages != null) {
-                options.put("pages", pages);
+
+            // Parse multiple ranges if provided
+            if (ranges != null && !ranges.isEmpty()) {
+                try {
+                    // Expected format: [{"from":1,"to":4},{"from":8,"to":12}]
+                    List<Map<String, Integer>> rangeList = objectMapper.readValue(ranges,
+                            objectMapper.getTypeFactory().constructCollectionType(
+                                    List.class,
+                                    objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Integer.class)
+                            ));
+                    options.put("ranges", rangeList);
+                } catch (Exception e) {
+                    logger.warn("Failed to parse ranges: {}", e.getMessage());
+                    return ResponseEntity.status(400).body(Map.of(
+                            "message", "Invalid ranges format",
+                            "error", e.getMessage()
+                    ));
+                }
             }
 
             DocumentConversion result = documentConversionService.splitPdf(user, uploadId, options);
-            return ResponseEntity.ok(result);
+            return ResponseEntity.ok(Map.of(
+                    "message", "PDF split successfully",
+                    "data", result
+            ));
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
                     "message", "PDF split failed",
@@ -159,26 +183,57 @@ public class DocumentConversionController {
     }
 
     /**
-     * Compress PDF - simplified with 3 levels
+     * Compress PDF - ENHANCED with percentage support
      */
     @PostMapping("/compress-pdf")
     public ResponseEntity<?> compressPdf(
             @RequestHeader("Authorization") String token,
             @RequestParam("uploadId") Long uploadId,
-            @RequestParam(required = false, defaultValue = "medium") String compressionLevel) {
+            @RequestParam(required = false, defaultValue = "medium") String compressionLevel,
+            @RequestParam(required = false) Integer customPercentage) {
         try {
             User user = documentConversionService.getUserFromToken(token);
 
-            // Validate compression level
-            if (!List.of("low", "medium", "high").contains(compressionLevel.toLowerCase())) {
-                compressionLevel = "medium";
+            Map<String, Object> options = new HashMap<>();
+
+            // Handle custom percentage
+            if (customPercentage != null) {
+                // Validate percentage range (1-99)
+                if (customPercentage < 1 || customPercentage > 99) {
+                    return ResponseEntity.status(400).body(Map.of(
+                            "message", "Invalid compression percentage",
+                            "error", "Percentage must be between 1 and 99"
+                    ));
+                }
+                options.put("compressionLevel", "custom");
+                options.put("compressionPercentage", customPercentage);
+            } else {
+                // Map predefined levels to percentages
+                String level = compressionLevel.toLowerCase();
+                int percentage;
+                switch (level) {
+                    case "low":
+                        percentage = 75;
+                        break;
+                    case "medium":
+                        percentage = 50;
+                        break;
+                    case "high":
+                        percentage = 25;
+                        break;
+                    default:
+                        percentage = 50;
+                        level = "medium";
+                }
+                options.put("compressionLevel", level);
+                options.put("compressionPercentage", percentage);
             }
 
-            Map<String, Object> options = new HashMap<>();
-            options.put("compressionLevel", compressionLevel.toLowerCase());
-
             DocumentConversion result = documentConversionService.compressPdf(user, uploadId, options);
-            return ResponseEntity.ok(result);
+            return ResponseEntity.ok(Map.of(
+                    "message", "PDF compressed successfully",
+                    "data", result
+            ));
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
                     "message", "PDF compression failed",
@@ -443,6 +498,27 @@ public class DocumentConversionController {
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
                     "message", "PDF rearrange-merge failed",
+                    "error", e.getMessage()
+            ));
+        }
+    }
+    /**
+     * Get PDF page count for frontend validation
+     */
+    @GetMapping("/page-count/{uploadId}")
+    public ResponseEntity<?> getPdfPageCount(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long uploadId) {
+        try {
+            User user = documentConversionService.getUserFromToken(token);
+            int pageCount = documentConversionService.getPdfPageCount(user, uploadId);
+            return ResponseEntity.ok(Map.of(
+                    "uploadId", uploadId,
+                    "pageCount", pageCount
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of(
+                    "message", "Failed to get page count",
                     "error", e.getMessage()
             ));
         }
