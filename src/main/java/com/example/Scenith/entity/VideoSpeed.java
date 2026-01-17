@@ -40,4 +40,7 @@ public class VideoSpeed {
 
     @Column(name = "last_modified", nullable = false)
     private LocalDateTime lastModified;
+
+    @Column(length = 10)
+    private String quality;
 }

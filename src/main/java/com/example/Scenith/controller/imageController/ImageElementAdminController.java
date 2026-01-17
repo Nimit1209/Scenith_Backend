@@ -152,4 +152,42 @@ public class ImageElementAdminController {
                 .body(Map.of("message", "Failed to delete element: " + e.getMessage()));
         }
     }
+    /**
+     * Bulk update elements
+     * PUT /api/admin/image-elements/bulk-update
+     */
+    @PutMapping("/bulk-update")
+    public ResponseEntity<?> bulkUpdateElements(
+            @RequestHeader("Authorization") String token,
+            @RequestBody Map<String, Object> request) {
+        try {
+            User user = imageEditorService.getUserFromToken(token);
+            if (!user.isAdmin()) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                        .body(Map.of("message", "Access denied: Admin role required"));
+            }
+
+            @SuppressWarnings("unchecked")
+            List<Integer> elementIds = (List<Integer>) request.get("elementIds");
+            String category = (String) request.get("category");
+            String tags = (String) request.get("tags");
+            Boolean isActive = (Boolean) request.get("isActive");
+
+            if (elementIds == null || elementIds.isEmpty()) {
+                return ResponseEntity.badRequest()
+                        .body(Map.of("message", "No elements selected"));
+            }
+
+            int updatedCount = imageElementService.bulkUpdateElements(
+                    elementIds, category, tags, isActive);
+
+            return ResponseEntity.ok(Map.of(
+                    "message", "Updated " + updatedCount + " elements successfully",
+                    "count", updatedCount
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("message", "Bulk update failed: " + e.getMessage()));
+        }
+    }
 }

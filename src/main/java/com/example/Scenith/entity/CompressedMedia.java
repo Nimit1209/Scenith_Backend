@@ -41,7 +41,7 @@ public class CompressedMedia {
     @Column(name = "status", nullable = false)
     private String status;
 
-    @Column(name = "error_message",columnDefinition = "TEXT")
+    @Column(name = "error_message", length = 4000)  // or 4000
     private String errorMessage;
 
     public CompressedMedia() {

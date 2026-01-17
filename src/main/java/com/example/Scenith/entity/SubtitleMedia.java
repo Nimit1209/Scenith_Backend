@@ -39,6 +39,9 @@ public class SubtitleMedia {
     @Column(name = "status", nullable = false)
     private String status;
 
+    @Column(length = 10)
+    private String quality;
+
     private double progress;
 
     public SubtitleMedia() {

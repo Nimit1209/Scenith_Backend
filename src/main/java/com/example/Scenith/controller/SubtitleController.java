@@ -88,10 +88,11 @@ public class SubtitleController {
     @PostMapping("/process/{mediaId}")
     public ResponseEntity<?> processSubtitles(
             @RequestHeader("Authorization") String token,
-            @PathVariable Long mediaId) {
+            @PathVariable Long mediaId,
+            @RequestParam(required = false) String quality) {
         try {
             User user = subtitleService.getUserFromToken(token);
-            subtitleService.queueProcessSubtitles(user, mediaId); // Updated method call
+            subtitleService.queueProcessSubtitles(user, mediaId,quality); // Updated method call
             return ResponseEntity.ok(Map.of("message", "Subtitle processing queued successfully for mediaId: " + mediaId));
         } catch (IllegalArgumentException | IllegalStateException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("message", e.getMessage()));

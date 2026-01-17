@@ -10,4 +10,5 @@ public class VideoSpeedResponse {
     private Double speed;
     private String cdnUrl;
     private String originalFilePath;
+    private String quality;
 }

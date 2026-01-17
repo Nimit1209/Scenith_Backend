@@ -17,6 +17,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @RestController
@@ -80,27 +81,28 @@ public class VideoSpeedController {
     }
 
     @PostMapping("/{id}/export")
-    public ResponseEntity<VideoSpeedResponse> initiateExport(
+    public ResponseEntity<?> initiateExport(
             @RequestHeader("Authorization") String token,
-            @PathVariable Long id) {
+            @PathVariable Long id,
+            @RequestParam(required = false) String quality) {
         try {
             User user = getUserFromToken(token);
-            VideoSpeed video = videoSpeedService.initiateExport(id, user);
+            VideoSpeed video = videoSpeedService.initiateExport(id, user, quality);
             VideoSpeedResponse response = mapToResponse(video);
-            logger.info("Export initiated: id={}", id);
+            logger.info("Export initiated: id={}, quality={}", id, quality);
             return ResponseEntity.ok(response);
         } catch (IOException e) {
             logger.error("Error initiating export: id={}, error={}", id, e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(new VideoSpeedResponse());
-        } catch (IllegalStateException e) {
+                    .body(Map.of("error", "Failed to initiate export: " + e.getMessage()));
+        } catch (IllegalArgumentException | IllegalStateException e) {
             logger.warn("Cannot initiate export for video id={}: {}", id, e.getMessage());
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(new VideoSpeedResponse());
+                    .body(Map.of("error", e.getMessage()));
         } catch (RuntimeException e) {
             logger.warn("Unauthorized or video not found for id={}: {}", id, e.getMessage());
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                    .body(new VideoSpeedResponse());
+                    .body(Map.of("error", e.getMessage()));
         }
     }
 

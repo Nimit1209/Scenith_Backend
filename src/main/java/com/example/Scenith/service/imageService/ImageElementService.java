@@ -18,6 +18,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 public class ImageElementService {
@@ -196,5 +197,34 @@ public class ImageElementService {
      */
     public List<ImageElement> getAllElements() {
         return elementRepository.findAll();
+    }
+
+    /**
+     * Bulk update elements
+     */
+    @Transactional
+    public int bulkUpdateElements( List<Integer> elementIds, String category, String tags, Boolean isActive) {
+        logger.info("Bulk updating {} elements", elementIds.size());
+
+        List<Long> idsAsLong = elementIds.stream()
+                .map(Integer::longValue)
+                .collect(Collectors.toList());
+        List<ImageElement> elements = elementRepository.findAllById(idsAsLong);
+        for (ImageElement element : elements) {
+            if (category != null && !category.trim().isEmpty()) {
+                element.setCategory(category);
+            }
+            if (tags != null) {
+                element.setTags(tags);
+            }
+            if (isActive != null) {
+                element.setIsActive(isActive);
+            }
+        }
+
+        elementRepository.saveAll(elements);
+        logger.info("Bulk update completed for {} elements", elements.size());
+
+        return elements.size();
     }
 }

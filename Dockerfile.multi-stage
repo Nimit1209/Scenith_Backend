@@ -4,7 +4,7 @@
 # ============================================================================
 FROM amazonlinux:2 AS base-ai
 
-# Install system dependencies (EXACTLY as your original)
+# Install system dependencies
 RUN yum update -y && \
     yum groupinstall -y "Development Tools" && \
     yum install -y wget tar gzip bzip2-devel nasm pkg-config cmake3 unzip \
@@ -19,19 +19,35 @@ RUN yum update -y && \
     ln -sf /usr/bin/cmake3 /usr/bin/cmake && \
     yum clean all
 
+# Create working directory
+RUN mkdir -p /tmp/ffmpeg_sources
+
+# Install librsvg with all its dependencies (includes HarfBuzz + Pango)
+# This ensures they're all compatible with each other from the system repos
+RUN yum install -y \
+    librsvg2 \
+    librsvg2-devel \
+    librsvg2-tools \
+    harfbuzz \
+    harfbuzz-devel \
+    pango \
+    pango-devel \
+    glib2-devel \
+    cairo-devel \
+    && yum clean all
+
 # Install ghostscript
 RUN yum install -y --setopt=protected_multilib=false \
     ghostscript-9.54.0-9.amzn2.0.13.x86_64 || \
     yum install -y ghostscript.x86_64
 
-# Create working directory
-RUN mkdir -p /tmp/ffmpeg_sources
-
-# Install ImageMagick
+# Install ImageMagick WITHOUT custom HarfBuzz interference
+# Use system libraries for SVG support
 RUN cd /tmp && \
     wget https://github.com/ImageMagick/ImageMagick/archive/refs/tags/7.1.2-2.tar.gz && \
     tar -xzf 7.1.2-2.tar.gz && \
     cd ImageMagick-7.1.2-2 && \
+    PKG_CONFIG_PATH="/usr/lib64/pkgconfig:/usr/lib/pkgconfig" \
     ./configure \
         --prefix=/usr/local \
         --with-quantum-depth=16 \
@@ -43,7 +59,9 @@ RUN cd /tmp && \
         --with-webp=yes \
         --with-openjp2=yes \
         --with-gslib=yes \
-        --with-rsvg=yes && \
+        --with-rsvg=yes \
+        --with-fontconfig=yes \
+        --with-freetype=yes && \
     make -j$(nproc) && \
     make install && \
     ldconfig && \
@@ -69,7 +87,8 @@ RUN cd /tmp/ffmpeg_sources && \
     make install && \
     ldconfig
 
-# Install harfbuzz
+# Install HarfBuzz from source for FFmpeg libass ONLY
+# We install this AFTER ImageMagick to avoid conflicts
 RUN cd /tmp/ffmpeg_sources && \
     wget https://github.com/harfbuzz/harfbuzz/releases/download/8.5.0/harfbuzz-8.5.0.tar.xz && \
     tar -xJf harfbuzz-8.5.0.tar.xz && \
@@ -158,7 +177,7 @@ RUN cd /tmp && \
     ln -sf /usr/local/bin/pip3.11 /usr/local/bin/pip3 && \
     ln -sf /usr/local/bin/pip3.11 /usr/local/bin/pip
 
-# Install Python AI dependencies (EXACTLY as your original)
+# Install Python AI dependencies
 RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
     /usr/local/bin/pip3.11 install --upgrade pip setuptools wheel
 
@@ -173,13 +192,13 @@ RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH 
     /usr/local/bin/pip3.11 install "onnxruntime==1.16.3"
 
 RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
-    /usr/local/bin/pip3.11 install "Pillow==11.3.0" && \
-    /usr/local/bin/pip3.11 install "opencv-python-headless" && \
-    /usr/local/bin/pip3.11 install "scipy"
+    /usr/local/bin/pip3.11 install "Pillow==10.4.0" && \
+    /usr/local/bin/pip3.11 install "opencv-python-headless==4.10.0.84" && \
+    /usr/local/bin/pip3.11 install "scipy==1.14.1"
 
 RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
-    /usr/local/bin/pip3.11 install "pymatting" "pooch" "tqdm" "requests" && \
-    /usr/local/bin/pip3.11 install "jsonschema" "click" "aiohttp" && \
+    /usr/local/bin/pip3.11 install "pymatting==1.1.13" "pooch==1.8.2" "tqdm==4.67.1" "requests==2.32.3" && \
+    /usr/local/bin/pip3.11 install "jsonschema==4.23.0" "click==8.1.8" "aiohttp==3.11.11" && \
     /usr/local/bin/pip3.11 install "rembg==2.0.67"
 
 RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
@@ -208,13 +227,15 @@ RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH 
 # Clean up build files
 RUN rm -rf /tmp/ffmpeg_sources /tmp/Python-3.11.10* /tmp/*.tar.gz
 
-# Configure library paths
-RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local-libs.conf && \
+# Configure library paths - CRITICAL: System libs come FIRST
+RUN echo "/usr/lib64" > /etc/ld.so.conf.d/local-libs.conf && \
+    echo "/usr/lib" >> /etc/ld.so.conf.d/local-libs.conf && \
     echo "/usr/lib64/openssl11" >> /etc/ld.so.conf.d/local-libs.conf && \
+    echo "/usr/local/lib" >> /etc/ld.so.conf.d/local-libs.conf && \
     ldconfig
 
-# Set base environment variables
-ENV LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:/usr/lib:/lib
+# Set base environment variables - System paths come FIRST
+ENV LD_LIBRARY_PATH=/usr/lib64:/usr/lib:/usr/lib64/openssl11:/usr/local/lib
 ENV PATH=/usr/local/bin:$PATH
 ENV FFMPEG_PATH=/usr/local/bin/ffmpeg
 ENV FFPROBE_PATH=/usr/local/bin/ffprobe
@@ -283,5 +304,5 @@ COPY target/Scenith-0.0.1-SNAPSHOT.jar app.jar
 # Expose application port
 EXPOSE 1000
 
-# Run the application
-ENTRYPOINT ["sh", "-c", "export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:/usr/lib:/lib && export OMP_NUM_THREADS=1 && echo 'Starting application...' && echo 'Environment check:' && ls -la /usr/local/bin/ffmpeg && ls -la /usr/local/bin/python3.11 && ls -la /usr/local/bin/magick && ls -la /app/scripts/ && java $JAVA_OPTS -jar app.jar"]
+# Run the application with CORRECT library path order
+ENTRYPOINT ["sh", "-c", "export LD_LIBRARY_PATH=/usr/lib64:/usr/lib:/usr/lib64/openssl11:/usr/local/lib && export OMP_NUM_THREADS=1 && java $JAVA_OPTS -jar app.jar"]

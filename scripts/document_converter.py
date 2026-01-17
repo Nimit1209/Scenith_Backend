@@ -318,7 +318,7 @@ def compress_pdf(input_path, output_path, options=None):
         return {"status": "error", "message": str(e)}
 
 def rotate_pdf(input_path, output_path, options=None):
-    """Rotate PDF pages"""
+    """Rotate PDF pages - supports all pages or specific page"""
     try:
         degrees = int(options.get('degrees', 90)) if options else 90
         pages_spec = options.get('pages', 'all') if options else 'all'
@@ -333,10 +333,22 @@ def rotate_pdf(input_path, output_path, options=None):
         total_pages = len(reader.pages)
 
         if pages_spec == 'all':
+            # Rotate all pages
             pages_to_rotate = list(range(total_pages))
         else:
-            pages_to_rotate = parse_page_list(pages_spec, total_pages)
+            # Parse specific page number or range
+            try:
+                # Try to parse as single page number first
+                page_num = int(pages_spec)
+                if 1 <= page_num <= total_pages:
+                    pages_to_rotate = [page_num - 1]  # Convert to 0-based index
+                else:
+                    raise ValueError(f"Page number {page_num} out of range (1-{total_pages})")
+            except ValueError:
+                # If not a single number, try parsing as range like "1,3,5"
+                pages_to_rotate = parse_page_list(pages_spec, total_pages)
 
+        # Add pages with rotation
         for i in range(total_pages):
             page = reader.pages[i]
             if i in pages_to_rotate:
@@ -346,10 +358,14 @@ def rotate_pdf(input_path, output_path, options=None):
         with open(output_path, 'wb') as output_file:
             writer.write(output_file)
 
-        return {"status": "success", "output_path": output_path, "rotated_pages": len(pages_to_rotate)}
+        return {
+            "status": "success",
+            "output_path": output_path,
+            "rotated_pages": len(pages_to_rotate),
+            "total_pages": total_pages
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 
 def images_to_pdf(output_path, input_paths):
     """Convert multiple images to a single PDF"""

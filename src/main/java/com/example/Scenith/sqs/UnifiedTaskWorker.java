@@ -167,9 +167,16 @@ public class UnifiedTaskWorker {
     private void handleProcessSubtitles(Map<String, Object> taskDetails) throws IOException, InterruptedException {
         Long mediaId = getLongValue(taskDetails, "mediaId");
         Long userId = getLongValue(taskDetails, "userId");
-        subtitleService.processSubtitlesTask(mediaId, userId);
+        String quality = getStringValue(taskDetails, "quality");   // ← this is the fix
+
+        subtitleService.processSubtitlesTask(mediaId, userId, quality);
     }
 
+    private String getStringValue(Map<String, Object> map, String key) {
+        Object value = map.get(key);
+        if (value == null) return null;
+        return value.toString();  // safe conversion
+    }
     private void handleVideoFilter(Map<String, Object> taskDetails) {
         Map<String, String> stringMap = convertToStringMap(taskDetails);
         videoFilterJobService.processJobFromSqs(stringMap);
