@@ -48,60 +48,62 @@ public class ElementDownloadService {
      */
     @Transactional
     public DownloadResult downloadElement(Long elementId, String format, String resolution,
-                                          User user, String ipAddress) throws IOException {
-        logger.info("Downloading element {} in format {} with resolution {}", elementId, format, resolution);
+                                          String color, User user, String ipAddress) throws IOException {
+        logger.info("Downloading element {} in format {} | resolution {} | color {}",
+                elementId, format, resolution, color);
 
-        // Validate element exists
+        // 1. Validate element exists
         ImageElement element = elementRepository.findById(elementId)
                 .orElseThrow(() -> new IllegalArgumentException("Element not found"));
 
-        // Record download
+        // 2. Record download (moved early - good practice)
         recordDownload(elementId, user != null ? user.getId() : null, format, resolution, ipAddress);
 
-        // Get R2 path from element
+        // 3. Get R2 path
         String r2Path = element.getFilePath();
-
-        if (r2Path == null || r2Path.isEmpty()) {
-            throw new IOException("Element file path not found");
+        if (r2Path == null || r2Path.trim().isEmpty()) {
+            throw new IllegalStateException("Element has no file path in storage");
         }
 
-        // Check if file exists in R2
+        // 4. Verify file really exists in R2
         if (!cloudflareR2Service.fileExists(r2Path)) {
-            throw new IOException("Element file not found in R2: " + r2Path);
+            throw new IOException("File not found in Cloudflare R2: " + r2Path);
         }
 
-        // Download file from R2 to temp location
-        String tempFileName = "element_download_" + elementId + "_" + System.currentTimeMillis() +
-                getExtension(element.getFileFormat());
-        String tempPath = System.getProperty("java.io.tmpdir") + File.separator +
-                "videoeditor" + File.separator + tempFileName;
+        // 5. Prepare temporary file (with safe naming)
+        String tempFileName = String.format("element_dl_%d_%d%s",
+                elementId,
+                System.currentTimeMillis(),
+                getExtension(element.getFileFormat()));
 
+        String tempDir = System.getProperty("java.io.tmpdir") + File.separator + "videoeditor";
+        Files.createDirectories(Paths.get(tempDir)); // make sure directory exists
+
+        Path tempPath = Paths.get(tempDir, tempFileName);
         File tempFile = null;
+
         try {
-            // Download from R2
-            tempFile = cloudflareR2Service.downloadFile(r2Path, tempPath);
-            logger.info("Downloaded element from R2 to temp: {}", tempFile.getAbsolutePath());
+            // Download from R2 → local temp file
+            tempFile = cloudflareR2Service.downloadFile(r2Path, tempPath.toString());
+            logger.debug("Downloaded from R2 to temp: {}", tempFile.getAbsolutePath());
 
-            // Handle download based on format
-            format = format.toUpperCase();
+            format = (format != null ? format.trim().toUpperCase() : "PNG");
 
-            if ("SVG".equals(format)) {
-                return downloadSvg(tempFile.toPath(), element.getName());
-            } else if ("PNG".equals(format)) {
-                return downloadAsPng(tempFile.toPath(), element, resolution);
-            } else if ("JPG".equals(format) || "JPEG".equals(format)) {
-                return downloadAsJpg(tempFile.toPath(), element, resolution);
-            } else {
-                throw new IllegalArgumentException("Unsupported format: " + format);
-            }
+            return switch (format) {
+                case "SVG" -> downloadSvg(tempPath, element.getName(), color);
+                case "PNG" -> downloadAsPng(tempPath, element, resolution, color);
+                case "JPG", "JPEG" -> downloadAsJpg(tempPath, element, resolution, color);
+                default -> throw new IllegalArgumentException("Unsupported download format: " + format);
+            };
+
         } finally {
-            // Clean up temp file
+            // Important: always try to clean up
             if (tempFile != null && tempFile.exists()) {
                 try {
                     Files.delete(tempFile.toPath());
-                    logger.debug("Deleted temp file: {}", tempFile.getAbsolutePath());
-                } catch (IOException e) {
-                    logger.warn("Failed to delete temp file: {}", tempFile.getAbsolutePath());
+                    logger.debug("Cleaned up temp file: {}", tempFile);
+                } catch (Exception e) {
+                    logger.warn("Failed to delete temporary file: {} → {}", tempFile, e.getMessage());
                 }
             }
         }
@@ -119,7 +121,7 @@ public class ElementDownloadService {
     /**
      * Convert and download as PNG
      */
-    private DownloadResult downloadAsPng(Path filePath, ImageElement element, String resolution)
+    private DownloadResult downloadAsPng(Path filePath, ImageElement element, String resolution, String color)
             throws IOException {
         int[] dimensions = parseResolution(resolution, element);
         int width = dimensions[0];
@@ -128,8 +130,8 @@ public class ElementDownloadService {
         byte[] pngData;
 
         if (element.getFileFormat().equalsIgnoreCase("SVG")) {
-            // Convert SVG to PNG using Batik
-            pngData = convertSvgToPng(filePath, width, height);
+            // Convert SVG to PNG using Batik (with color if provided)
+            pngData = convertSvgToPng(filePath, width, height, color);
         } else {
             // Convert raster image to PNG
             pngData = convertRasterToPng(filePath, width, height);
@@ -142,7 +144,7 @@ public class ElementDownloadService {
     /**
      * Convert and download as JPG
      */
-    private DownloadResult downloadAsJpg(Path filePath, ImageElement element, String resolution)
+    private DownloadResult downloadAsJpg(Path filePath, ImageElement element, String resolution, String color)
             throws IOException {
         int[] dimensions = parseResolution(resolution, element);
         int width = dimensions[0];
@@ -151,8 +153,8 @@ public class ElementDownloadService {
         byte[] jpgData;
 
         if (element.getFileFormat().equalsIgnoreCase("SVG")) {
-            // Convert SVG to JPG using Batik
-            jpgData = convertSvgToJpg(filePath, width, height);
+            // Convert SVG to JPG using Batik (with color if provided)
+            jpgData = convertSvgToJpg(filePath, width, height, color);
         } else {
             // Convert raster image to JPG
             jpgData = convertRasterToJpg(filePath, width, height);
@@ -165,9 +167,24 @@ public class ElementDownloadService {
     /**
      * Convert SVG to PNG using Apache Batik
      */
-    private byte[] convertSvgToPng(Path svgPath, int width, int height) throws IOException {
-        try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-             InputStream inputStream = Files.newInputStream(svgPath)) {
+    private byte[] convertSvgToPng(Path svgPath, int width, int height, String color) throws IOException {
+        try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
+
+            // Read and potentially modify SVG content
+            String svgContent = Files.readString(svgPath);
+
+            // Apply color if provided
+            if (color != null && !color.isEmpty()) {
+                if (!color.startsWith("#")) {
+                    color = "#" + color;
+                }
+                svgContent = svgContent.replaceAll("fill=\"#[0-9a-fA-F]{3,6}\"", "fill=\"" + color + "\"");
+                svgContent = svgContent.replaceAll("stroke=\"#[0-9a-fA-F]{3,6}\"", "stroke=\"" + color + "\"");
+                svgContent = svgContent.replaceAll("fill:#[0-9a-fA-F]{3,6}", "fill:" + color);
+                svgContent = svgContent.replaceAll("stroke:#[0-9a-fA-F]{3,6}", "stroke:" + color);
+            }
+
+            InputStream inputStream = new ByteArrayInputStream(svgContent.getBytes());
 
             PNGTranscoder transcoder = new PNGTranscoder();
             transcoder.addTranscodingHint(PNGTranscoder.KEY_WIDTH, (float) width);
@@ -184,12 +201,24 @@ public class ElementDownloadService {
         }
     }
 
-    /**
-     * Convert SVG to JPG using Apache Batik
-     */
-    private byte[] convertSvgToJpg(Path svgPath, int width, int height) throws IOException {
-        try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-             InputStream inputStream = Files.newInputStream(svgPath)) {
+    private byte[] convertSvgToJpg(Path svgPath, int width, int height, String color) throws IOException {
+        try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
+
+            // Read and potentially modify SVG content
+            String svgContent = Files.readString(svgPath);
+
+            // Apply color if provided
+            if (color != null && !color.isEmpty()) {
+                if (!color.startsWith("#")) {
+                    color = "#" + color;
+                }
+                svgContent = svgContent.replaceAll("fill=\"#[0-9a-fA-F]{3,6}\"", "fill=\"" + color + "\"");
+                svgContent = svgContent.replaceAll("stroke=\"#[0-9a-fA-F]{3,6}\"", "stroke=\"" + color + "\"");
+                svgContent = svgContent.replaceAll("fill:#[0-9a-fA-F]{3,6}", "fill:" + color);
+                svgContent = svgContent.replaceAll("stroke:#[0-9a-fA-F]{3,6}", "stroke:" + color);
+            }
+
+            InputStream inputStream = new ByteArrayInputStream(svgContent.getBytes());
 
             JPEGTranscoder transcoder = new JPEGTranscoder();
             transcoder.addTranscodingHint(JPEGTranscoder.KEY_WIDTH, (float) width);
@@ -365,5 +394,32 @@ public class ElementDownloadService {
         public Resource getResource() { return resource; }
         public String getFilename() { return filename; }
         public String getContentType() { return contentType; }
+    }
+
+    /**
+     * Download SVG with optional color replacement
+     */
+    private DownloadResult downloadSvg(Path filePath, String elementName, String color) throws IOException {
+        String svgContent = Files.readString(filePath);
+
+        // If color is provided, replace fill and stroke colors
+        if (color != null && !color.isEmpty()) {
+            // Ensure color has # prefix
+            if (!color.startsWith("#")) {
+                color = "#" + color;
+            }
+
+            // Replace common SVG color attributes
+            svgContent = svgContent.replaceAll("fill=\"#[0-9a-fA-F]{3,6}\"", "fill=\"" + color + "\"");
+            svgContent = svgContent.replaceAll("stroke=\"#[0-9a-fA-F]{3,6}\"", "stroke=\"" + color + "\"");
+
+            // Also handle fill: and stroke: in style attributes
+            svgContent = svgContent.replaceAll("fill:#[0-9a-fA-F]{3,6}", "fill:" + color);
+            svgContent = svgContent.replaceAll("stroke:#[0-9a-fA-F]{3,6}", "stroke:" + color);
+        }
+
+        byte[] fileContent = svgContent.getBytes();
+        String filename = sanitizeFilename(elementName) + ".svg";
+        return new DownloadResult(new ByteArrayResource(fileContent), filename, "image/svg+xml");
     }
 }

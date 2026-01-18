@@ -314,6 +314,7 @@ public class ImageEditorController {
     public ResponseEntity<Resource> downloadElement(
             @PathVariable Long id,
             @RequestParam String format,
+            @RequestParam(required = false) String color,  // ADD THIS
             @RequestParam(required = false) String resolution,
             @RequestHeader(value = "Authorization", required = false) String token,
             HttpServletRequest request) {
@@ -330,7 +331,7 @@ public class ImageEditorController {
             String ipAddress = request.getRemoteAddr();
 
             ElementDownloadService.DownloadResult result =
-                    elementDownloadService.downloadElement(id, format, resolution, user, ipAddress);
+                    elementDownloadService.downloadElement(id, format, resolution, color, user, ipAddress);
 
             return ResponseEntity.ok()
                     .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + result.getFilename() + "\"")
