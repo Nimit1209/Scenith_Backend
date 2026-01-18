@@ -26,20 +26,21 @@ public class DocumentUploadService {
 
     private static final Logger logger = LoggerFactory.getLogger(DocumentUploadService.class);
 
-    @Autowired
-    private JwtUtil jwtUtil;
-
-    @Autowired
-    private UserRepository userRepository;
-
-    @Autowired
-    private CloudflareR2Service cloudflareR2Service;
-
-    @Autowired
-    private DocumentUploadRepository documentUploadRepository;
+    private final JwtUtil jwtUtil;
+    private final UserRepository userRepository;
+    private final CloudflareR2Service cloudflareR2Service;
+    private final DocumentUploadRepository documentUploadRepository;
 
     @Value("${app.base-dir:/tmp}")
     private String baseDir;
+
+    @Autowired
+    public DocumentUploadService(JwtUtil jwtUtil, UserRepository userRepository, CloudflareR2Service cloudflareR2Service, DocumentUploadRepository documentUploadRepository) {
+        this.jwtUtil = jwtUtil;
+        this.userRepository = userRepository;
+        this.cloudflareR2Service = cloudflareR2Service;
+        this.documentUploadRepository = documentUploadRepository;
+    }
 
     /**
      * Upload multiple documents
