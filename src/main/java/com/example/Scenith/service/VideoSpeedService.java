@@ -554,7 +554,7 @@ public class VideoSpeedService {
                         try {
                             Files.delete(p);
                         } catch (IOException e) {
-                            logger.warn("Failed to delete temp file: {}", p, e);
+                            logger.warn("Failed to dele te temp file: {}", p, e);
                         }
                     });
             logger.info("Cleaned up temp directory: {}", tempDir);
@@ -569,5 +569,38 @@ public class VideoSpeedService {
     private String sanitizeFilename(String filename) {
         if (filename == null) return "video_" + System.currentTimeMillis() + ".mp4";
         return filename.toLowerCase().replaceAll("[^a-z0-9._-]", "_");
+    }
+
+    @Transactional
+    public void deleteVideo(Long id, User user) throws IOException {
+        logger.info("Deleting video for user: {}, videoId: {}", user.getId(), id);
+
+        VideoSpeed video = videoSpeedRepository.findByIdAndUser(id, user)
+                .orElseThrow(() -> new RuntimeException("Video not found or unauthorized: " + id));
+
+        // Don't allow deletion if video is being processed
+        if ("PROCESSING".equals(video.getStatus()) || "PENDING".equals(video.getStatus())) {
+            throw new IllegalStateException("Cannot delete video while it is being processed");
+        }
+
+        // Delete files from R2
+        try {
+            if (video.getOriginalFilePath() != null) {
+                cloudflareR2Service.deleteFile(video.getOriginalFilePath());
+                logger.info("Deleted original file from R2: {}", video.getOriginalFilePath());
+            }
+
+            if (video.getOutputFilePath() != null) {
+                cloudflareR2Service.deleteFile(video.getOutputFilePath());
+                logger.info("Deleted output file from R2: {}", video.getOutputFilePath());
+            }
+        } catch (IOException e) {
+            logger.warn("Failed to delete some files from R2 for videoId: {}", id, e);
+            // Continue with DB deletion even if R2 deletion fails
+        }
+
+        // Delete from database
+        videoSpeedRepository.delete(video);
+        logger.info("Successfully deleted video for user: {}, videoId: {}", user.getId(), id);
     }
 }

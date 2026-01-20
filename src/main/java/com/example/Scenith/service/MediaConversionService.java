@@ -5,6 +5,7 @@ import com.example.Scenith.entity.User;
 import com.example.Scenith.repository.ConvertedMediaRepository;
 import com.example.Scenith.repository.UserRepository;
 import com.example.Scenith.security.JwtUtil;
+import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -483,5 +484,45 @@ public class MediaConversionService {
             return fileName.substring(0, lastDotIndex);
         }
         return fileName;
+    }
+    @Transactional
+    public void deleteMedia(User user, Long mediaId) throws IOException {
+        logger.info("Deleting converted media for user: {}, mediaId: {}", user.getId(), mediaId);
+
+        ConvertedMedia convertedMedia = convertedMediaRepository.findById(mediaId)
+                .orElseThrow(() -> {
+                    logger.error("Media not found for id: {}", mediaId);
+                    return new IllegalArgumentException("Media not found");
+                });
+
+        if (!convertedMedia.getUser().getId().equals(user.getId())) {
+            logger.error("User {} not authorized to delete media {}", user.getId(), mediaId);
+            throw new IllegalArgumentException("Not authorized to delete this media");
+        }
+
+        // Don't allow deletion if media is being processed
+        if ("PROCESSING".equals(convertedMedia.getStatus())) {
+            throw new IllegalStateException("Cannot delete media while it is being processed");
+        }
+
+        // Delete files from R2
+        try {
+            if (convertedMedia.getOriginalPath() != null) {
+                cloudflareR2Service.deleteFile(convertedMedia.getOriginalPath());
+                logger.info("Deleted original file from R2: {}", convertedMedia.getOriginalPath());
+            }
+
+            if (convertedMedia.getProcessedPath() != null) {
+                cloudflareR2Service.deleteFile(convertedMedia.getProcessedPath());
+                logger.info("Deleted processed file from R2: {}", convertedMedia.getProcessedPath());
+            }
+        } catch (IOException e) {
+            logger.warn("Failed to delete some files from R2 for mediaId: {}", mediaId, e);
+            // Continue with DB deletion even if R2 deletion fails
+        }
+
+        // Delete from database
+        convertedMediaRepository.delete(convertedMedia);
+        logger.info("Successfully deleted converted media for user: {}, mediaId: {}", user.getId(), mediaId);
     }
 }

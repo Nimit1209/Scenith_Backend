@@ -80,4 +80,19 @@ public class CompressionController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("message", "Failed to update target size: " + e.getMessage()));
         }
     }
+    @DeleteMapping("/delete/{mediaId}")
+    public ResponseEntity<?> deleteMedia(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long mediaId) {
+        try {
+            User user = compressionService.getUserFromToken(token);
+            compressionService.deleteMedia(user, mediaId);
+            return ResponseEntity.ok(Map.of("message", "Media deleted successfully"));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("message", e.getMessage()));
+        } catch (IOException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("message", "Delete failed: " + e.getMessage()));
+        }
+    }
 }

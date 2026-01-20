@@ -79,4 +79,21 @@ public class MediaConversionController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("message", "Failed to retrieve media: " + e.getMessage()));
         }
     }
+
+    @DeleteMapping("/delete/{mediaId}")
+    public ResponseEntity<?> deleteMedia(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long mediaId) {
+        try {
+            User user = mediaConversionService.getUserFromToken(token);
+            mediaConversionService.deleteMedia(user, mediaId);
+            return ResponseEntity.ok(Map.of("message", "Media deleted successfully"));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(Map.of("message", e.getMessage()));
+        } catch (IOException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("message", "Delete failed: " + e.getMessage()));
+        }
+    }
 }

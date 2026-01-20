@@ -895,11 +895,29 @@ public class SubtitleService {
 
       concatenateBatches(tempVideoFiles, outputFile.getAbsolutePath(), fps, tempDir);
     } finally {
-      // Clean up temp directory
+      // Clean up temp directory - DELETE ALL FILES FIRST, THEN DIRECTORY
       try {
-        Files.deleteIfExists(tempDir.toPath());
+        if (tempDir.exists()) {
+          // Delete all files in directory first
+          File[] files = tempDir.listFiles();
+          if (files != null) {
+            for (File file : files) {
+              try {
+                Files.deleteIfExists(file.toPath());
+                logger.debug("Deleted temp file: {}", file.getName());
+              } catch (IOException e) {
+                logger.warn("Failed to delete temp file: {}", file.getName(), e);
+              }
+            }
+          }
+
+          // Now delete the empty directory
+          Files.deleteIfExists(tempDir.toPath());
+          logger.debug("Deleted temp directory: {}", tempDir.getAbsolutePath());
+        }
       } catch (IOException e) {
         logger.warn("Failed to delete temp directory: {}", tempDir.getAbsolutePath(), e);
+        // Don't throw - this is just cleanup
       }
     }
   }
@@ -1264,27 +1282,40 @@ public class SubtitleService {
       }
     }
 
-    boolean completed = process.waitFor(10, TimeUnit.MINUTES);
-    if (!completed) {
-      process.destroyForcibly();
-      subtitleMedia.setStatus("FAILED");
-      subtitleMedia.setProgress(0.0);
-      subtitleMediaRepository.save(subtitleMedia);
-      throw new RuntimeException("FFmpeg process timed out after 10 minutes for mediaId: " + mediaId + ". Error log uploaded to: ");
+    try {
+      boolean completed = process.waitFor(30, TimeUnit.MINUTES);
+
+      if (!completed) {
+        process.destroyForcibly();
+        subtitleMedia.setStatus("FAILED");
+        subtitleMedia.setProgress(0.0);
+        subtitleMediaRepository.save(subtitleMedia);
+        throw new RuntimeException("FFmpeg process timed out after 30 minutes for mediaId: " + mediaId);
+      }
+
+      int exitCode = process.exitValue();
+      if (exitCode != 0) {
+        subtitleMedia.setStatus("FAILED");
+        subtitleMedia.setProgress(0.0);
+        subtitleMediaRepository.save(subtitleMedia);
+        throw new RuntimeException("FFmpeg process failed with exit code: " + exitCode + " for mediaId: " + mediaId);
+      }
+
+    } finally {
+      // ✅ Always clean up local log files (even on failure)
+      try { Files.deleteIfExists(commandLogFile.toPath()); } catch (Exception ignored) {}
+      try { Files.deleteIfExists(errorLogFile.toPath()); } catch (Exception ignored) {}
+      try { Files.deleteIfExists(stdoutLogFile.toPath()); } catch (Exception ignored) {}
+
+      // ✅ OPTIONAL: try to remove the per-media directory if empty
+      try {
+        File[] remaining = tempDir.listFiles();
+        if (remaining == null || remaining.length == 0) {
+          Files.deleteIfExists(tempDir.toPath());
+        }
+      } catch (Exception ignored) {}
     }
 
-    int exitCode = process.exitValue();
-    if (exitCode != 0) {
-      subtitleMedia.setStatus("FAILED");
-      subtitleMedia.setProgress(0.0);
-      subtitleMediaRepository.save(subtitleMedia);
-      throw new RuntimeException("FFmpeg process failed with exit code: " + exitCode + " for mediaId: " + mediaId + ". Error log uploaded to: ");
-    }
-
-    // Clean up local log files
-    Files.deleteIfExists(commandLogFile.toPath());
-    Files.deleteIfExists(errorLogFile.toPath());
-    Files.deleteIfExists(stdoutLogFile.toPath());
   }
 
   private void executeFFmpegCommand(List<String> command) throws IOException, InterruptedException {
@@ -1359,21 +1390,25 @@ public class SubtitleService {
       }
     }
 
-    boolean completed = process.waitFor(5, TimeUnit.MINUTES);
-    if (!completed) {
-      process.destroyForcibly();
-      throw new RuntimeException("FFmpeg concat process timed out after 5 minutes. Error log uploaded to: ");
+    try {
+      boolean completed = process.waitFor(5, TimeUnit.MINUTES);
+      if (!completed) {
+        process.destroyForcibly();
+        throw new RuntimeException("FFmpeg concat process timed out after 5 minutes");
+      }
+
+      int exitCode = process.exitValue();
+      if (exitCode != 0) {
+        throw new RuntimeException("FFmpeg concat process failed with exit code: " + exitCode);
+      }
+
+    } finally {
+      // ✅ Always cleanup local log files
+      try { Files.deleteIfExists(commandLogFile.toPath()); } catch (Exception ignored) {}
+      try { Files.deleteIfExists(errorLogFile.toPath()); } catch (Exception ignored) {}
+      try { Files.deleteIfExists(stdoutLogFile.toPath()); } catch (Exception ignored) {}
     }
 
-    int exitCode = process.exitValue();
-    if (exitCode != 0) {
-      throw new RuntimeException("FFmpeg concat process failed with exit code: " + exitCode + ". Error log uploaded to: ");
-    }
-
-    // Clean up local log files
-    Files.deleteIfExists(commandLogFile.toPath());
-    Files.deleteIfExists(errorLogFile.toPath());
-    Files.deleteIfExists(stdoutLogFile.toPath());
   }
 
   public String generateTextPng(SubtitleDTO ts, File tempDir, int canvasWidth, int canvasHeight) throws IOException {
@@ -1953,7 +1988,7 @@ public class SubtitleService {
       case "720p":
         settings.put("scale", "-2:720");
         settings.put("crf", "23");
-        settings.put("preset", "medium");
+        settings.put("preset", "veryfast");
         break;
       case "1080p":
         settings.put("scale", "-2:1080");
@@ -1977,5 +2012,46 @@ public class SubtitleService {
         settings.put("preset", "medium");
     }
     return settings;
+  }
+
+  @Transactional
+  public void deleteMedia(User user, Long mediaId) throws IOException {
+    logger.info("Deleting subtitle media for user: {}, mediaId: {}", user.getId(), mediaId);
+
+    SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
+            .orElseThrow(() -> {
+              logger.error("Media not found for id: {}", mediaId);
+              return new IllegalArgumentException("Media not found");
+            });
+
+    if (!subtitleMedia.getUser().getId().equals(user.getId())) {
+      logger.error("User {} not authorized to delete media {}", user.getId(), mediaId);
+      throw new IllegalArgumentException("Not authorized to delete this media");
+    }
+
+    // Don't allow deletion if media is being processed
+    if ("PROCESSING".equals(subtitleMedia.getStatus()) || "QUEUED".equals(subtitleMedia.getStatus())) {
+      throw new IllegalStateException("Cannot delete media while it is being processed");
+    }
+
+    // Delete files from R2
+    try {
+      if (subtitleMedia.getOriginalPath() != null) {
+        cloudflareR2Service.deleteFile(subtitleMedia.getOriginalPath());
+        logger.info("Deleted original file from R2: {}", subtitleMedia.getOriginalPath());
+      }
+
+      if (subtitleMedia.getProcessedPath() != null) {
+        cloudflareR2Service.deleteFile(subtitleMedia.getProcessedPath());
+        logger.info("Deleted processed file from R2: {}", subtitleMedia.getProcessedPath());
+      }
+    } catch (IOException e) {
+      logger.warn("Failed to delete some files from R2 for mediaId: {}", mediaId, e);
+      // Continue with DB deletion even if R2 deletion fails
+    }
+
+    // Delete from database
+    subtitleMediaRepository.delete(subtitleMedia);
+    logger.info("Successfully deleted subtitle media for user: {}, mediaId: {}", user.getId(), mediaId);
   }
 }

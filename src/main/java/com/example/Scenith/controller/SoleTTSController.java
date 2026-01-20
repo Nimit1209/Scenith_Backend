@@ -40,47 +40,48 @@ public class SoleTTSController {
             User user = getUserFromToken(token);
 
             // Extract parameters
-            String text = (String) request.get("text");;
+            String text = (String) request.get("text");
             String voiceName = (String) request.get("voiceName");
             String languageCode = (String) request.get("languageCode");
+            String emotion = (String) request.getOrDefault("emotion", "default");  // NEW
 
             @SuppressWarnings("unchecked")
-            Map<String, String> ssmlConfig = (Map<String, String>)request.get("ssmlConfig");
+            Map<String, String> customConfig = (Map<String, String>) request.get("customConfig");
+
             // Validate parameters
             if (text == null || text.trim().isEmpty()) {
-                return ResponseEntity.badRequest().body(Map.of("message", "Text is required and cannot be empty"));
+                return ResponseEntity.badRequest().body("Text is required and cannot be empty");
             }
             if (voiceName == null || voiceName.trim().isEmpty()) {
-                return ResponseEntity.badRequest().body(Map.of("message", "Voice name is required"));
+                return ResponseEntity.badRequest().body("Voice name is required");
             }
             if (languageCode == null || languageCode.trim().isEmpty()) {
-                return ResponseEntity.badRequest().body(Map.of("message", "Language code is required"));
+                return ResponseEntity.badRequest().body("Language code is required");
             }
 
-            // Generate TTS
-            SoleTTS soleTTS = soleTTSService.generateTTS(user, text, voiceName, languageCode,ssmlConfig);
+            // Generate TTS with emotion
+            SoleTTS soleTTS = soleTTSService.generateTTS(
+                    user, text, voiceName, languageCode, emotion, customConfig
+            );
 
             // Prepare response
             Map<String, Object> response = new HashMap<>();
             response.put("id", soleTTS.getId());
             response.put("audioPath", soleTTS.getAudioPath());
-            response.put("cdnUrl", soleTTS.getCdnUrl());
-            response.put("presignedUrl", soleTTS.getPresignedUrl());
             response.put("createdAt", soleTTS.getCreatedAt());
-            // response.put("waveformPath", soleTTS.getWaveformPath()); // Uncomment if added
 
             return ResponseEntity.ok(response);
         } catch (IOException | InterruptedException e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("message", "Error generating TTS audio: " + e.getMessage()));
+                    .body("Error generating TTS audio: " + e.getMessage());
         } catch (IllegalArgumentException | IllegalStateException e) {
-            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+            return ResponseEntity.badRequest().body(e.getMessage());
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                    .body(Map.of("message", "Unauthorized: " + e.getMessage()));
+                    .body("Unauthorized: " + e.getMessage());
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("message", "Unexpected error: " + e.getMessage()));
+                    .body("Unexpected error: " + e.getMessage());
         }
     }
 

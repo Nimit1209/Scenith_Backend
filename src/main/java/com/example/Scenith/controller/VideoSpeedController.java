@@ -151,4 +151,23 @@ public class VideoSpeedController {
         response.setOriginalFilePath(video.getOriginalFilePath());
         return response;
     }
+    @DeleteMapping("/{id}")
+    public ResponseEntity<?> deleteVideo(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long id) {
+        try {
+            User user = getUserFromToken(token);
+            videoSpeedService.deleteVideo(id, user);
+            return ResponseEntity.ok(Map.of("message", "Video deleted successfully"));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(Map.of("message", e.getMessage()));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("message", e.getMessage()));
+        } catch (IOException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("message", "Delete failed: " + e.getMessage()));
+        }
+    }
 }

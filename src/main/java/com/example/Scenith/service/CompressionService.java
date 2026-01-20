@@ -5,6 +5,7 @@ import com.example.Scenith.entity.User;
 import com.example.Scenith.repository.CompressedMediaRepository;
 import com.example.Scenith.repository.UserRepository;
 import com.example.Scenith.security.JwtUtil;
+import jakarta.transaction.Transactional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -286,5 +287,40 @@ public class CompressionService {
         compressedMedia.setTargetSize(newTargetSize);
         compressedMediaRepository.save(compressedMedia);
         return compressedMedia;
+    }
+    @Transactional
+    public void deleteMedia(User user, Long mediaId) throws IOException {
+        logger.info("Deleting compressed media for user: {}, mediaId: {}", user.getId(), mediaId);
+
+        CompressedMedia compressedMedia = compressedMediaRepository.findById(mediaId)
+                .orElseThrow(() -> {
+                    logger.error("Media not found for id: {}", mediaId);
+                    return new IllegalArgumentException("Media not found");
+                });
+
+        if (!compressedMedia.getUser().getId().equals(user.getId())) {
+            logger.error("User {} not authorized to delete media {}", user.getId(), mediaId);
+            throw new IllegalArgumentException("Not authorized to delete this media");
+        }
+
+        // Delete files from R2
+        try {
+            if (compressedMedia.getOriginalPath() != null) {
+                cloudflareR2Service.deleteFile(compressedMedia.getOriginalPath());
+                logger.info("Deleted original file from R2: {}", compressedMedia.getOriginalPath());
+            }
+
+            if (compressedMedia.getProcessedPath() != null) {
+                cloudflareR2Service.deleteFile(compressedMedia.getProcessedPath());
+                logger.info("Deleted processed file from R2: {}", compressedMedia.getProcessedPath());
+            }
+        } catch (IOException e) {
+            logger.warn("Failed to delete some files from R2 for mediaId: {}", mediaId, e);
+            // Continue with DB deletion even if R2 deletion fails
+        }
+
+        // Delete from database
+        compressedMediaRepository.delete(compressedMedia);
+        logger.info("Successfully deleted compressed media for user: {}, mediaId: {}", user.getId(), mediaId);
     }
 }

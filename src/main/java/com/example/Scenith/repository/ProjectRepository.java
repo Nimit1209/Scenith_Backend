@@ -12,4 +12,5 @@ public interface ProjectRepository extends JpaRepository<Project, Long> {
     Optional<Project> findByEditSession(String editSession); // New method
     // Add this if you prefer using findByUserId
     List<Project> findByUserId(Long userId);
+    List<Project> findByUser(User user);
 }

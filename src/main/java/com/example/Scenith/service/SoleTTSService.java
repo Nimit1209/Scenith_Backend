@@ -54,7 +54,9 @@ public class SoleTTSService {
             String text,
             String voiceName,
             String languageCode,
-            Map<String, String> ssmlConfig) throws IOException, InterruptedException {
+            String emotion,
+            Map<String, String> customConfig) throws IOException, InterruptedException {
+
         // Validate input
         if (text == null || text.trim().isEmpty()) {
             throw new IllegalArgumentException("Text is required and cannot be empty");
@@ -77,7 +79,7 @@ public class SoleTTSService {
 
         // Check monthly TTS usage (skip if unlimited)
         long monthlyLimit = user.getMonthlyTtsLimit();
-        if (monthlyLimit > 0) { // Only check if there's a limit (-1 means unlimited)
+        if (monthlyLimit > 0) {
             long userUsage = getUserTtsUsage(user);
             if (userUsage + text.length() > monthlyLimit) {
                 throw new IllegalStateException(
@@ -89,7 +91,7 @@ public class SoleTTSService {
 
         // Check daily TTS usage (skip if unlimited)
         long dailyLimit = user.getDailyTtsLimit();
-        if (dailyLimit > 0) { // -1 means no daily limit
+        if (dailyLimit > 0) {
             long dailyUsage = getUserDailyTtsUsage(user);
             if (dailyUsage + text.length() > dailyLimit) {
                 throw new IllegalStateException(
@@ -98,7 +100,10 @@ public class SoleTTSService {
                 );
             }
         }
-        // Generate audio using Google Cloud TTS
+
+        // ────────────────────────────────────────────────
+        // Google Cloud TTS setup
+        // ────────────────────────────────────────────────
         GoogleCredentials credentials = GoogleCredentials.fromStream(new FileInputStream(credentialsPath));
         TextToSpeechSettings settings = TextToSpeechSettings.newBuilder()
                 .setCredentialsProvider(() -> credentials)
@@ -112,7 +117,7 @@ public class SoleTTSService {
         String tempAudioPath = System.getProperty("java.io.tmpdir") + File.separator + "videoeditor" + File.separator + tempAudioFileName;
         File tempAudioFile = new File(tempAudioPath);
 
-        // Ensure parent directory exists
+        // Ensure temp directory exists
         Path tempDir = tempAudioFile.toPath().getParent();
         Files.createDirectories(tempDir);
         if (!Files.isWritable(tempDir)) {
@@ -121,70 +126,77 @@ public class SoleTTSService {
         }
 
         try (TextToSpeechClient textToSpeechClient = TextToSpeechClient.create(settings)) {
-            String inputText = (ssmlConfig != null && !ssmlConfig.isEmpty())
-                    ? buildSSMLText(text, ssmlConfig)
+            // Apply emotion preset (your local logic)
+            Map<String, String> finalSsmlConfig = applyEmotionPreset(emotion, customConfig);
+
+            // Build SSML or plain text
+            String inputText = (finalSsmlConfig != null && !finalSsmlConfig.isEmpty())
+                    ? buildSSMLText(text, finalSsmlConfig)
                     : text;
 
-            // Use setSsml instead of setText when SSML is present
             SynthesisInput.Builder inputBuilder = SynthesisInput.newBuilder();
-            if (ssmlConfig != null && !ssmlConfig.isEmpty()) {
+            if (finalSsmlConfig != null && !finalSsmlConfig.isEmpty()) {
                 inputBuilder.setSsml(inputText);
             } else {
                 inputBuilder.setText(inputText);
             }
             SynthesisInput input = inputBuilder.build();
+
             VoiceSelectionParams voice = VoiceSelectionParams.newBuilder()
                     .setLanguageCode(languageCode)
                     .setName(voiceName)
                     .build();
+
             AudioConfig audioConfig = AudioConfig.newBuilder()
                     .setAudioEncoding(AudioEncoding.MP3)
                     .build();
+
             SynthesizeSpeechResponse response = textToSpeechClient.synthesizeSpeech(input, voice, audioConfig);
             ByteString audioContent = response.getAudioContent();
 
-            // Save audio to temporary file
+            // Save to temporary file
             try (FileOutputStream out = new FileOutputStream(tempAudioFile)) {
                 out.write(audioContent.toByteArray());
             }
             logger.info("Saved TTS audio to temporary file: {}", tempAudioFile.getAbsolutePath());
 
-            // Verify file exists
             if (!tempAudioFile.exists()) {
                 logger.error("Temporary audio file not created: {}", tempAudioFile.getAbsolutePath());
-                throw new IOException("Failed to create temporary audio file: " + tempAudioFile.getAbsolutePath());
+                throw new IOException("Failed to create temporary audio file");
             }
 
-            // Define R2 paths
+            // ────────────────────────────────────────────────
+            // Upload to Cloudflare R2 (server pattern)
+            // ────────────────────────────────────────────────
             String userR2Dir = "audio/sole_tts/" + user.getId();
             String audioFileName = "tts_" + System.currentTimeMillis() + ".mp3";
             String audioR2Path = userR2Dir + "/" + audioFileName;
 
-            // Upload audio to R2
             cloudflareR2Service.uploadFile(audioR2Path, tempAudioFile);
             logger.info("Uploaded TTS audio to R2: {}", audioR2Path);
 
             String audioPath = audioR2Path;
 
-            // Generate waveform JSON
+            // Generate waveform (server pattern)
             String waveformJsonPath = generateAndSaveWaveformJson(audioPath, user.getId());
 
-            // Set SoleTTS fields
+            // Set fields
             soleTTS.setAudioPath(audioPath);
             soleTTS.setCreatedAt(LocalDateTime.now());
 
-            // Save to database
+            // Save entity
             soleTTSRepository.save(soleTTS);
 
-            // Update TTS usage
+            // Update usage counters
             updateUserTtsUsage(user, text.length());
             updateUserDailyTtsUsage(user, text.length());
 
-            // Generate and set URLs
-            Map<String, String> urls = cloudflareR2Service.generateUrls(audioR2Path, 3600); // 1 hour expiration for presigned
+            // Generate signed URLs
+            Map<String, String> urls = cloudflareR2Service.generateUrls(audioR2Path, 3600); // 1 hour
             soleTTS.setCdnUrl(urls.get("cdnUrl"));
             soleTTS.setPresignedUrl(urls.get("presignedUrl"));
-            // Send completion email
+
+            // Notifications (server pattern)
             emailHelper.sendProcessingCompleteEmail(
                     user,
                     ProcessingEmailHelper.ServiceType.TTS,
@@ -197,13 +209,13 @@ public class SoleTTSService {
 
             return soleTTS;
         } finally {
-            // Clean up temporary file
+            // Clean up temp file (important on server)
             if (tempAudioFile.exists()) {
                 try {
                     Files.delete(tempAudioFile.toPath());
                     logger.debug("Deleted temporary audio file: {}", tempAudioFile.getAbsolutePath());
                 } catch (IOException e) {
-                    logger.warn("Failed to delete temporary audio file: {}, error: {}", tempAudioFile.getAbsolutePath(), e.getMessage());
+                    logger.warn("Failed to delete temp file: {}, error: {}", tempAudioFile.getAbsolutePath(), e.getMessage());
                 }
             }
         }
@@ -327,5 +339,75 @@ public class SoleTTSService {
                 .orElseGet(() -> new UserDailyTtsUsage(user, today));
         usage.setCharactersUsed(usage.getCharactersUsed() + characters);
         userDailyTtsUsageRepository.save(usage);
+    }
+
+    private Map<String, String> applyEmotionPreset(String emotion, Map<String, String> customConfig) {
+        Map<String, String> ssmlConfig = new HashMap<>();
+
+        // Apply emotion preset with EXTREME values
+        switch (emotion.toLowerCase()) {
+            case "happy":
+            case "excited":
+                ssmlConfig.put("rate", "1.4");      // Much faster
+                ssmlConfig.put("pitch", "+8st");    // Noticeably higher
+                ssmlConfig.put("volume", "+4dB");   // Louder
+                ssmlConfig.put("emphasis", "strong");
+                break;
+            case "calm":
+            case "relaxed":
+                ssmlConfig.put("rate", "0.75");     // Significantly slower
+                ssmlConfig.put("pitch", "-4st");    // Lower
+                ssmlConfig.put("volume", "-2dB");   // Softer
+                ssmlConfig.put("emphasis", "reduced");
+                break;
+            case "angry":
+            case "intense":
+                ssmlConfig.put("rate", "1.3");      // Fast and aggressive
+                ssmlConfig.put("pitch", "+6st");    // Higher tension
+                ssmlConfig.put("volume", "+6dB");   // Much louder
+                ssmlConfig.put("emphasis", "strong");
+                break;
+            case "sad":
+            case "somber":
+                ssmlConfig.put("rate", "0.7");      // Very slow
+                ssmlConfig.put("pitch", "-6st");    // Much lower
+                ssmlConfig.put("volume", "-3dB");   // Quieter
+                ssmlConfig.put("emphasis", "reduced");
+                break;
+            case "announcer":
+                ssmlConfig.put("rate", "1.0");
+                ssmlConfig.put("pitch", "-2st");    // Authoritative
+                ssmlConfig.put("volume", "+5dB");   // Clear and loud
+                ssmlConfig.put("emphasis", "strong");
+                break;
+            case "meditation":
+                ssmlConfig.put("rate", "0.6");      // Extremely slow
+                ssmlConfig.put("pitch", "-5st");    // Deep and calming
+                ssmlConfig.put("volume", "-1dB");
+                ssmlConfig.put("emphasis", "reduced");
+                break;
+            case "enthusiastic":
+                ssmlConfig.put("rate", "1.5");      // Very fast
+                ssmlConfig.put("pitch", "+10st");   // Very high energy
+                ssmlConfig.put("volume", "+5dB");   // Energetic volume
+                ssmlConfig.put("emphasis", "strong");
+                break;
+            case "professional":
+                ssmlConfig.put("rate", "0.95");
+                ssmlConfig.put("pitch", "0st");     // Neutral
+                ssmlConfig.put("volume", "+1dB");   // Clear
+                // No emphasis for professional
+                break;
+            default:
+                // Default/neutral - no modifications
+                break;
+        }
+
+        // Override with custom config if provided
+        if (customConfig != null && !customConfig.isEmpty()) {
+            ssmlConfig.putAll(customConfig);
+        }
+
+        return ssmlConfig;
     }
 }
