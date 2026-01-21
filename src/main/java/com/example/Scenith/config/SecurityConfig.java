@@ -82,6 +82,10 @@ public class SecurityConfig implements WebMvcConfigurer {
                         .requestMatchers("videos/projects/{projectId}/{filename}").permitAll()
                         .requestMatchers("projects/{projectId}/export").permitAll()
                         .requestMatchers("project/export-links").permitAll()
+                        .requestMatchers("/api/ai-voices/get-all-voices").permitAll()
+                        .requestMatchers("/api/ai-voices/voices-by-language").permitAll()
+                        .requestMatchers("/api/ai-voices/voices-by-gender").permitAll()
+                        .requestMatchers("/api/ai-voices/voices-by-language-and-gender").permitAll()
                         .requestMatchers("/projects/**", "/projects/{projectId}/add-to-timeline").authenticated()
                         .requestMatchers(HttpMethod.GET, "/videos/edited-videos/**").permitAll()
                         .requestMatchers("/videos/**", "/videos/*").permitAll()  // ✅ Allow public video access

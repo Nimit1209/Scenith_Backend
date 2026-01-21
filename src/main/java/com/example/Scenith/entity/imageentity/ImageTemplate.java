@@ -65,7 +65,19 @@ public class ImageTemplate {
         createdAt = LocalDateTime.now();
         updatedAt = LocalDateTime.now();
     }
+    @Column(name = "status", nullable = false, columnDefinition = "VARCHAR(20) DEFAULT 'DRAFT'")
+    private String status = "DRAFT";
 
+    @Transient
+    public Boolean getIsActive() {
+        return "PUBLISHED".equals(status);
+    }
+
+    // Add a convenience method
+    @Transient
+    public Boolean isDraft() {
+        return "DRAFT".equals(status);
+    }
     @PreUpdate
     protected void onUpdate() {
         updatedAt = LocalDateTime.now();

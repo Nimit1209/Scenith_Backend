@@ -7,10 +7,8 @@ import java.util.List;
 
 @Repository
 public interface ImageTemplateRepository extends JpaRepository<ImageTemplate, Long> {
-    
-    List<ImageTemplate> findByIsActiveTrueOrderByDisplayOrderAscCreatedAtDesc();
-    
-    List<ImageTemplate> findByCategoryAndIsActiveTrueOrderByDisplayOrderAsc(String category);
-    
-    List<ImageTemplate> findByIsActiveTrue();
+
+    List<ImageTemplate> findByStatusOrderByDisplayOrderAscCreatedAtDesc(String status);
+
+    List<ImageTemplate> findByCategoryAndStatusOrderByDisplayOrderAsc(String category, String status);
 }
