@@ -1,7 +1,9 @@
 package com.example.Scenith.service.admin;
 
 import com.example.Scenith.entity.*;
+import com.example.Scenith.entity.imageentity.ImageAsset;
 import com.example.Scenith.repository.*;
+import com.example.Scenith.repository.imagerepository.ImageAssetRepository;
 import com.example.Scenith.security.JwtUtil;
 import com.example.Scenith.service.CloudflareR2Service;
 import com.example.Scenith.service.VideoEditingService;
@@ -35,6 +37,12 @@ public class AdminCleanupService {
 
     @Autowired
     private ProjectRepository projectRepository;
+
+    @Autowired
+    private SoleTTSRepository soleTTSRepository;
+
+    @Autowired
+    private ImageAssetRepository imageAssetRepository;
 
     @Autowired
     private CloudflareR2Service cloudflareR2Service;
@@ -75,21 +83,35 @@ public class AdminCleanupService {
         Map<String, Object> projectsResult = clearProjectsData(user);
         result.put("projects", projectsResult);
 
+        // Clear TTS data
+        Map<String, Object> ttsResult = clearTTSData(user);
+        result.put("tts", ttsResult);
+
+        // Clear Image Assets data
+        Map<String, Object> imageAssetsResult = clearImageAssetsData(user);
+        result.put("imageAssets", imageAssetsResult);
+
         // Calculate totals
         int totalFilesDeleted = (int) videoSpeedResult.get("filesDeleted") +
                 (int) subtitleResult.get("filesDeleted") +
                 (int) compressionResult.get("filesDeleted") +
-                (int) projectsResult.get("filesDeleted");
+                (int) projectsResult.get("filesDeleted") +
+                (int) ttsResult.get("filesDeleted") +
+                (int) imageAssetsResult.get("filesDeleted");
 
         int totalFilesFailed = (int) videoSpeedResult.get("filesFailed") +
                 (int) subtitleResult.get("filesFailed") +
                 (int) compressionResult.get("filesFailed") +
-                (int) projectsResult.get("filesFailed");
+                (int) projectsResult.get("filesFailed") +
+                (int) ttsResult.get("filesFailed") +
+                (int) imageAssetsResult.get("filesFailed");
 
         int totalRecordsDeleted = (int) videoSpeedResult.get("recordsDeleted") +
                 (int) subtitleResult.get("recordsDeleted") +
                 (int) compressionResult.get("recordsDeleted") +
-                (int) projectsResult.get("recordsDeleted");
+                (int) projectsResult.get("recordsDeleted") +
+                (int) ttsResult.get("recordsDeleted") +
+                (int) imageAssetsResult.get("recordsDeleted");
 
         result.put("totalFilesDeleted", totalFilesDeleted);
         result.put("totalFilesFailed", totalFilesFailed);
@@ -346,6 +368,117 @@ public class AdminCleanupService {
     }
 
     /**
+     * Clear TTS (Text-to-Speech) data for a user
+     */
+    @Transactional
+    public Map<String, Object> clearTTSData(User user) {
+        logger.info("Clearing TTS data for user: {}", user.getId());
+
+        Map<String, Object> result = new HashMap<>();
+        int filesDeleted = 0;
+        int filesFailed = 0;
+        int recordsDeleted = 0;
+
+        try {
+            List<SoleTTS> ttsList = soleTTSRepository.findByUser(user);
+            logger.info("Found {} TTS records for user {}", ttsList.size(), user.getId());
+
+            // Delete files from R2
+            for (SoleTTS tts : ttsList) {
+                // Delete audio file
+                try {
+                    if (tts.getAudioPath() != null && !tts.getAudioPath().isEmpty()) {
+                        cloudflareR2Service.deleteFile(tts.getAudioPath());
+                        filesDeleted++;
+                        logger.debug("Deleted TTS audio file: {}", tts.getAudioPath());
+                    }
+                } catch (IOException e) {
+                    filesFailed++;
+                    logger.error("Failed to delete TTS audio file: {}", tts.getAudioPath(), e);
+                }
+
+                // Note: Waveform files are in subdirectory, will be cleaned with directory delete
+            }
+
+            // Delete database records
+            recordsDeleted = ttsList.size();
+            soleTTSRepository.deleteAll(ttsList);
+            logger.info("Deleted {} TTS records", recordsDeleted);
+
+            // Delete user's TTS directory (includes audio and waveforms subdirectory)
+            try {
+                String userTTSPrefix = "audio/sole_tts/" + user.getId() + "/";
+                cloudflareR2Service.deleteDirectory(userTTSPrefix);
+                logger.info("Deleted TTS directory: {}", userTTSPrefix);
+            } catch (IOException e) {
+                logger.warn("Failed to delete TTS directory: {}", e.getMessage());
+            }
+
+        } catch (Exception e) {
+            logger.error("Error during TTS cleanup for user {}: {}", user.getId(), e.getMessage(), e);
+        }
+
+        result.put("filesDeleted", filesDeleted);
+        result.put("filesFailed", filesFailed);
+        result.put("recordsDeleted", recordsDeleted);
+        return result;
+    }
+
+    /**
+     * Clear Image Assets data for a user
+     */
+    @Transactional
+    public Map<String, Object> clearImageAssetsData(User user) {
+        logger.info("Clearing image assets data for user: {}", user.getId());
+
+        Map<String, Object> result = new HashMap<>();
+        int filesDeleted = 0;
+        int filesFailed = 0;
+        int recordsDeleted = 0;
+
+        try {
+            List<ImageAsset> imageAssets = imageAssetRepository.findByUserOrderByCreatedAtDesc(user);
+            logger.info("Found {} image assets for user {}", imageAssets.size(), user.getId());
+
+            // Delete files from R2
+            for (ImageAsset asset : imageAssets) {
+                try {
+                    if (asset.getFilePath() != null && !asset.getFilePath().isEmpty()) {
+                        cloudflareR2Service.deleteFile(asset.getFilePath());
+                        filesDeleted++;
+                        logger.debug("Deleted image asset file: {}", asset.getFilePath());
+                    }
+                } catch (IOException e) {
+                    filesFailed++;
+                    logger.error("Failed to delete image asset file: {}", asset.getFilePath(), e);
+                }
+            }
+
+            // Delete database records
+            recordsDeleted = imageAssets.size();
+            imageAssetRepository.deleteAll(imageAssets);
+            logger.info("Deleted {} image asset records", recordsDeleted);
+
+            // Delete user's image assets directory
+            try {
+                String userImageAssetsPrefix = "image_editor/" + user.getId() + "/";
+                cloudflareR2Service.deleteDirectory(userImageAssetsPrefix);
+                logger.info("Deleted image assets directory: {}", userImageAssetsPrefix);
+            } catch (IOException e) {
+                logger.warn("Failed to delete image assets directory: {}", e.getMessage());
+            }
+
+        } catch (Exception e) {
+            logger.error("Error during image assets cleanup for user {}: {}", user.getId(), e.getMessage(), e);
+        }
+
+        result.put("filesDeleted", filesDeleted);
+        result.put("filesFailed", filesFailed);
+        result.put("recordsDeleted", recordsDeleted);
+        return result;
+    }
+
+    /**
      * Get cleanup statistics without deleting
      */
     public Map<String, Object> getCleanupStats(Long userId) {
@@ -372,8 +505,17 @@ public class AdminCleanupService {
         int projectsCount = projectRepository.findByUser(user).size();
         stats.put("projectsRecords", projectsCount);
 
+        // TTS stats
+        int ttsCount = soleTTSRepository.findByUser(user).size();
+        stats.put("ttsRecords", ttsCount);
+
+        // Image Assets stats
+        int imageAssetsCount = imageAssetRepository.findByUserOrderByCreatedAtDesc(user).size();
+        stats.put("imageAssetsRecords", imageAssetsCount);
+
         // Total
-        int totalRecords = videoSpeedCount + subtitleCount + compressionCount + projectsCount;
+        int totalRecords = videoSpeedCount + subtitleCount + compressionCount +
+                projectsCount + ttsCount + imageAssetsCount;
         stats.put("totalRecords", totalRecords);
 
         return stats;

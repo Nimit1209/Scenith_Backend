@@ -29,7 +29,7 @@ public class AdminCleanupController {
     public ResponseEntity<?> clearUserData(
             @RequestHeader("Authorization") String authHeader,
             @PathVariable Long userId) {
-        
+
         try {
             // Verify admin access
             User adminUser = getUserFromToken(authHeader);
@@ -70,7 +70,7 @@ public class AdminCleanupController {
     public ResponseEntity<?> clearVideoSpeedData(
             @RequestHeader("Authorization") String authHeader,
             @PathVariable Long userId) {
-        
+
         try {
             User adminUser = getUserFromToken(authHeader);
             if (!adminUser.isAdmin()) {
@@ -78,8 +78,8 @@ public class AdminCleanupController {
                         .body(createErrorResponse("Access denied. Admin privileges required."));
             }
 
-            User user = adminCleanupService.getUserFromToken("Bearer " + userId);
-            Map<String, Object> result = adminCleanupService.clearVideoSpeedData(user);
+            User targetUser = adminCleanupService.getUserFromToken("Bearer " + userId);
+            Map<String, Object> result = adminCleanupService.clearVideoSpeedData(targetUser);
 
             return ResponseEntity.ok(createSuccessResponse(
                     "Successfully cleaned up video speed data for user " + userId,
@@ -101,7 +101,7 @@ public class AdminCleanupController {
     public ResponseEntity<?> clearSubtitleData(
             @RequestHeader("Authorization") String authHeader,
             @PathVariable Long userId) {
-        
+
         try {
             User adminUser = getUserFromToken(authHeader);
             if (!adminUser.isAdmin()) {
@@ -132,7 +132,7 @@ public class AdminCleanupController {
     public ResponseEntity<?> clearCompressionData(
             @RequestHeader("Authorization") String authHeader,
             @PathVariable Long userId) {
-        
+
         try {
             User adminUser = getUserFromToken(authHeader);
             if (!adminUser.isAdmin()) {
@@ -163,7 +163,7 @@ public class AdminCleanupController {
     public ResponseEntity<?> clearProjectsData(
             @RequestHeader("Authorization") String authHeader,
             @PathVariable Long userId) {
-        
+
         try {
             User adminUser = getUserFromToken(authHeader);
             if (!adminUser.isAdmin()) {
@@ -187,6 +187,68 @@ public class AdminCleanupController {
     }
 
     /**
+     * Clear only TTS data for a user (Admin only)
+     * DELETE /api/admin/cleanup/user/{userId}/tts
+     */
+    @DeleteMapping("/user/{userId}/tts")
+    public ResponseEntity<?> clearTTSData(
+            @RequestHeader("Authorization") String authHeader,
+            @PathVariable Long userId) {
+
+        try {
+            User adminUser = getUserFromToken(authHeader);
+            if (!adminUser.isAdmin()) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                        .body(createErrorResponse("Access denied. Admin privileges required."));
+            }
+
+            User targetUser = adminCleanupService.getUserFromToken("Bearer " + userId);
+            Map<String, Object> result = adminCleanupService.clearTTSData(targetUser);
+
+            return ResponseEntity.ok(createSuccessResponse(
+                    "Successfully cleaned up TTS data for user " + userId,
+                    result
+            ));
+
+        } catch (Exception e) {
+            logger.error("Error during TTS cleanup: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(createErrorResponse("Failed to cleanup TTS data: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Clear only Image Assets data for a user (Admin only)
+     * DELETE /api/admin/cleanup/user/{userId}/image-assets
+     */
+    @DeleteMapping("/user/{userId}/image-assets")
+    public ResponseEntity<?> clearImageAssetsData(
+            @RequestHeader("Authorization") String authHeader,
+            @PathVariable Long userId) {
+
+        try {
+            User adminUser = getUserFromToken(authHeader);
+            if (!adminUser.isAdmin()) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                        .body(createErrorResponse("Access denied. Admin privileges required."));
+            }
+
+            User targetUser = adminCleanupService.getUserFromToken("Bearer " + userId);
+            Map<String, Object> result = adminCleanupService.clearImageAssetsData(targetUser);
+
+            return ResponseEntity.ok(createSuccessResponse(
+                    "Successfully cleaned up image assets data for user " + userId,
+                    result
+            ));
+
+        } catch (Exception e) {
+            logger.error("Error during image assets cleanup: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(createErrorResponse("Failed to cleanup image assets data: " + e.getMessage()));
+        }
+    }
+
+    /**
      * Get cleanup statistics for a user without deleting (Admin only)
      * GET /api/admin/cleanup/user/{userId}/stats
      */
@@ -194,7 +256,7 @@ public class AdminCleanupController {
     public ResponseEntity<?> getCleanupStats(
             @RequestHeader("Authorization") String authHeader,
             @PathVariable Long userId) {
-        
+
         try {
             // Verify admin access
             User adminUser = getUserFromToken(authHeader);
