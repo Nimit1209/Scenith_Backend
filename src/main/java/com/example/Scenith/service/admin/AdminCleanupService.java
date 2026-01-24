@@ -87,31 +87,31 @@ public class AdminCleanupService {
         Map<String, Object> ttsResult = clearTTSData(user);
         result.put("tts", ttsResult);
 
-        // Clear Image Assets data
-        Map<String, Object> imageAssetsResult = clearImageAssetsData(user);
-        result.put("imageAssets", imageAssetsResult);
+//        // Clear Image Assets data
+//        Map<String, Object> imageAssetsResult = clearImageAssetsData(user);
+//        result.put("imageAssets", imageAssetsResult);
 
         // Calculate totals
         int totalFilesDeleted = (int) videoSpeedResult.get("filesDeleted") +
                 (int) subtitleResult.get("filesDeleted") +
                 (int) compressionResult.get("filesDeleted") +
                 (int) projectsResult.get("filesDeleted") +
-                (int) ttsResult.get("filesDeleted") +
-                (int) imageAssetsResult.get("filesDeleted");
+                (int) ttsResult.get("filesDeleted");
+//                (int) imageAssetsResult.get("filesDeleted");
 
         int totalFilesFailed = (int) videoSpeedResult.get("filesFailed") +
                 (int) subtitleResult.get("filesFailed") +
                 (int) compressionResult.get("filesFailed") +
                 (int) projectsResult.get("filesFailed") +
-                (int) ttsResult.get("filesFailed") +
-                (int) imageAssetsResult.get("filesFailed");
+                (int) ttsResult.get("filesFailed");
+//                (int) imageAssetsResult.get("filesFailed");
 
         int totalRecordsDeleted = (int) videoSpeedResult.get("recordsDeleted") +
                 (int) subtitleResult.get("recordsDeleted") +
                 (int) compressionResult.get("recordsDeleted") +
                 (int) projectsResult.get("recordsDeleted") +
-                (int) ttsResult.get("recordsDeleted") +
-                (int) imageAssetsResult.get("recordsDeleted");
+                (int) ttsResult.get("recordsDeleted");
+//                (int) imageAssetsResult.get("recordsDeleted")
 
         result.put("totalFilesDeleted", totalFilesDeleted);
         result.put("totalFilesFailed", totalFilesFailed);
@@ -424,59 +424,59 @@ public class AdminCleanupService {
         return result;
     }
 
-    /**
-     * Clear Image Assets data for a user
-     */
-    @Transactional
-    public Map<String, Object> clearImageAssetsData(User user) {
-        logger.info("Clearing image assets data for user: {}", user.getId());
-
-        Map<String, Object> result = new HashMap<>();
-        int filesDeleted = 0;
-        int filesFailed = 0;
-        int recordsDeleted = 0;
-
-        try {
-            List<ImageAsset> imageAssets = imageAssetRepository.findByUserOrderByCreatedAtDesc(user);
-            logger.info("Found {} image assets for user {}", imageAssets.size(), user.getId());
-
-            // Delete files from R2
-            for (ImageAsset asset : imageAssets) {
-                try {
-                    if (asset.getFilePath() != null && !asset.getFilePath().isEmpty()) {
-                        cloudflareR2Service.deleteFile(asset.getFilePath());
-                        filesDeleted++;
-                        logger.debug("Deleted image asset file: {}", asset.getFilePath());
-                    }
-                } catch (IOException e) {
-                    filesFailed++;
-                    logger.error("Failed to delete image asset file: {}", asset.getFilePath(), e);
-                }
-            }
-
-            // Delete database records
-            recordsDeleted = imageAssets.size();
-            imageAssetRepository.deleteAll(imageAssets);
-            logger.info("Deleted {} image asset records", recordsDeleted);
-
-            // Delete user's image assets directory
-            try {
-                String userImageAssetsPrefix = "image_editor/" + user.getId() + "/";
-                cloudflareR2Service.deleteDirectory(userImageAssetsPrefix);
-                logger.info("Deleted image assets directory: {}", userImageAssetsPrefix);
-            } catch (IOException e) {
-                logger.warn("Failed to delete image assets directory: {}", e.getMessage());
-            }
-
-        } catch (Exception e) {
-            logger.error("Error during image assets cleanup for user {}: {}", user.getId(), e.getMessage(), e);
-        }
-
-        result.put("filesDeleted", filesDeleted);
-        result.put("filesFailed", filesFailed);
-        result.put("recordsDeleted", recordsDeleted);
-        return result;
-    }
+//    /**
+//     * Clear Image Assets data for a user
+//     */
+//    @Transactional
+//    public Map<String, Object> clearImageAssetsData(User user) {
+//        logger.info("Clearing image assets data for user: {}", user.getId());
+//
+//        Map<String, Object> result = new HashMap<>();
+//        int filesDeleted = 0;
+//        int filesFailed = 0;
+//        int recordsDeleted = 0;
+//
+//        try {
+//            List<ImageAsset> imageAssets = imageAssetRepository.findByUserOrderByCreatedAtDesc(user);
+//            logger.info("Found {} image assets for user {}", imageAssets.size(), user.getId());
+//
+//            // Delete files from R2
+//            for (ImageAsset asset : imageAssets) {
+//                try {
+//                    if (asset.getFilePath() != null && !asset.getFilePath().isEmpty()) {
+//                        cloudflareR2Service.deleteFile(asset.getFilePath());
+//                        filesDeleted++;
+//                        logger.debug("Deleted image asset file: {}", asset.getFilePath());
+//                    }
+//                } catch (IOException e) {
+//                    filesFailed++;
+//                    logger.error("Failed to delete image asset file: {}", asset.getFilePath(), e);
+//                }
+//            }
+//
+//            // Delete database records
+//            recordsDeleted = imageAssets.size();
+//            imageAssetRepository.deleteAll(imageAssets);
+//            logger.info("Deleted {} image asset records", recordsDeleted);
+//
+//            // Delete user's image assets directory
+//            try {
+//                String userImageAssetsPrefix = "image_editor/" + user.getId() + "/";
+//                cloudflareR2Service.deleteDirectory(userImageAssetsPrefix);
+//                logger.info("Deleted image assets directory: {}", userImageAssetsPrefix);
+//            } catch (IOException e) {
+//                logger.warn("Failed to delete image assets directory: {}", e.getMessage());
+//            }
+//
+//        } catch (Exception e) {
+//            logger.error("Error during image assets cleanup for user {}: {}", user.getId(), e.getMessage(), e);
+//        }
+//
+//        result.put("filesDeleted", filesDeleted);
+//        result.put("filesFailed", filesFailed);
+//        result.put("recordsDeleted", recordsDeleted);
+//        return result;
+//    }
 
     /**
      * Get cleanup statistics without deleting

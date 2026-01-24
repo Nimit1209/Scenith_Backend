@@ -24,7 +24,7 @@ public class CompressionController {
     public ResponseEntity<?> uploadMedia(
             @RequestHeader("Authorization") String token,
             @RequestParam("file") MultipartFile mediaFile,
-            @RequestParam("targetSize") String targetSize
+            @RequestParam(value = "targetSize", required = false)  String targetSize
     ) {
         try {
             User user = compressionService.getUserFromToken(token);

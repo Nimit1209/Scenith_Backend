@@ -318,7 +318,7 @@ def compress_pdf(input_path, output_path, options=None):
         return {"status": "error", "message": str(e)}
 
 def rotate_pdf(input_path, output_path, options=None):
-    """Rotate PDF pages - supports all pages or specific page"""
+    """Rotate PDF pages - supports all pages, specific pages, or page ranges"""
     try:
         degrees = int(options.get('degrees', 90)) if options else 90
         pages_spec = options.get('pages', 'all') if options else 'all'
@@ -334,19 +334,51 @@ def rotate_pdf(input_path, output_path, options=None):
 
         if pages_spec == 'all':
             # Rotate all pages
-            pages_to_rotate = list(range(total_pages))
+            pages_to_rotate = set(range(total_pages))
         else:
-            # Parse specific page number or range
-            try:
-                # Try to parse as single page number first
-                page_num = int(pages_spec)
-                if 1 <= page_num <= total_pages:
-                    pages_to_rotate = [page_num - 1]  # Convert to 0-based index
+            # Parse page specification (supports "1", "1,3,5", "1-5", "1,3-7,10")
+            pages_to_rotate = set()
+
+            # Split by comma
+            parts = str(pages_spec).split(',')
+
+            for part in parts:
+                part = part.strip()
+
+                if '-' in part:
+                    # Range like "1-5"
+                    try:
+                        start, end = part.split('-', 1)
+                        start = int(start.strip())
+                        end = int(end.strip())
+
+                        # Validate range
+                        if start < 1 or end > total_pages or start > end:
+                            print(f"Warning: Invalid range {start}-{end}, skipping", file=sys.stderr)
+                            continue
+
+                        # Add pages in range (convert to 0-based index)
+                        for page_num in range(start, end + 1):
+                            pages_to_rotate.add(page_num - 1)
+                    except ValueError:
+                        print(f"Warning: Invalid range format '{part}', skipping", file=sys.stderr)
+                        continue
                 else:
-                    raise ValueError(f"Page number {page_num} out of range (1-{total_pages})")
-            except ValueError:
-                # If not a single number, try parsing as range like "1,3,5"
-                pages_to_rotate = parse_page_list(pages_spec, total_pages)
+                    # Single page like "3"
+                    try:
+                        page_num = int(part.strip())
+
+                        # Validate page number
+                        if 1 <= page_num <= total_pages:
+                            pages_to_rotate.add(page_num - 1)  # Convert to 0-based index
+                        else:
+                            print(f"Warning: Page {page_num} out of range (1-{total_pages}), skipping", file=sys.stderr)
+                    except ValueError:
+                        print(f"Warning: Invalid page number '{part}', skipping", file=sys.stderr)
+                        continue
+
+            if not pages_to_rotate:
+                raise ValueError("No valid pages specified for rotation")
 
         # Add pages with rotation
         for i in range(total_pages):
@@ -362,7 +394,8 @@ def rotate_pdf(input_path, output_path, options=None):
             "status": "success",
             "output_path": output_path,
             "rotated_pages": len(pages_to_rotate),
-            "total_pages": total_pages
+            "total_pages": total_pages,
+            "rotation_applied": f"{degrees}° to {len(pages_to_rotate)} of {total_pages} pages"
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}

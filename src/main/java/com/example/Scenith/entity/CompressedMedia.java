@@ -35,9 +35,17 @@ public class CompressedMedia {
     @Column(name = "processed_cdn_url")
     private String processedCdnUrl;
 
-    @Column(name = "target_size", nullable = false)
+    @Column(name = "target_size")
     private String targetSize;
 
+    @Column(name = "compression_percentage")
+    private Integer compressionPercentage;
+
+    @Column(name = "file_size_bytes")
+    private Long fileSizeBytes;
+
+    @Column(name = "file_type")
+    private String fileType;
     @Column(name = "status", nullable = false)
     private String status;
 

@@ -216,37 +216,37 @@ public class AdminCleanupController {
                     .body(createErrorResponse("Failed to cleanup TTS data: " + e.getMessage()));
         }
     }
-
-    /**
-     * Clear only Image Assets data for a user (Admin only)
-     * DELETE /api/admin/cleanup/user/{userId}/image-assets
-     */
-    @DeleteMapping("/user/{userId}/image-assets")
-    public ResponseEntity<?> clearImageAssetsData(
-            @RequestHeader("Authorization") String authHeader,
-            @PathVariable Long userId) {
-
-        try {
-            User adminUser = getUserFromToken(authHeader);
-            if (!adminUser.isAdmin()) {
-                return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                        .body(createErrorResponse("Access denied. Admin privileges required."));
-            }
-
-            User targetUser = adminCleanupService.getUserFromToken("Bearer " + userId);
-            Map<String, Object> result = adminCleanupService.clearImageAssetsData(targetUser);
-
-            return ResponseEntity.ok(createSuccessResponse(
-                    "Successfully cleaned up image assets data for user " + userId,
-                    result
-            ));
-
-        } catch (Exception e) {
-            logger.error("Error during image assets cleanup: {}", e.getMessage(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(createErrorResponse("Failed to cleanup image assets data: " + e.getMessage()));
-        }
-    }
+//
+//    /**
+//     * Clear only Image Assets data for a user (Admin only)
+//     * DELETE /api/admin/cleanup/user/{userId}/image-assets
+//     */
+//    @DeleteMapping("/user/{userId}/image-assets")
+//    public ResponseEntity<?> clearImageAssetsData(
+//            @RequestHeader("Authorization") String authHeader,
+//            @PathVariable Long userId) {
+//
+//        try {
+//            User adminUser = getUserFromToken(authHeader);
+//            if (!adminUser.isAdmin()) {
+//                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+//                        .body(createErrorResponse("Access denied. Admin privileges required."));
+//            }
+//
+//            User targetUser = adminCleanupService.getUserFromToken("Bearer " + userId);
+//            Map<String, Object> result = adminCleanupService.clearImageAssetsData(targetUser);
+//
+//            return ResponseEntity.ok(createSuccessResponse(
+//                    "Successfully cleaned up image assets data for user " + userId,
+//                    result
+//            ));
+//
+//        } catch (Exception e) {
+//            logger.error("Error during image assets cleanup: {}", e.getMessage(), e);
+//            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+//                    .body(createErrorResponse("Failed to cleanup image assets data: " + e.getMessage()));
+//        }
+//    }
 
     /**
      * Get cleanup statistics for a user without deleting (Admin only)

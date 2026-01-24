@@ -60,9 +60,22 @@ public class CompressionService {
             logger.error("MultipartFile is null or empty for user: {}", user.getId());
             throw new IllegalArgumentException("Media file is null or empty");
         }
-        if (targetSize == null || !targetSize.matches("\\d+(KB|MB)")) {
+
+        // Parse percentage from targetSize (e.g., "50%")
+        Integer compressionPercentage = null;
+        if (targetSize != null && targetSize.endsWith("%")) {
+            try {
+                compressionPercentage = Integer.parseInt(targetSize.replace("%", ""));
+                if (compressionPercentage < 1 || compressionPercentage > 99) {
+                    throw new IllegalArgumentException("Compression percentage must be between 1 and 99");
+                }
+            } catch (NumberFormatException e) {
+                logger.error("Invalid target size format: {}", targetSize);
+                throw new IllegalArgumentException("Target size must be in format 'number%'");
+            }
+        } else {
             logger.error("Invalid target size format: {}", targetSize);
-            throw new IllegalArgumentException("Target size must be in format 'numberKB' or 'numberMB'");
+            throw new IllegalArgumentException("Target size must be in format 'number%'");
         }
 
         String absoluteBaseDir = baseDir.startsWith("/") ? baseDir : "/" + baseDir;
@@ -91,6 +104,9 @@ public class CompressionService {
             compressedMedia.setOriginalPath(r2OriginalPath);
             compressedMedia.setOriginalCdnUrl(originalUrls.get("cdnUrl"));
             compressedMedia.setTargetSize(targetSize);
+            compressedMedia.setCompressionPercentage(compressionPercentage);
+            compressedMedia.setFileSizeBytes(mediaFile.getSize());
+            compressedMedia.setFileType(mediaFile.getContentType());
             compressedMedia.setStatus("UPLOADED");
             compressedMediaRepository.save(compressedMedia);
 
@@ -117,6 +133,11 @@ public class CompressionService {
                     logger.error("Media not found for id: {}", mediaId);
                     return new IllegalArgumentException("Media not found");
                 });
+
+        if (compressedMedia.getCompressionPercentage() == null) {
+            logger.error("Target size not set for mediaId: {}", mediaId);
+            throw new IllegalArgumentException("Target size not set");
+        }
 
         if (!compressedMedia.getUser().getId().equals(user.getId())) {
             logger.error("User {} not authorized to compress media {}", user.getId(), mediaId);
@@ -159,12 +180,30 @@ public class CompressionService {
             outputFile = new File(tempOutputPath);
             Files.createDirectories(outputFile.toPath().getParent());
 
+            // Calculate target size in bytes based on percentage
+            long originalSizeBytes = compressedMedia.getFileSizeBytes();
+            long targetSizeBytes = (originalSizeBytes * compressedMedia.getCompressionPercentage()) / 100;
+
+// Convert to KB or MB format for Python script
+            String targetSizeFormatted;
+            if (targetSizeBytes < 1024 * 1024) {
+                // Use KB if less than 1MB
+                targetSizeFormatted = (targetSizeBytes / 1024) + "KB";
+            } else {
+                // Use MB if 1MB or more
+                targetSizeFormatted = (targetSizeBytes / (1024 * 1024)) + "MB";
+            }
+
+            logger.info("Original size: {} bytes, target percentage: {}%, target size: {} ({})",
+                    originalSizeBytes, compressedMedia.getCompressionPercentage(),
+                    targetSizeBytes, targetSizeFormatted);
+
             List<String> command = Arrays.asList(
                     pythonPath,
                     compressionScriptPath,
                     inputFile.getAbsolutePath(),
                     outputFile.getAbsolutePath(),
-                    compressedMedia.getTargetSize()
+                    targetSizeFormatted
             );
 
             logger.debug("Executing command: {}", String.join(" ", command));
@@ -267,8 +306,19 @@ public class CompressionService {
 
     public CompressedMedia updateTargetSize(User user, Long mediaId, String newTargetSize) throws IllegalArgumentException {
 
-        if (newTargetSize == null || !newTargetSize.matches("\\d+(KB|MB)")) {
-            throw new IllegalArgumentException("Target size must be in format 'numberKB' or 'numberMB'");
+        // Parse percentage from targetSize (e.g., "50%")
+        Integer compressionPercentage = null;
+        if (newTargetSize != null && newTargetSize.endsWith("%")) {
+            try {
+                compressionPercentage = Integer.parseInt(newTargetSize.replace("%", ""));
+                if (compressionPercentage < 1 || compressionPercentage > 99) {
+                    throw new IllegalArgumentException("Compression percentage must be between 1 and 99");
+                }
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Target size must be in format 'number%'");
+            }
+        } else {
+            throw new IllegalArgumentException("Target size must be in format 'number%'");
         }
 
         CompressedMedia compressedMedia = compressedMediaRepository.findById(mediaId)
@@ -280,11 +330,13 @@ public class CompressionService {
             throw new IllegalArgumentException("Not authorized to update this media");
         }
 
-        if (!compressedMedia.getStatus().equals("UPLOADED")) {
-            throw new IllegalStateException("Media target size can only be updated in UPLOADED state");
+        // Allow updating target size for UPLOADED, SUCCESS, and FAILED states (but not PROCESSING)
+        if (compressedMedia.getStatus().equals("PROCESSING")) {
+            throw new IllegalStateException("Cannot update target size while media is being processed");
         }
 
         compressedMedia.setTargetSize(newTargetSize);
+        compressedMedia.setCompressionPercentage(compressionPercentage);
         compressedMediaRepository.save(compressedMedia);
         return compressedMedia;
     }
