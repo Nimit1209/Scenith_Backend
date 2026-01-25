@@ -23,7 +23,7 @@ public class ImageTemplateController {
      */
     @GetMapping
     public ResponseEntity<?> getAllTemplates(
-            @RequestHeader("Authorization") String token,
+//            @RequestHeader("Authorization") String token,
             @RequestParam(value = "category", required = false) String category) {
         try {
             List<ImageTemplate> templates;
@@ -45,7 +45,7 @@ public class ImageTemplateController {
      */
     @GetMapping("/{id}")
     public ResponseEntity<?> getTemplate(
-            @RequestHeader("Authorization") String token,
+//            @RequestHeader("Authorization") String token,
             @PathVariable Long id) {
         try {
             ImageTemplate template = templateService.getTemplateById(id);
