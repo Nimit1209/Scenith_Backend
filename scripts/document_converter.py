@@ -401,13 +401,22 @@ def rotate_pdf(input_path, output_path, options=None):
         return {"status": "error", "message": str(e)}
 
 def images_to_pdf(output_path, input_paths):
-    """Convert multiple images to a single PDF"""
+    """Convert multiple images to a single PDF with uniform aspect ratio"""
     try:
         if not input_paths:
             raise Exception("No image files provided")
 
-        # Open and convert images
-        images = []
+        # Standard aspect ratio - A4 proportions (210mm x 297mm = 1:1.414)
+        # Or use 3:4 (portrait) or 4:3 (landscape) for photos
+        TARGET_ASPECT_RATIO = 210 / 297  # A4 portrait (width/height)
+
+        # Target dimensions for consistent page size (in pixels at 300 DPI)
+        # A4 at 300 DPI: 2480 x 3508 pixels
+        TARGET_WIDTH = 2480
+        TARGET_HEIGHT = 3508
+
+        # Open and process images
+        processed_images = []
         for img_path in input_paths:
             if not os.path.exists(img_path):
                 raise Exception(f"Image file not found: {img_path}")
@@ -415,39 +424,70 @@ def images_to_pdf(output_path, input_paths):
             try:
                 img = Image.open(img_path)
 
-                # Convert to RGB if necessary
-                if img.mode in ('RGBA', 'LA', 'P'):
-                    background = Image.new('RGB', img.size, (255, 255, 255))
-                    if img.mode == 'P':
-                        img = img.convert('RGBA')
-                    if img.mode == 'RGBA':
-                        background.paste(img, mask=img.split()[-1])
-                    else:
-                        background.paste(img)
-                    img = background
-                elif img.mode != 'RGB':
-                    img = img.convert('RGB')
+                # Get original dimensions
+                orig_width, orig_height = img.size
+                orig_aspect = orig_width / orig_height
 
-                images.append(img)
+                # Create a white canvas with target dimensions
+                canvas = Image.new('RGB', (TARGET_WIDTH, TARGET_HEIGHT), (255, 255, 255))
+
+                # Calculate scaling to fit image within canvas while maintaining aspect ratio
+                if orig_aspect > TARGET_ASPECT_RATIO:
+                    # Image is wider - fit to width
+                    new_width = TARGET_WIDTH
+                    new_height = int(TARGET_WIDTH / orig_aspect)
+                else:
+                    # Image is taller - fit to height
+                    new_height = TARGET_HEIGHT
+                    new_width = int(TARGET_HEIGHT * orig_aspect)
+
+                # Resize image with high-quality resampling
+                img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+                # Convert to RGB if necessary
+                if img_resized.mode in ('RGBA', 'LA', 'P'):
+                    background = Image.new('RGB', img_resized.size, (255, 255, 255))
+                    if img_resized.mode == 'P':
+                        img_resized = img_resized.convert('RGBA')
+                    if img_resized.mode == 'RGBA':
+                        background.paste(img_resized, mask=img_resized.split()[-1])
+                    else:
+                        background.paste(img_resized)
+                    img_resized = background
+                elif img_resized.mode != 'RGB':
+                    img_resized = img_resized.convert('RGB')
+
+                # Center the image on the canvas
+                paste_x = (TARGET_WIDTH - new_width) // 2
+                paste_y = (TARGET_HEIGHT - new_height) // 2
+                canvas.paste(img_resized, (paste_x, paste_y))
+
+                processed_images.append(canvas)
+
             except Exception as e:
                 raise Exception(f"Error processing image {img_path}: {str(e)}")
 
-        if not images:
+        if not processed_images:
             raise Exception("No valid images to convert")
 
-        # Save as PDF
-        images[0].save(
+        # Save as PDF with consistent page size
+        processed_images[0].save(
             output_path,
             save_all=True,
-            append_images=images[1:] if len(images) > 1 else [],
-            resolution=100.0,
+            append_images=processed_images[1:] if len(processed_images) > 1 else [],
+            resolution=300.0,  # 300 DPI for high quality
             quality=95
         )
 
-        return {"status": "success", "output_path": output_path, "image_count": len(images)}
+        return {
+            "status": "success",
+            "output_path": output_path,
+            "image_count": len(processed_images),
+            "page_size": f"{TARGET_WIDTH}x{TARGET_HEIGHT}px (A4 at 300 DPI)",
+            "aspect_ratio": f"{TARGET_ASPECT_RATIO:.3f} (A4 portrait)"
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 
 def pdf_to_images(input_path, output_path):
     """Extract pages from PDF as images using pdftoppm"""
