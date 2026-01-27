@@ -37,6 +37,7 @@ public class VideoSpeedService {
     private final ObjectMapper objectMapper;
     private final ProcessingEmailHelper emailHelper;
     private final UserProcessingUsageRepository userProcessingUsageRepository;
+    private final PlanLimitsService planLimitsService;
 
     @Value("${app.ffmpeg-path}")
     private String ffmpegPath;
@@ -122,6 +123,24 @@ public class VideoSpeedService {
         // Upload original video to R2
         cloudflareR2Service.uploadFile(videoFile, r2Path);
 
+        try {
+            double videoDuration = getVideoDuration(r2Path);
+            int maxMinutes = planLimitsService.getMaxSpeedVideoLengthMinutes(user);
+
+            if (maxMinutes > 0 && videoDuration > maxMinutes * 60) {
+                // Delete the uploaded file since it exceeds limits
+                Files.deleteIfExists(Paths.get(r2Path));
+                throw new IllegalArgumentException(
+                        "Video length (" + (int)(videoDuration/60) + " min) exceeds maximum allowed (" +
+                                maxMinutes + " minutes). Upgrade your plan."
+                );
+            }
+        } catch (InterruptedException e) {
+            Files.deleteIfExists(Paths.get(r2Path));
+            Thread.currentThread().interrupt();
+            throw new IOException("Failed to validate video duration: " + e.getMessage());
+        }
+
         // Create VideoSpeed entity
         VideoSpeed video = new VideoSpeed();
         video.setUser(user);
@@ -160,7 +179,7 @@ public class VideoSpeedService {
      * Initiate export by queueing processing task to SQS
      */
     @Transactional
-    public VideoSpeed initiateExport(Long id, User user, String quality) throws IOException {
+    public VideoSpeed initiateExport(Long id, User user, String quality) throws IOException, InterruptedException {
         VideoSpeed video = videoSpeedRepository.findByIdAndUser(id, user)
                 .orElseThrow(() -> new RuntimeException("Video not found or unauthorized: " + id));
 
@@ -172,7 +191,8 @@ public class VideoSpeedService {
         // Validate processing limits (using video duration from metadata if available)
         // Note: For exact duration validation, you'd need to download and probe the video first
         // For now, we'll do basic validation
-        validateProcessingLimits(user, quality);
+        double videoDuration = getVideoDuration(video.getOriginalFilePath());
+        validateProcessingLimits(user, quality, videoDuration);
 
         // Set quality
         String finalQuality = quality != null ? quality : "720p";
@@ -425,27 +445,27 @@ public class VideoSpeedService {
     /**
      * Validate processing limits (basic version without duration)
      */
-    private void validateProcessingLimits(User user, String quality) {
-        // Validate quality
-        if (quality != null && !user.isQualityAllowed(quality)) {
-            throw new IllegalArgumentException(
-                    "Quality " + quality + " not allowed. Maximum allowed: " + user.getMaxAllowedQuality()
-            );
+    private void validateProcessingLimits(User user, String quality, double videoDuration) throws IllegalArgumentException {
+        if (quality != null && !planLimitsService.isSpeedQualityAllowed(user, quality)) {
+            throw new IllegalArgumentException("Quality " + quality + " not allowed. Maximum allowed: " +
+                    planLimitsService.getMaxSpeedAllowedQuality(user));
         }
 
-        // Check monthly processing limit
-        int maxPerMonth = user.getMaxVideoProcessingPerMonth();
+        int maxPerMonth = planLimitsService.getMaxSpeedProcessingPerMonth(user);
         if (maxPerMonth > 0) {
             String currentYearMonth = YearMonth.now().toString();
-            Optional<UserProcessingUsage> usageOpt = userProcessingUsageRepository
-                    .findByUserAndServiceTypeAndYearMonth(user, "VIDEO_SPEED", currentYearMonth);
+            Optional<UserProcessingUsage> usageOpt = userProcessingUsageRepository.findByUserAndServiceTypeAndYearMonth(
+                    user, "VIDEO_SPEED", currentYearMonth);
 
             int currentCount = usageOpt.map(UserProcessingUsage::getProcessCount).orElse(0);
             if (currentCount >= maxPerMonth) {
-                throw new IllegalArgumentException(
-                        "Monthly processing limit reached (" + maxPerMonth + "). Upgrade your plan for more."
-                );
+                throw new IllegalArgumentException("Monthly processing limit reached (" + maxPerMonth + "). Upgrade your plan for more.");
             }
+        }
+
+        int maxMinutes = planLimitsService.getMaxSpeedVideoLengthMinutes(user);
+        if (maxMinutes > 0 && videoDuration > maxMinutes * 60) {
+            throw new IllegalArgumentException("Video length exceeds maximum allowed (" + maxMinutes + " minutes). Upgrade your plan.");
         }
     }
 

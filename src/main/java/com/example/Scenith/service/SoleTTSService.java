@@ -42,6 +42,7 @@ public class SoleTTSService {
     private final UserDailyTtsUsageRepository userDailyTtsUsageRepository;
     private final ProcessingEmailHelper emailHelper;
     private final UpgradeEmailSchedulerService upgradeEmailSchedulerService;
+    private final PlanLimitsService planLimitsService;
 
     @Value("${app.base-dir:/tmp}")
     private String baseDir;
@@ -56,7 +57,6 @@ public class SoleTTSService {
             String languageCode,
             String emotion,
             Map<String, String> customConfig) throws IOException, InterruptedException {
-
         // Validate input
         if (text == null || text.trim().isEmpty()) {
             throw new IllegalArgumentException("Text is required and cannot be empty");
@@ -68,8 +68,8 @@ public class SoleTTSService {
             throw new IllegalArgumentException("Language code is required");
         }
 
-        // Check max chars per request
-        long maxCharsPerRequest = user.getMaxCharsPerRequest();
+        // ✅ CHANGE: Use planLimitsService instead of user.getMaxCharsPerRequest()
+        long maxCharsPerRequest = planLimitsService.getMaxCharsPerRequest(user);
         if (maxCharsPerRequest > 0 && text.length() > maxCharsPerRequest) {
             throw new IllegalArgumentException(
                     "Text exceeds max characters allowed per request for " + user.getRole() +
@@ -77,9 +77,9 @@ public class SoleTTSService {
             );
         }
 
-        // Check monthly TTS usage (skip if unlimited)
-        long monthlyLimit = user.getMonthlyTtsLimit();
-        if (monthlyLimit > 0) {
+        // ✅ CHANGE: Use planLimitsService instead of user.getMonthlyTtsLimit()
+        long monthlyLimit = planLimitsService.getMonthlyTtsLimit(user);
+        if (monthlyLimit > 0) { // Only check if there's a limit (-1 means unlimited)
             long userUsage = getUserTtsUsage(user);
             if (userUsage + text.length() > monthlyLimit) {
                 throw new IllegalStateException(
@@ -89,9 +89,9 @@ public class SoleTTSService {
             }
         }
 
-        // Check daily TTS usage (skip if unlimited)
-        long dailyLimit = user.getDailyTtsLimit();
-        if (dailyLimit > 0) {
+        // ✅ CHANGE: Use planLimitsService instead of user.getDailyTtsLimit()
+        long dailyLimit = planLimitsService.getDailyTtsLimit(user);
+        if (dailyLimit > 0) { // -1 means no daily limit
             long dailyUsage = getUserDailyTtsUsage(user);
             if (dailyUsage + text.length() > dailyLimit) {
                 throw new IllegalStateException(
@@ -101,9 +101,7 @@ public class SoleTTSService {
             }
         }
 
-        // ────────────────────────────────────────────────
-        // Google Cloud TTS setup
-        // ────────────────────────────────────────────────
+        // Generate audio using Google Cloud TTS
         GoogleCredentials credentials = GoogleCredentials.fromStream(new FileInputStream(credentialsPath));
         TextToSpeechSettings settings = TextToSpeechSettings.newBuilder()
                 .setCredentialsProvider(() -> credentials)

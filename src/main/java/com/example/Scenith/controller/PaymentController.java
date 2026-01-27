@@ -110,8 +110,9 @@ public class PaymentController {
             Double amount = ((Number) request.get("amount")).doubleValue();
             String currency = (String) request.get("currency");
 
-            if (!planType.equals("CREATOR") && !planType.equals("STUDIO")) {
-                return ResponseEntity.badRequest().body("Invalid plan type");
+            // ✅ UPDATED: Support individual plans too
+            if (!isValidPlanType(planType)) {
+                return ResponseEntity.badRequest().body("Invalid plan type. Must be one of: CREATOR, STUDIO, AI_VOICE_PRO, AI_SUBTITLE_PRO, AI_SPEED_PRO");
             }
 
             // Create internal payment
@@ -136,7 +137,7 @@ public class PaymentController {
                 Order razorpayOrder = razorpayClient.orders.create(orderRequest);
                 gatewayOrderId = razorpayOrder.get("id");
                 gateway = "razorpay";
-                response.put("keyId", razorpayKeyId);  // Use injected keyId
+                response.put("keyId", razorpayKeyId);
             } else if ("USD".equalsIgnoreCase(currency)) {
                 // PayPal
                 com.paypal.orders.Order paypalOrder = createPayPalOrder(amount);
@@ -149,9 +150,18 @@ public class PaymentController {
 
             return ResponseEntity.ok(response);
         } catch (Exception e) {
-            e.printStackTrace(); // For debugging
+            e.printStackTrace();
             return ResponseEntity.badRequest().body("Error: " + e.getMessage());
         }
+    }
+
+    // ADD THIS helper method
+    private boolean isValidPlanType(String planType) {
+        return "CREATOR".equals(planType) ||
+                "STUDIO".equals(planType) ||
+                "AI_VOICE_PRO".equals(planType) ||
+                "AI_SUBTITLE_PRO".equals(planType) ||
+                "AI_SPEED_PRO".equals(planType);
     }
 
     // Helper for PayPal order creation

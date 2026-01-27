@@ -55,6 +55,7 @@ public class SubtitleService {
   private final SqsService sqsService;
   private final ProcessingEmailHelper emailHelper;
   private final UserProcessingUsageRepository userProcessingUsageRepository;
+  private final PlanLimitsService planLimitsService;
 
   @Value("${app.base-dir:/temp}")
   private String baseDir;
@@ -77,7 +78,7 @@ public class SubtitleService {
           UserRepository userRepository,
           CloudflareR2Service cloudflareR2Service,
           ObjectMapper objectMapper,
-          SqsClient sqsClient, EmailService emailService, SqsService sqsService, ProcessingEmailHelper emailHelper, UserProcessingUsageRepository userProcessingUsageRepository) {
+          SqsClient sqsClient, EmailService emailService, SqsService sqsService, ProcessingEmailHelper emailHelper, UserProcessingUsageRepository userProcessingUsageRepository, PlanLimitsService planLimitsService) {
     this.jwtUtil = jwtUtil;
     this.subtitleMediaRepository = subtitleMediaRepository;
     this.userRepository = userRepository;
@@ -88,6 +89,7 @@ public class SubtitleService {
       this.sqsService = sqsService;
       this.emailHelper = emailHelper;
       this.userProcessingUsageRepository = userProcessingUsageRepository;
+      this.planLimitsService = planLimitsService;
   }
 
   public SubtitleMedia uploadMedia(User user, MultipartFile mediaFile) throws IOException {
@@ -110,6 +112,24 @@ public class SubtitleService {
       if (inputFile.length() == 0) {
         logger.error("Input file is empty: {}", inputFile.getAbsolutePath());
         throw new IOException("Input file is empty");
+      }
+
+      try {
+        double videoDuration = getVideoDuration(inputFile);
+        int maxMinutes = planLimitsService.getMaxVideoLengthMinutes(user);
+
+        if (maxMinutes > 0 && videoDuration > maxMinutes * 60) {
+          // Delete the uploaded file since it exceeds limits
+          inputFile.delete();
+          throw new IllegalArgumentException(
+                  "Video length (" + (int)(videoDuration/60) + " min) exceeds maximum allowed (" +
+                          maxMinutes + " minutes). Upgrade your plan."
+          );
+        }
+      } catch (InterruptedException e) {
+        inputFile.delete();
+        Thread.currentThread().interrupt();
+        throw new IOException("Failed to validate video duration: " + e.getMessage());
       }
 
       String r2OriginalPath = String.format("subtitles/%s/original/%s", user.getId(), mediaFile.getOriginalFilename());
@@ -1918,14 +1938,15 @@ public class SubtitleService {
   }
   private void validateProcessingLimits(User user, String quality, double videoDuration) throws IllegalArgumentException {
     // Check quality
-    if (quality != null && !user.isQualityAllowed(quality)) {
-      throw new IllegalArgumentException("Quality " + quality + " not allowed. Maximum allowed: " + user.getMaxAllowedQuality());
+    if (quality != null && !planLimitsService.isQualityAllowed(user, quality)) {
+      throw new IllegalArgumentException("Quality " + quality + " not allowed. Maximum allowed: " +
+              planLimitsService.getMaxAllowedQuality(user));
     }
 
     // Check monthly limit
-    int maxPerMonth = user.getMaxVideoProcessingPerMonth();
+    int maxPerMonth = planLimitsService.getMaxVideoProcessingPerMonth(user);
     if (maxPerMonth > 0) {
-      String currentYearMonth = YearMonth.now().toString(); // "2025-01"
+      String currentYearMonth = YearMonth.now().toString();
       Optional<UserProcessingUsage> usageOpt = userProcessingUsageRepository.findByUserAndServiceTypeAndYearMonth(
               user, "SUBTITLE", currentYearMonth);
 
@@ -1936,7 +1957,7 @@ public class SubtitleService {
     }
 
     // Check video length
-    int maxMinutes = user.getMaxVideoLengthMinutes();
+    int maxMinutes = planLimitsService.getMaxVideoLengthMinutes(user);
     if (maxMinutes > 0 && videoDuration > maxMinutes * 60) {
       throw new IllegalArgumentException("Video length exceeds maximum allowed (" + maxMinutes + " minutes). Upgrade your plan.");
     }
