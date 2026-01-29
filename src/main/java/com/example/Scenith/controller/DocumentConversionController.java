@@ -189,38 +189,48 @@ public class DocumentConversionController {
     public ResponseEntity<?> compressPdf(
             @RequestHeader("Authorization") String token,
             @RequestParam("uploadId") Long uploadId,
+            @RequestParam(required = false, defaultValue = "preset") String compressionMode,
             @RequestParam(required = false, defaultValue = "medium") String compressionLevel,
-            @RequestParam(required = false) Integer customPercentage) {
+            @RequestParam(required = false) Integer customPercentage,
+            @RequestParam(required = false) Long targetFileSizeBytes) {
         try {
             User user = documentConversionService.getUserFromToken(token);
 
             Map<String, Object> options = new HashMap<>();
+            options.put("compressionMode", compressionMode);
 
-            // Handle custom percentage
-            if (customPercentage != null) {
-                // Validate percentage range (1-99)
-                if (customPercentage < 1 || customPercentage > 99) {
+            if ("filesize".equals(compressionMode)) {
+                // Exact file size compression
+                if (targetFileSizeBytes == null || targetFileSizeBytes <= 0) {
                     return ResponseEntity.status(400).body(Map.of(
-                            "message", "Invalid compression percentage",
-                            "error", "Percentage must be between 1 and 99"
+                            "message", "Invalid target file size",
+                            "error", "Target file size must be greater than 0"
                     ));
                 }
-                options.put("compressionLevel", "custom");
+                options.put("targetFileSizeBytes", targetFileSizeBytes);
+
+            } else if ("percentage".equals(compressionMode)) {
+                // Percentage-based compression
+                if (customPercentage == null || customPercentage < 10 || customPercentage > 95) {
+                    return ResponseEntity.status(400).body(Map.of(
+                            "message", "Invalid compression percentage",
+                            "error", "Percentage must be between 10 and 95"
+                    ));
+                }
                 options.put("compressionPercentage", customPercentage);
+
             } else {
-                // Map predefined levels to percentages
-                String level = compressionLevel.toLowerCase();
+                // Preset compression levels
+                String level = compressionLevel != null ? compressionLevel.toLowerCase() : "medium";
                 int percentage;
                 switch (level) {
                     case "low":
                         percentage = 75;
                         break;
-                    case "medium":
-                        percentage = 50;
-                        break;
                     case "high":
                         percentage = 25;
                         break;
+                    case "medium":
                     default:
                         percentage = 50;
                         level = "medium";

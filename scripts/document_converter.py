@@ -272,49 +272,257 @@ def split_pdf(input_path, output_path, options=None):
 
 
 def compress_pdf(input_path, output_path, options=None):
-    """Compress PDF file - ENHANCED with percentage control"""
+    """
+    Compress PDF file with precise file size targeting using iterative Ghostscript compression
+    """
+    # DEBUG: Create a log file to see what's happening
+    debug_log = output_path + '.debug.log'
+
+    def debug_log_write(msg):
+        with open(debug_log, 'a') as f:
+            f.write(msg + '\n')
+            f.flush()
+
     try:
-        compression_percentage = options.get('compressionPercentage', 50) if options else 50
-
-        # Validate percentage
-        if compression_percentage < 1 or compression_percentage > 99:
-            compression_percentage = 50
-
+        compression_mode = options.get('compressionMode', 'preset') if options else 'preset'
         reader = PdfReader(input_path)
-        writer = PdfWriter()
-
-        # Add all pages with compression
-        for page in reader.pages:
-            page.compress_content_streams()
-            writer.add_page(page)
-
-        # Enable compression based on percentage
-        # Lower percentage = more compression
-        if compression_percentage <= 30:
-            # High compression
-            for page in writer.pages:
-                page.compress_content_streams()
-
-        writer.add_metadata(reader.metadata)
-
-        # Write compressed PDF
-        with open(output_path, 'wb') as output_file:
-            writer.write(output_file)
-
-        # Calculate compression ratio
         original_size = os.path.getsize(input_path)
-        compressed_size = os.path.getsize(output_path)
-        actual_compression_ratio = (1 - compressed_size / original_size) * 100 if original_size > 0 else 0
 
-        return {
-            "status": "success",
-            "output_path": output_path,
-            "original_size": original_size,
-            "compressed_size": compressed_size,
-            "target_percentage": compression_percentage,
-            "actual_compression_ratio": f"{actual_compression_ratio:.2f}%"
-        }
+        debug_log_write(f"START: mode={compression_mode}, original_size={original_size}")
+
+        if compression_mode == 'filesize':
+            target_size = options.get('targetFileSizeBytes', original_size * 0.5)
+
+            debug_log_write(f"Target size: {target_size} bytes")
+
+            # Validate target size
+            if target_size <= 0:
+                raise Exception("Target size must be greater than 0")
+
+            if target_size >= original_size * 0.95:
+                raise Exception(f"Target size too large")
+
+            # Binary search parameters
+            min_resolution = 30
+            max_resolution = 300
+            tolerance = 0.08
+            max_iterations = 25
+
+            best_file = None
+            best_size = None
+            best_diff = float('inf')
+            best_resolution = None
+
+            # Determine PDF settings
+            target_ratio = target_size / original_size
+            if target_ratio < 0.25:
+                pdf_setting = '/screen'
+            elif target_ratio < 0.50:
+                pdf_setting = '/ebook'
+            elif target_ratio < 0.75:
+                pdf_setting = '/printer'
+            else:
+                pdf_setting = '/prepress'
+
+            debug_log_write(f"PDF setting: {pdf_setting}, target_ratio: {target_ratio:.2f}")
+
+            iterations_run = 0
+            for iteration in range(max_iterations):
+                iterations_run = iteration + 1
+
+                resolution = (min_resolution + max_resolution) // 2
+
+                debug_log_write(f"Iteration {iterations_run}: resolution={resolution}, min={min_resolution}, max={max_resolution}")
+
+                # Check convergence
+                if max_resolution - min_resolution <= 0:
+                    debug_log_write(f"Bounds converged at iteration {iterations_run}")
+                    break
+
+                temp_output = output_path + f'.iter_{iteration}'
+
+                try:
+                    jpeg_quality = min(95, max(15, int(resolution / 2.8)))
+
+                    gs_command = [
+                        'gs',
+                        '-sDEVICE=pdfwrite',
+                        '-dCompatibilityLevel=1.4',
+                        f'-dPDFSETTINGS={pdf_setting}',
+                        '-dNOPAUSE',
+                        '-dQUIET',
+                        '-dBATCH',
+                        f'-dColorImageResolution={resolution}',
+                        f'-dGrayImageResolution={resolution}',
+                        f'-dMonoImageResolution={resolution}',
+                        '-dDownsampleColorImages=true',
+                        '-dDownsampleGrayImages=true',
+                        '-dColorImageDownsampleType=/Bicubic',
+                        '-dGrayImageDownsampleType=/Bicubic',
+                        '-dAutoFilterColorImages=false',
+                        '-dAutoFilterGrayImages=false',
+                        '-dColorImageFilter=/DCTEncode',
+                        '-dGrayImageFilter=/DCTEncode',
+                        f'-dJPEGQ={jpeg_quality}',
+                        '-dDetectDuplicateImages=true',
+                        '-dCompressFonts=true',
+                        '-dEmbedAllFonts=true',
+                        '-dSubsetFonts=true',
+                        f'-sOutputFile={temp_output}',
+                        input_path
+                    ]
+
+                    debug_log_write(f"Running gs with quality={jpeg_quality}")
+
+                    result = subprocess.run(
+                        gs_command,
+                        capture_output=True,
+                        text=True,
+                        timeout=180
+                    )
+
+                    if result.returncode != 0 or not os.path.exists(temp_output):
+                        debug_log_write(f"GS failed: returncode={result.returncode}, exists={os.path.exists(temp_output)}")
+                        max_resolution = resolution - 1
+                        continue
+
+                    temp_size = os.path.getsize(temp_output)
+                    size_diff = abs(temp_size - target_size)
+                    size_diff_percent = (size_diff / target_size) * 100
+
+                    debug_log_write(f"Result: size={temp_size}, diff={size_diff_percent:.1f}%")
+
+                    # Track best
+                    if size_diff < best_diff:
+                        if best_file and os.path.exists(best_file):
+                            try:
+                                os.remove(best_file)
+                            except:
+                                pass
+                        best_file = temp_output
+                        best_size = temp_size
+                        best_diff = size_diff
+                        best_resolution = resolution
+                        debug_log_write(f"NEW BEST: size={temp_size}")
+                    else:
+                        try:
+                            os.remove(temp_output)
+                        except:
+                            pass
+
+                    # Check tolerance
+                    if size_diff_percent <= (tolerance * 100):
+                        debug_log_write(f"TARGET ACHIEVED!")
+                        break
+
+                    # Adjust bounds
+                    if temp_size > target_size:
+                        debug_log_write(f"Too large, lowering max: {max_resolution} → {resolution - 1}")
+                        max_resolution = resolution - 1
+                    else:
+                        debug_log_write(f"Too small, raising min: {min_resolution} → {resolution + 1}")
+                        min_resolution = resolution + 1
+
+                except subprocess.TimeoutExpired:
+                    debug_log_write(f"TIMEOUT at iteration {iterations_run}")
+                    if os.path.exists(temp_output):
+                        try:
+                            os.remove(temp_output)
+                        except:
+                            pass
+                    max_resolution = resolution - 1
+                    continue
+                except Exception as e:
+                    debug_log_write(f"ERROR: {str(e)}")
+                    if os.path.exists(temp_output):
+                        try:
+                            os.remove(temp_output)
+                        except:
+                            pass
+                    max_resolution = resolution - 1
+                    continue
+
+            # Use best result
+            if best_file and os.path.exists(best_file):
+                os.rename(best_file, output_path)
+                final_size = best_size
+                compression_ratio = (1 - final_size / original_size) * 100
+                accuracy = max(0, 100 - (abs(final_size - target_size) / target_size * 100))
+
+                debug_log_write(f"FINAL: size={final_size}, resolution={best_resolution}dpi, iterations={iterations_run}")
+
+                return {
+                    "status": "success",
+                    "output_path": output_path,
+                    "original_size": original_size,
+                    "compressed_size": final_size,
+                    "target_size": target_size,
+                    "compression_ratio": f"{compression_ratio:.2f}%",
+                    "accuracy": f"{accuracy:.1f}%",
+                    "size_difference_bytes": abs(final_size - target_size),
+                    "size_difference_mb": abs(final_size - target_size) / 1024 / 1024,
+                    "resolution_used": f"{best_resolution}dpi",
+                    "iterations_used": iterations_run
+                }
+            else:
+                debug_log_write("ERROR: No best file found!")
+                raise Exception("Failed to compress to target size")
+
+        elif compression_mode == 'percentage':
+            compression_percentage = options.get('compressionPercentage', 50)
+            target_size = int(original_size * (compression_percentage / 100))
+
+            debug_log_write(f"Percentage mode: {compression_percentage}% = {target_size} bytes")
+
+            options['targetFileSizeBytes'] = target_size
+            options['compressionMode'] = 'filesize'
+            return compress_pdf(input_path, output_path, options)
+
+        else:
+            # Preset mode
+            level = options.get('compressionLevel', 'medium')
+
+            debug_log_write(f"Preset mode: {level}")
+
+            level_settings = {
+                'low': {'pdf_setting': '/printer', 'resolution': 150},
+                'medium': {'pdf_setting': '/ebook', 'resolution': 100},
+                'high': {'pdf_setting': '/screen', 'resolution': 72}
+            }
+
+            settings = level_settings.get(level, level_settings['medium'])
+
+            try:
+                subprocess.run([
+                    'gs',
+                    '-sDEVICE=pdfwrite',
+                    '-dCompatibilityLevel=1.4',
+                    f'-dPDFSETTINGS={settings["pdf_setting"]}',
+                    '-dNOPAUSE',
+                    '-dQUIET',
+                    '-dBATCH',
+                    f'-dColorImageResolution={settings["resolution"]}',
+                    f'-dGrayImageResolution={settings["resolution"]}',
+                    f'-sOutputFile={output_path}',
+                    input_path
+                ], check=True, timeout=180)
+
+                compressed_size = os.path.getsize(output_path)
+                actual_ratio = (1 - compressed_size / original_size) * 100
+
+                return {
+                    "status": "success",
+                    "output_path": output_path,
+                    "original_size": original_size,
+                    "compressed_size": compressed_size,
+                    "compression_level": level,
+                    "actual_compression_ratio": f"{actual_ratio:.2f}%"
+                }
+            except Exception as e:
+                raise Exception(f"Compression failed: {str(e)}")
+
     except Exception as e:
+        debug_log_write(f"EXCEPTION: {str(e)}")
         return {"status": "error", "message": str(e)}
 
 def rotate_pdf(input_path, output_path, options=None):
