@@ -126,34 +126,33 @@ def merge_pdfs(output_path, input_paths, options=None):
 
         if page_mapping:
             # Custom merge with specific pages in specific order
-            # Build a map of uploadId to file path
-            # Build upload_id_to_path by parsing filenames
+            # Build a map of uploadId to file path by parsing filenames
             upload_id_to_path = {}
-        for path in input_paths:
-            filename = os.path.basename(path)
-            if filename.startswith('input_'):
-                parts = filename.split('_', 2)  # Split into ['input', '70', 'file.pdf']
-                if len(parts) >= 2:
-                    try:
-                        uid = int(parts[1])
-                        upload_id_to_path[uid] = path
-                    except ValueError:
-                        pass
+            for path in input_paths:
+                filename = os.path.basename(path)
+                if filename.startswith('input_'):
+                    parts = filename.split('_', 2)  # Split into ['input', '70', 'file.pdf']
+                    if len(parts) >= 2:
+                        try:
+                            uid = int(parts[1])
+                            upload_id_to_path[uid] = path
+                        except ValueError:
+                            pass
 
-        for page_info in page_mapping:
-            upload_id = page_info.get('uploadId')
-            page_number = page_info.get('pageNumber', 1)
+            for page_info in page_mapping:
+                upload_id = page_info.get('uploadId')
+                page_number = page_info.get('pageNumber', 1)
 
-            file_path = upload_id_to_path.get(upload_id)
-            if not file_path or not os.path.exists(file_path):
-                print(f"Warning: File not found for uploadId {upload_id}", file=sys.stderr)
-                continue
+                file_path = upload_id_to_path.get(upload_id)
+                if not file_path or not os.path.exists(file_path):
+                    print(f"Warning: File not found for uploadId {upload_id}", file=sys.stderr)
+                    continue
 
-            # Append specific page (page_number - 1 because PyPDF2 uses 0-based indexing)
-            try:
-                merger.append(file_path, pages=(page_number - 1, page_number))
-            except Exception as e:
-                print(f"Warning: Failed to append page {page_number} from {file_path}: {str(e)}", file=sys.stderr)
+                # Append specific page (page_number - 1 because PyPDF2 uses 0-based indexing)
+                try:
+                    merger.append(file_path, pages=(page_number - 1, page_number))
+                except Exception as e:
+                    print(f"Warning: Failed to append page {page_number} from {file_path}: {str(e)}", file=sys.stderr)
         else:
             # Standard merge - all pages from all PDFs in order
             for pdf_path in input_paths:
@@ -174,7 +173,6 @@ def merge_pdfs(output_path, input_paths, options=None):
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 
 def split_pdf(input_path, output_path, options=None):
     """Split PDF into multiple files - ENHANCED"""

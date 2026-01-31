@@ -289,6 +289,12 @@
 			<artifactId>batik-codec</artifactId>
 			<version>1.17</version>
 		</dependency>
+		<!-- OkHttp for HTTP client -->
+		<dependency>
+			<groupId>com.squareup.okhttp3</groupId>
+			<artifactId>okhttp</artifactId>
+			<version>4.12.0</version>
+		</dependency>
 	</dependencies>
 
 	<repositories>

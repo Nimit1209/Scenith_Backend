@@ -297,7 +297,7 @@ RUN chmod +x /app/scripts/*.py /temp/scripts/*.py
 COPY .env /app/.env
 COPY credentials/video-editor-tts-24b472478ab838d2168992684517cacfab4c11da.json /app/credentials/video-editor-tts.json
 COPY src/main/resources/email-templates/ /app/resources/email-templates/
-
+COPY src/main/resources/image-gen-api-key.txt /app/credentials/image-gen-api-key.txt
 # Copy Spring Boot JAR (this changes most frequently)
 COPY target/Scenith-0.0.1-SNAPSHOT.jar app.jar
 

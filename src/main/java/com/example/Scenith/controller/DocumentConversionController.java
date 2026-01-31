@@ -100,7 +100,6 @@ public class DocumentConversionController {
     @PostMapping("/merge-pdf")
     public ResponseEntity<?> mergePdfs(
             @RequestHeader("Authorization") String token,
-            @RequestParam("uploadIds") List<Long> uploadIds,
             @RequestParam(required = false) String pageMapping) {
         try {
             User user = documentConversionService.getUserFromToken(token);
@@ -116,15 +115,34 @@ public class DocumentConversionController {
                                     objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Object.class)
                             ));
                     options.put("pageMapping", mappingList);
+
+                    // Extract unique uploadIds from pageMapping
+                    Set<Long> uniqueUploadIds = new HashSet<>();
+                    for (Map<String, Object> mapping : mappingList) {
+                        Object uploadIdObj = mapping.get("uploadId");
+                        if (uploadIdObj instanceof Number) {
+                            uniqueUploadIds.add(((Number) uploadIdObj).longValue());
+                        }
+                    }
+                    List<Long> uploadIds = new ArrayList<>(uniqueUploadIds);
+
+                    DocumentConversion result = documentConversionService.mergePdfs(user, uploadIds, options);
+                    return ResponseEntity.ok(Map.of(
+                            "message", "PDFs merged successfully",
+                            "data", result
+                    ));
                 } catch (Exception e) {
                     logger.warn("Failed to parse pageMapping: {}", e.getMessage());
+                    return ResponseEntity.status(400).body(Map.of(
+                            "message", "Invalid page mapping format",
+                            "error", e.getMessage()
+                    ));
                 }
             }
 
-            DocumentConversion result = documentConversionService.mergePdfs(user, uploadIds, options);
-            return ResponseEntity.ok(Map.of(
-                    "message", "PDFs merged successfully",
-                    "data", result
+            return ResponseEntity.status(400).body(Map.of(
+                    "message", "Page mapping is required",
+                    "error", "No page mapping provided"
             ));
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(

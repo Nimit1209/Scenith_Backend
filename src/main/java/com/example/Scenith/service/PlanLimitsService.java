@@ -243,4 +243,69 @@ public class PlanLimitsService {
                 .filter(plan -> plan.getExpiryDate() == null || plan.getExpiryDate().isAfter(now))
                 .toList();
     }
+
+
+    public long getDailyImageGenLimit(User user) {
+        switch (user.getRole()) {
+            case BASIC:
+                return 3;
+            case CREATOR:
+                return 15;
+            case ADMIN:
+            case STUDIO:
+                return 30;
+            default:
+                return 0;
+        }
+    }
+
+    public long getMonthlyImageGenLimit(User user) {
+        switch (user.getRole()) {
+            case BASIC:
+                return 30;
+            case CREATOR:
+                return 400;
+            case ADMIN:
+            case STUDIO:
+                return 900;
+            default:
+                return 0;
+        }
+    }
+
+    public int getImagesPerRequest(User user) {
+        switch (user.getRole()) {
+            case BASIC:
+            case ADMIN:
+                return 1;
+            case CREATOR:
+                return 2;
+            case STUDIO:
+                return 4;
+            default:
+                return 1;
+        }
+    }
+
+    public String getImageResolution(User user) {
+        switch (user.getRole()) {
+            case BASIC:
+            case ADMIN:
+                return "1024x1024";  // Changed from 512x512
+            case CREATOR:
+                return "896x1152";   // Changed from 768x768, portrait orientation
+            case STUDIO:
+                return "1024x1024";  // Changed from 768x768
+            default:
+                return "1024x1024";
+        }
+    }
+
+    public int getImageSteps(User user) {
+        return 22; // Same for all plans
+    }
+
+    public double getImageCfgScale(User user) {
+        return 8.0; // Same for all plans
+    }
 }
