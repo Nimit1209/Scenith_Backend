@@ -157,6 +157,10 @@ public class DocumentConversionService {
             throw new RuntimeException("Unauthorized access");
         }
 
+        logger.info("=== COMPRESS OPTIONS BEFORE PROCESSING ===");
+        logger.info("Options map: {}", objectMapper.writeValueAsString(options));
+        logger.info("=== END ===");
+
         return processDocumentConversion(user, List.of(upload), "COMPRESS_PDF", options);
     }
 
@@ -417,6 +421,21 @@ public class DocumentConversionService {
 
         switch (operationType) {
             case "COMPRESS_PDF":
+                // ADD DEBUG LOGGING
+                logger.info("=== COMPRESS_PDF DEBUG ===");
+                logger.info("Input path: {}", inputPaths.get(0));
+                logger.info("Output path: {}", outputPath);
+                if (options != null) {
+                    logger.info("Options: {}", objectMapper.writeValueAsString(options));
+                } else {
+                    logger.warn("Options is NULL!");
+                }
+                logger.info("=== END DEBUG ===");
+
+                command.add(inputPaths.get(0));
+                command.add(outputPath);
+                break;
+
             case "UNLOCK_PDF":
             case "LOCK_PDF":
             case "PDF_TO_IMAGES":

@@ -192,7 +192,7 @@ public class DocumentConversionController {
             @RequestParam(required = false, defaultValue = "preset") String compressionMode,
             @RequestParam(required = false, defaultValue = "medium") String compressionLevel,
             @RequestParam(required = false) Integer customPercentage,
-            @RequestParam(required = false) Long targetFileSizeBytes) {
+            @RequestParam(required = false) String targetFileSizeBytes) {  // Changed to String
         try {
             User user = documentConversionService.getUserFromToken(token);
 
@@ -200,16 +200,36 @@ public class DocumentConversionController {
             options.put("compressionMode", compressionMode);
 
             if ("filesize".equals(compressionMode)) {
-                // Exact file size compression
-                if (targetFileSizeBytes == null || targetFileSizeBytes <= 0) {
+                // Exact file size compression - Parse String to Long (handle decimals from frontend)
+                if (targetFileSizeBytes == null || targetFileSizeBytes.trim().isEmpty()) {
                     return ResponseEntity.status(400).body(Map.of(
                             "message", "Invalid target file size",
-                            "error", "Target file size must be greater than 0"
+                            "error", "Target file size must be provided"
                     ));
                 }
-                options.put("targetFileSizeBytes", targetFileSizeBytes);
 
-            } else if ("percentage".equals(compressionMode)) {
+                try {
+                    // Parse as double first (in case frontend sends decimal), then convert to long
+                    double targetSizeDouble = Double.parseDouble(targetFileSizeBytes.trim());
+                    long targetSizeLong = (long) Math.floor(targetSizeDouble);  // Round down to nearest byte
+
+                    if (targetSizeLong <= 0) {
+                        return ResponseEntity.status(400).body(Map.of(
+                                "message", "Invalid target file size",
+                                "error", "Target file size must be greater than 0"
+                        ));
+                    }
+
+                    options.put("targetFileSizeBytes", targetSizeLong);
+
+                } catch (NumberFormatException e) {
+                    return ResponseEntity.status(400).body(Map.of(
+                            "message", "Invalid target file size format",
+                            "error", "Target file size must be a valid number: " + e.getMessage()
+                    ));
+                }
+            }
+            else if ("percentage".equals(compressionMode)) {
                 // Percentage-based compression
                 if (customPercentage == null || customPercentage < 10 || customPercentage > 95) {
                     return ResponseEntity.status(400).body(Map.of(

@@ -284,6 +284,15 @@ def compress_pdf(input_path, output_path, options=None):
             f.flush()
 
     try:
+        # ===== DEBUG: Log received options =====
+        debug_log_write(f"===== PYTHON SCRIPT DEBUG =====")
+        debug_log_write(f"Received options: {options}")
+        debug_log_write(f"Options type: {type(options)}")
+        if options:
+            for key, value in options.items():
+                debug_log_write(f"  {key}: {value} (type: {type(value)})")
+        debug_log_write(f"===============================")
+
         compression_mode = options.get('compressionMode', 'preset') if options else 'preset'
         reader = PdfReader(input_path)
         original_size = os.path.getsize(input_path)
@@ -291,29 +300,37 @@ def compress_pdf(input_path, output_path, options=None):
         debug_log_write(f"START: mode={compression_mode}, original_size={original_size}")
 
         if compression_mode == 'filesize':
-            target_size = options.get('targetFileSizeBytes', original_size * 0.5)
+            target_size = options.get('targetFileSizeBytes')
 
-            debug_log_write(f"Target size: {target_size} bytes")
+            if target_size is None:
+                raise ValueError("targetFileSizeBytes is required in filesize mode")
+
+            # Make sure it's int (frontend might send float or string)
+            try:
+                target_size = int(float(target_size))   # handles "819200.0" → 819200
+            except (TypeError, ValueError):
+                raise ValueError(f"Invalid targetFileSizeBytes value: {target_size}")
 
             # Validate target size
             if target_size <= 0:
                 raise Exception("Target size must be greater than 0")
 
             if target_size >= original_size * 0.95:
-                raise Exception(f"Target size too large")
+                raise Exception(f"Target size ({target_size}) is too close to original size ({original_size})")
 
-            # Binary search parameters
+            debug_log_write(f"Target size (filesize mode): {target_size} bytes")
+            # ENHANCED: More precise binary search with better tolerance handling
             min_resolution = 30
             max_resolution = 300
-            tolerance = 0.08
-            max_iterations = 25
+            tolerance = 0.05  # 5% tolerance (was 8%)
+            max_iterations = 30  # More iterations for precision
 
             best_file = None
             best_size = None
             best_diff = float('inf')
             best_resolution = None
 
-            # Determine PDF settings
+            # Determine PDF settings based on target ratio
             target_ratio = target_size / original_size
             if target_ratio < 0.25:
                 pdf_setting = '/screen'
@@ -327,6 +344,9 @@ def compress_pdf(input_path, output_path, options=None):
             debug_log_write(f"PDF setting: {pdf_setting}, target_ratio: {target_ratio:.2f}")
 
             iterations_run = 0
+            last_size = None
+            stuck_count = 0  # Track if we're stuck in a loop
+
             for iteration in range(max_iterations):
                 iterations_run = iteration + 1
 
@@ -335,7 +355,7 @@ def compress_pdf(input_path, output_path, options=None):
                 debug_log_write(f"Iteration {iterations_run}: resolution={resolution}, min={min_resolution}, max={max_resolution}")
 
                 # Check convergence
-                if max_resolution - min_resolution <= 0:
+                if max_resolution - min_resolution <= 1:
                     debug_log_write(f"Bounds converged at iteration {iterations_run}")
                     break
 
@@ -390,38 +410,101 @@ def compress_pdf(input_path, output_path, options=None):
                     size_diff = abs(temp_size - target_size)
                     size_diff_percent = (size_diff / target_size) * 100
 
-                    debug_log_write(f"Result: size={temp_size}, diff={size_diff_percent:.1f}%")
+                    debug_log_write(f"Result: size={temp_size}, target={target_size}, diff={size_diff_percent:.1f}%")
 
-                    # Track best
-                    if size_diff < best_diff:
-                        if best_file and os.path.exists(best_file):
-                            try:
-                                os.remove(best_file)
-                            except:
-                                pass
-                        best_file = temp_output
-                        best_size = temp_size
-                        best_diff = size_diff
-                        best_resolution = resolution
-                        debug_log_write(f"NEW BEST: size={temp_size}")
+                    # Check if we're stuck (same size as last iteration)
+                    if last_size is not None and abs(temp_size - last_size) < 1000:  # Less than 1KB change
+                        stuck_count += 1
+                        if stuck_count >= 3:
+                            debug_log_write(f"Stuck at same size, using best result")
+                            if os.path.exists(temp_output):
+                                try:
+                                    os.remove(temp_output)
+                                except:
+                                    pass
+                            break
                     else:
-                        try:
-                            os.remove(temp_output)
-                        except:
-                            pass
+                        stuck_count = 0
 
-                    # Check tolerance
-                    if size_diff_percent <= (tolerance * 100):
-                        debug_log_write(f"TARGET ACHIEVED!")
-                        break
+                    last_size = temp_size
 
-                    # Adjust bounds
-                    if temp_size > target_size:
-                        debug_log_write(f"Too large, lowering max: {max_resolution} → {resolution - 1}")
-                        max_resolution = resolution - 1
-                    else:
-                        debug_log_write(f"Too small, raising min: {min_resolution} → {resolution + 1}")
+                    # CRITICAL FIX: Prefer results that are CLOSE TO but ABOVE target
+                    # Only accept results below target if they're within tolerance
+                    if temp_size <= target_size:
+                        # File is smaller than target
+                        if size_diff_percent <= (tolerance * 100):
+                            # Within tolerance and below target - acceptable
+                            if size_diff < best_diff or best_size is None or best_size < target_size:
+                                if best_file and os.path.exists(best_file):
+                                    try:
+                                        os.remove(best_file)
+                                    except:
+                                        pass
+                                best_file = temp_output
+                                best_size = temp_size
+                                best_diff = size_diff
+                                best_resolution = resolution
+                                debug_log_write(f"NEW BEST (below target): size={temp_size}")
+                        else:
+                            # Too far below target, try higher resolution
+                            if os.path.exists(temp_output):
+                                try:
+                                    os.remove(temp_output)
+                                except:
+                                    pass
+
+                        # Increase resolution to get closer to target (larger file)
                         min_resolution = resolution + 1
+                    else:
+                        # File is larger than target
+                        if size_diff_percent <= (tolerance * 100):
+                            # Within tolerance and above target - PREFERRED
+                            if best_size is None or temp_size < best_size or best_size < target_size:
+                                if best_file and os.path.exists(best_file):
+                                    try:
+                                        os.remove(best_file)
+                                    except:
+                                        pass
+                                best_file = temp_output
+                                best_size = temp_size
+                                best_diff = size_diff
+                                best_resolution = resolution
+                                debug_log_write(f"NEW BEST (above target): size={temp_size}")
+                            else:
+                                if os.path.exists(temp_output):
+                                    try:
+                                        os.remove(temp_output)
+                                    except:
+                                        pass
+                        else:
+                            # Too far above target
+                            if best_size is None or (size_diff < best_diff and temp_size >= target_size * 0.9):
+                                if best_file and os.path.exists(best_file):
+                                    try:
+                                        os.remove(best_file)
+                                    except:
+                                        pass
+                                best_file = temp_output
+                                best_size = temp_size
+                                best_diff = size_diff
+                                best_resolution = resolution
+                                debug_log_write(f"NEW BEST (tracking): size={temp_size}")
+                            else:
+                                if os.path.exists(temp_output):
+                                    try:
+                                        os.remove(temp_output)
+                                    except:
+                                        pass
+
+                        # Decrease resolution to get closer to target (smaller file)
+                        max_resolution = resolution - 1
+
+                    # Check if we've achieved good enough result
+                    if best_size is not None and size_diff_percent <= (tolerance * 100):
+                        # If we're within tolerance and at or above 95% of target, stop
+                        if best_size >= target_size * 0.95:
+                            debug_log_write(f"TARGET ACHIEVED (within tolerance, close to target)!")
+                            break
 
                 except subprocess.TimeoutExpired:
                     debug_log_write(f"TIMEOUT at iteration {iterations_run}")
@@ -479,35 +562,27 @@ def compress_pdf(input_path, output_path, options=None):
             return compress_pdf(input_path, output_path, options)
 
         else:
-            # Preset mode
-            level = options.get('compressionLevel', 'medium')
-
-            debug_log_write(f"Preset mode: {level}")
-
-            level_settings = {
-                'low': {'pdf_setting': '/printer', 'resolution': 150},
-                'medium': {'pdf_setting': '/ebook', 'resolution': 100},
-                'high': {'pdf_setting': '/screen', 'resolution': 72}
-            }
-
-            settings = level_settings.get(level, level_settings['medium'])
-
+            debug_log_write("Forcing aggressive SCREEN mode for testing")
             try:
                 subprocess.run([
                     'gs',
                     '-sDEVICE=pdfwrite',
                     '-dCompatibilityLevel=1.4',
-                    f'-dPDFSETTINGS={settings["pdf_setting"]}',
-                    '-dNOPAUSE',
-                    '-dQUIET',
-                    '-dBATCH',
-                    f'-dColorImageResolution={settings["resolution"]}',
-                    f'-dGrayImageResolution={settings["resolution"]}',
-                    f'-sOutputFile={output_path}',
+                    '-dPDFSETTINGS=/screen',           # ← most aggressive
+                    '-dNOPAUSE', '-dQUIET', '-dBATCH',
+                    '-dColorImageResolution=72',
+                    '-dGrayImageResolution=72',
+                    '-dMonoImageResolution=72',
+                    '-dJPEGQ=50',                       # ← lower quality
+                    '-dDownsampleColorImages=true',
+                    '-dColorImageDownsampleType=/Bicubic',
+                    '-dColorImageFilter=/DCTEncode',
+                    '-sOutputFile=' + output_path,
                     input_path
-                ], check=True, timeout=180)
+                ], check=True, timeout=180, capture_output=True)
 
                 compressed_size = os.path.getsize(output_path)
+                debug_log_write(f"Forced aggressive compression → {compressed_size} bytes")
                 actual_ratio = (1 - compressed_size / original_size) * 100
 
                 return {
@@ -515,12 +590,11 @@ def compress_pdf(input_path, output_path, options=None):
                     "output_path": output_path,
                     "original_size": original_size,
                     "compressed_size": compressed_size,
-                    "compression_level": level,
+                    "compression_level": "aggressive_screen",
                     "actual_compression_ratio": f"{actual_ratio:.2f}%"
                 }
             except Exception as e:
                 raise Exception(f"Compression failed: {str(e)}")
-
     except Exception as e:
         debug_log_write(f"EXCEPTION: {str(e)}")
         return {"status": "error", "message": str(e)}

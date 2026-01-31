@@ -50,20 +50,24 @@ public class DocumentUploadService {
         String timestamp = String.valueOf(System.currentTimeMillis());
 
         for (MultipartFile file : files) {
-            String fileName = file.getOriginalFilename();
-            String fileType = determineFileType(fileName);
-            
+            String originalFileName = file.getOriginalFilename();
+
+            // Generate unique filename while preserving extension
+            String uniqueFileName = generateUniqueFileName(originalFileName, timestamp);
+
+            String fileType = determineFileType(originalFileName);
+
             // Save to temp and upload to R2
             String absoluteBaseDir = baseDir.startsWith("/") ? baseDir : "/" + baseDir;
             String workDir = absoluteBaseDir + File.separator + "videoeditor" + File.separator + "upload_" + timestamp;
             Files.createDirectories(Paths.get(workDir));
-            
-            String tempFilePath = workDir + File.separator + fileName;
+
+            String tempFilePath = workDir + File.separator + uniqueFileName;
             File tempFile = cloudflareR2Service.saveMultipartFileToTemp(file, tempFilePath);
             
             try {
                 // Upload to R2
-                String r2Path = String.format("documents/%s/uploads/%s/%s", user.getId(), timestamp, fileName);
+                String r2Path = String.format("documents/%s/uploads/%s/%s", user.getId(), timestamp, uniqueFileName);
                 cloudflareR2Service.uploadFile(r2Path, tempFile);
                 
                 // Generate URLs
@@ -71,7 +75,7 @@ public class DocumentUploadService {
                 
                 // Create upload record
                 DocumentUpload upload = DocumentUpload.builder()
-                        .fileName(fileName)
+                        .fileName(originalFileName) // Store original name for display
                         .filePath(r2Path)
                         .cdnUrl(urls.get("cdnUrl"))
                         .presignedUrl(urls.get("presignedUrl"))
@@ -81,7 +85,7 @@ public class DocumentUploadService {
                         .build();
                 
                 uploads.add(documentUploadRepository.save(upload));
-                logger.info("Uploaded document: {} for user: {}", fileName, user.getId());
+                logger.info("Uploaded document: {} for user: {}", originalFileName, user.getId());
                 
             } finally {
                 // Clean up temp file
@@ -146,5 +150,25 @@ public class DocumentUploadService {
             return "DOCX";
         }
         return "OTHER";
+    }
+
+    /**
+     * Generate unique filename with timestamp to allow duplicate uploads
+     */
+    private String generateUniqueFileName(String originalFileName, String timestamp) {
+        if (originalFileName == null || originalFileName.isEmpty()) {
+            return "file_" + timestamp;
+        }
+
+        int lastDotIndex = originalFileName.lastIndexOf('.');
+        if (lastDotIndex == -1) {
+            // No extension
+            return originalFileName + "_" + timestamp;
+        }
+
+        String nameWithoutExtension = originalFileName.substring(0, lastDotIndex);
+        String extension = originalFileName.substring(lastDotIndex);
+
+        return nameWithoutExtension + "_" + timestamp + "_" + System.nanoTime() + extension;
     }
 }
