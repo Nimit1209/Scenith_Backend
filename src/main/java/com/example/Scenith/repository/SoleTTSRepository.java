@@ -11,4 +11,5 @@ import java.util.List;
 @Repository
 public interface SoleTTSRepository extends JpaRepository<SoleTTS, Long> {
     List<SoleTTS> findByUser(User user);
+    List<SoleTTS> findByUserOrderByCreatedAtDesc(User user);
 }

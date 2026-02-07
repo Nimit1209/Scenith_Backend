@@ -2,7 +2,9 @@ package com.example.Scenith.controller;
 
 import com.example.Scenith.entity.SoleTTS;
 import com.example.Scenith.entity.User;
+import com.example.Scenith.enums.PlanType;
 import com.example.Scenith.repository.SoleTTSRepository;
+import com.example.Scenith.repository.UserPlanRepository;
 import com.example.Scenith.repository.UserRepository;
 import com.example.Scenith.security.JwtUtil;
 import com.example.Scenith.service.SoleTTSService;
@@ -11,6 +13,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.IOException;
+import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,12 +26,14 @@ public class SoleTTSController {
     private final JwtUtil jwtUtil;
     private final UserRepository userRepository;
     private final SoleTTSRepository soleTTSRepository;
+    private final UserPlanRepository userPlanRepository;
 
-    public SoleTTSController(SoleTTSService soleTTSService, JwtUtil jwtUtil, UserRepository userRepository, SoleTTSRepository soleTTSRepository) {
+    public SoleTTSController(SoleTTSService soleTTSService, JwtUtil jwtUtil, UserRepository userRepository, SoleTTSRepository soleTTSRepository, UserPlanRepository userPlanRepository) {
         this.soleTTSService = soleTTSService;
         this.jwtUtil = jwtUtil;
         this.userRepository = userRepository;
         this.soleTTSRepository = soleTTSRepository;
+        this.userPlanRepository = userPlanRepository;
     }
 
     @PostMapping("/generate")
@@ -133,5 +138,58 @@ public class SoleTTSController {
         String email = jwtUtil.extractEmail(token.substring(7));
         return userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("User not found"));
+    }
+
+    @GetMapping("/history")
+    public ResponseEntity<?> getTtsHistory(@RequestHeader("Authorization") String token) {
+        try {
+            User user = getUserFromToken(token);
+
+            // Check if user has access to history
+            if (!hasHistoryAccess(user)) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                        .body(Map.of(
+                                "error", "History access denied",
+                                "message", "Upgrade to AI Voice PRO or a premium plan to access your generation history"
+                        ));
+            }
+
+            List<SoleTTS> history = soleTTSService.getUserHistory(user);
+
+            List<Map<String, Object>> historyResponse = history.stream()
+                    .map(tts -> {
+                        Map<String, Object> item = new HashMap<>();
+                        item.put("id", tts.getId());
+                        item.put("audioPath", tts.getAudioPath());
+                        item.put("createdAt", tts.getCreatedAt());
+                        return item;
+                    })
+                    .toList();
+
+            return ResponseEntity.ok(Map.of(
+                    "history", historyResponse,
+                    "hasAccess", true
+            ));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(Map.of("error", "Unauthorized: " + e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Unexpected error: " + e.getMessage()));
+        }
+    }
+
+    private boolean hasHistoryAccess(User user) {
+        // Allow if user is not BASIC
+        if (user.getRole() != User.Role.BASIC) {
+            return true;
+        }
+
+        // If BASIC, check if they have AI_VOICE_PRO plan
+        return userPlanRepository.findActiveUserPlan(
+                user,
+                PlanType.AI_VOICE_PRO,
+                LocalDateTime.now()
+        ).isPresent();
     }
 }

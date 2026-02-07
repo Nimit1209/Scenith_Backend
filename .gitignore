@@ -31,3 +31,34 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# =========================
+# Environment & Secrets
+# =========================
+.env
+*.env
+
+# =========================
+# Spring Boot config
+# =========================
+application.properties
+application-dev.properties
+application-prod.properties
+
+# =========================
+# Scripts (local / deployment)
+# =========================
+build-optimized.sh
+deploy-ec2.sh
+
+# =========================
+# Docker
+# =========================
+docker-compose.yml
+
+# =========================
+# API keys / credentials
+# =========================
+src/main/resources/image-gen-api-key.txt
+credentials/*.json
+
