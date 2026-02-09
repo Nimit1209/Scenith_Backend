@@ -117,41 +117,56 @@ public class VideoSpeedService {
             throw new IllegalArgumentException("Speed must be between 0.5 and 15.0");
         }
 
-        String originalFileName = System.currentTimeMillis() + "_" + sanitizeFilename(videoFile.getOriginalFilename());
-        String r2Path = "speed-videos/" + user.getId() + "/" + originalFileName;
+        // Save MultipartFile to a temporary location first
+        Path tempDir = Paths.get(baseDir).resolve("temp/upload").toAbsolutePath().normalize();
+        Files.createDirectories(tempDir);
 
-        // Upload original video to R2
-        cloudflareR2Service.uploadFile(videoFile, r2Path);
+        String tempFileName = System.currentTimeMillis() + "_" + sanitizeFilename(videoFile.getOriginalFilename());
+        Path tempFilePath = tempDir.resolve(tempFileName);
 
         try {
-            double videoDuration = getVideoDuration(r2Path);
+            // Save to temp location
+            videoFile.transferTo(tempFilePath.toFile());
+
+            // Get video duration from the temp file
+            double videoDuration = getVideoDuration(tempFilePath.toString());
             int maxMinutes = planLimitsService.getMaxSpeedVideoLengthMinutes(user);
 
             if (maxMinutes > 0 && videoDuration > maxMinutes * 60) {
-                // Delete the uploaded file since it exceeds limits
-                Files.deleteIfExists(Paths.get(r2Path));
                 throw new IllegalArgumentException(
                         "Video length (" + (int)(videoDuration/60) + " min) exceeds maximum allowed (" +
                                 maxMinutes + " minutes). Upgrade your plan."
                 );
             }
+
+            // Now upload to R2
+            String originalFileName = System.currentTimeMillis() + "_" + sanitizeFilename(videoFile.getOriginalFilename());
+            String r2Path = "speed-videos/" + user.getId() + "/" + originalFileName;
+            cloudflareR2Service.uploadFile(tempFilePath.toFile(), r2Path);
+
+            // Create VideoSpeed entity
+            VideoSpeed video = new VideoSpeed();
+            video.setUser(user);
+            video.setOriginalFilePath(r2Path);
+            video.setSpeed(speed != null ? speed : 1.0);
+            video.setStatus("UPLOADED");
+            video.setProgress(0.0);
+            video.setCreatedAt(LocalDateTime.now());
+            video.setLastModified(LocalDateTime.now());
+
+            return videoSpeedRepository.save(video);
+
         } catch (InterruptedException e) {
-            Files.deleteIfExists(Paths.get(r2Path));
             Thread.currentThread().interrupt();
             throw new IOException("Failed to validate video duration: " + e.getMessage());
+        } finally {
+            // Clean up temp file
+            try {
+                Files.deleteIfExists(tempFilePath);
+            } catch (IOException e) {
+                logger.warn("Failed to delete temp file: {}", tempFilePath, e);
+            }
         }
-
-        // Create VideoSpeed entity
-        VideoSpeed video = new VideoSpeed();
-        video.setUser(user);
-        video.setOriginalFilePath(r2Path);
-        video.setSpeed(speed != null ? speed : 1.0);
-        video.setStatus("UPLOADED");
-        video.setProgress(0.0);
-        video.setCreatedAt(LocalDateTime.now());
-        video.setLastModified(LocalDateTime.now());
-
-        return videoSpeedRepository.save(video);
     }
 
     /**
