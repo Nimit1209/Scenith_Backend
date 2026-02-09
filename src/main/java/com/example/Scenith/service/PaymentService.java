@@ -155,6 +155,7 @@ public class PaymentService {
     private boolean isIndividualPlan(String planType) {
         return "AI_VOICE_PRO".equals(planType) ||
                 "AI_SUBTITLE_PRO".equals(planType) ||
+                "BG_REMOVAL_PRO".equals(planType) ||
                 "AI_SPEED_PRO".equals(planType);
     }
 }

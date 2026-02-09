@@ -1,11 +1,14 @@
 package com.example.Scenith.service;
 
 import com.example.Scenith.entity.StandaloneImage;
+import com.example.Scenith.entity.StandaloneImageUsage;
 import com.example.Scenith.entity.User;
 import com.example.Scenith.repository.StandaloneImageRepository;
+import com.example.Scenith.repository.StandaloneImageUsageRepository;
 import com.example.Scenith.repository.UserRepository;
 import com.example.Scenith.security.JwtUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,7 +21,10 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -32,6 +38,8 @@ public class StandaloneImageService {
   private final CloudflareR2Service cloudflareR2Service;
   private final StandaloneImageRepository standaloneImageRepository;
   private final ObjectMapper objectMapper;
+  private final PlanLimitsService planLimitsService;
+  private final StandaloneImageUsageRepository usageRepository;
 
   @Value("${app.base-dir:/tmp}")
   private String baseDir;
@@ -47,12 +55,14 @@ public class StandaloneImageService {
           UserRepository userRepository,
           CloudflareR2Service cloudflareR2Service,
           StandaloneImageRepository standaloneImageRepository,
-          ObjectMapper objectMapper) {
+          ObjectMapper objectMapper, PlanLimitsService planLimitsService, StandaloneImageUsageRepository usageRepository) {
     this.jwtUtil = jwtUtil;
     this.userRepository = userRepository;
     this.cloudflareR2Service = cloudflareR2Service;
     this.standaloneImageRepository = standaloneImageRepository;
     this.objectMapper = objectMapper;
+    this.planLimitsService = planLimitsService;
+    this.usageRepository = usageRepository;
   }
 
   public StandaloneImage processStandaloneImageBackgroundRemoval(User user, MultipartFile imageFile)
@@ -65,6 +75,20 @@ public class StandaloneImageService {
       throw new IllegalArgumentException("Image file is null or empty");
     }
 
+    String currentMonth = YearMonth.now().format(DateTimeFormatter.ofPattern("yyyy-MM"));
+    StandaloneImageUsage usage = usageRepository
+            .findByUserAndUsageMonth(user, currentMonth)
+            .orElse(new StandaloneImageUsage(user, currentMonth));
+
+    int monthlyLimit = planLimitsService.getMonthlyBackgroundRemovalLimit(user);
+    if (monthlyLimit != -1 && usage.getCount() >= monthlyLimit) {
+      throw new IOException(
+              "Monthly background removal limit reached (" + monthlyLimit + " images). Please upgrade your plan."
+      );
+    }
+
+// Fetch max dimension from plan
+    int maxDimension = planLimitsService.getMaxBackgroundRemovalDimension(user);
     // Ensure baseDir is absolute
     String absoluteBaseDir = baseDir.startsWith("/") ? baseDir : "/" + baseDir;
 
@@ -112,7 +136,8 @@ public class StandaloneImageService {
               pythonPath,
               backgroundRemovalScriptPath,
               inputFile.getAbsolutePath(),
-              outputFile.getAbsolutePath()
+              outputFile.getAbsolutePath(),
+              String.valueOf(maxDimension) // ✅ REQUIRED
       );
 
       logger.debug("Executing command: {}", String.join(" ", command));
@@ -159,6 +184,25 @@ public class StandaloneImageService {
       // Generate URLs for original and processed files
       Map<String, String> originalUrls = cloudflareR2Service.generateUrls(r2OriginalPath, 3600);
       Map<String, String> processedUrls = cloudflareR2Service.generateUrls(r2ProcessedPath, 3600);
+      // Parse JSON output from Python script (matches local behavior)
+      try {
+        String jsonOutput = output.toString().trim();
+        if (jsonOutput.startsWith("{")) {
+          JSONObject result = new JSONObject(jsonOutput);
+          if (result.has("width") && result.has("height")) {
+            logger.info(
+                    "Processed image dimensions: {}x{}",
+                    result.getInt("width"),
+                    result.getInt("height")
+            );
+          }
+        }
+      } catch (Exception e) {
+        logger.debug("Could not parse script JSON output");
+      }
+      usage.incrementCount();
+      usageRepository.save(usage);
+
 
       // Save standalone image record
       StandaloneImage standaloneImage = new StandaloneImage();
@@ -210,5 +254,23 @@ public class StandaloneImageService {
 
   public List<StandaloneImage> getUserImages(User user) {
     return standaloneImageRepository.findByUser(user);
+  }
+
+  public Map<String, Object> getUserBackgroundRemovalStats(User user) {
+    String currentMonth = YearMonth.now().format(DateTimeFormatter.ofPattern("yyyy-MM"));
+    StandaloneImageUsage usage = usageRepository.findByUserAndUsageMonth(user, currentMonth)
+            .orElse(new StandaloneImageUsage(user, currentMonth));
+
+    int monthlyLimit = planLimitsService.getMonthlyBackgroundRemovalLimit(user);
+    String maxQuality = planLimitsService.getMaxBackgroundRemovalQuality(user);
+
+    Map<String, Object> stats = new HashMap<>();
+    stats.put("usedThisMonth", usage.getCount());
+    stats.put("monthlyLimit", monthlyLimit);
+    stats.put("remaining", monthlyLimit == -1 ? -1 : monthlyLimit - usage.getCount());
+    stats.put("maxQuality", maxQuality);
+    stats.put("userRole", user.getRole().toString());
+
+    return stats;
   }
 }
