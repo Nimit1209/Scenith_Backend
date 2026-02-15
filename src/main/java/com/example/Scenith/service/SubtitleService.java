@@ -54,8 +54,6 @@ public class SubtitleService {
   private final EmailService emailService;
   private final SqsService sqsService;
   private final ProcessingEmailHelper emailHelper;
-  private final UserProcessingUsageRepository userProcessingUsageRepository;
-  private final PlanLimitsService planLimitsService;
 
   @Value("${app.base-dir:/temp}")
   private String baseDir;
@@ -78,18 +76,17 @@ public class SubtitleService {
           UserRepository userRepository,
           CloudflareR2Service cloudflareR2Service,
           ObjectMapper objectMapper,
-          SqsClient sqsClient, EmailService emailService, SqsService sqsService, ProcessingEmailHelper emailHelper, UserProcessingUsageRepository userProcessingUsageRepository, PlanLimitsService planLimitsService) {
+          SqsClient sqsClient, EmailService emailService, SqsService sqsService, ProcessingEmailHelper emailHelper) {
     this.jwtUtil = jwtUtil;
     this.subtitleMediaRepository = subtitleMediaRepository;
     this.userRepository = userRepository;
     this.cloudflareR2Service = cloudflareR2Service;
     this.objectMapper = objectMapper;
-    this.sqsClient = sqsClient;
+    this.
+            sqsClient = sqsClient;
       this.emailService = emailService;
       this.sqsService = sqsService;
       this.emailHelper = emailHelper;
-      this.userProcessingUsageRepository = userProcessingUsageRepository;
-      this.planLimitsService = planLimitsService;
   }
 
   public SubtitleMedia uploadMedia(User user, MultipartFile mediaFile) throws IOException {
@@ -116,14 +113,10 @@ public class SubtitleService {
 
       try {
         double videoDuration = getVideoDuration(inputFile);
-        int maxMinutes = planLimitsService.getMaxVideoLengthMinutes(user);
-
-        if (maxMinutes > 0 && videoDuration > maxMinutes * 60) {
-          // Delete the uploaded file since it exceeds limits
+        if (videoDuration > 3 * 60) {
           inputFile.delete();
           throw new IllegalArgumentException(
-                  "Video length (" + (int)(videoDuration/60) + " min) exceeds maximum allowed (" +
-                          maxMinutes + " minutes). Upgrade your plan."
+                  "Video length (" + (int)(videoDuration / 60) + " min " + (int)(videoDuration % 60) + " sec) exceeds the maximum allowed limit of 3 minutes. Please upload a shorter video."
           );
         }
       } catch (InterruptedException e) {
@@ -555,7 +548,6 @@ public class SubtitleService {
         throw new IOException("Invalid video duration");
       }
 
-      validateProcessingLimits(subtitleMedia.getUser(), quality, totalDuration);
 
       String finalQuality = quality != null ? quality : "720p";
       subtitleMedia.setQuality(finalQuality);
@@ -588,7 +580,6 @@ public class SubtitleService {
       subtitleMedia.setProgress(100.0);
       subtitleMediaRepository.save(subtitleMedia);
 
-      incrementUsageCount(subtitleMedia.getUser());
 
       // ---- NEW: SEND EMAIL ----
       try {
@@ -1935,52 +1926,6 @@ public class SubtitleService {
       logger.error("Failed to parse FFprobe output for {}: {}", videoFile.getAbsolutePath(), output.toString());
       throw new IOException("Failed to parse FFprobe output: " + output.toString());
     }
-  }
-  private void validateProcessingLimits(User user, String quality, double videoDuration) throws IllegalArgumentException {
-    // Check quality
-    if (quality != null && !planLimitsService.isQualityAllowed(user, quality)) {
-      throw new IllegalArgumentException("Quality " + quality + " not allowed. Maximum allowed: " +
-              planLimitsService.getMaxAllowedQuality(user));
-    }
-
-    // Check monthly limit
-    int maxPerMonth = planLimitsService.getMaxVideoProcessingPerMonth(user);
-    if (maxPerMonth > 0) {
-      String currentYearMonth = YearMonth.now().toString();
-      Optional<UserProcessingUsage> usageOpt = userProcessingUsageRepository.findByUserAndServiceTypeAndYearMonth(
-              user, "SUBTITLE", currentYearMonth);
-
-      int currentCount = usageOpt.map(UserProcessingUsage::getProcessCount).orElse(0);
-      if (currentCount >= maxPerMonth) {
-        throw new IllegalArgumentException("Monthly processing limit reached (" + maxPerMonth + "). Upgrade your plan for more.");
-      }
-    }
-
-    // Check video length
-    int maxMinutes = planLimitsService.getMaxVideoLengthMinutes(user);
-    if (maxMinutes > 0 && videoDuration > maxMinutes * 60) {
-      throw new IllegalArgumentException("Video length exceeds maximum allowed (" + maxMinutes + " minutes). Upgrade your plan.");
-    }
-  }
-
-  // Add method to increment usage after successful processing
-  private void incrementUsageCount(User user) {
-    String currentYearMonth = YearMonth.now().toString();
-    Optional<UserProcessingUsage> usageOpt = userProcessingUsageRepository.findByUserAndServiceTypeAndYearMonth(
-            user, "SUBTITLE", currentYearMonth);
-
-    UserProcessingUsage usage;
-    if (usageOpt.isPresent()) {
-      usage = usageOpt.get();
-      usage.setProcessCount(usage.getProcessCount() + 1);
-    } else {
-      usage = new UserProcessingUsage();
-      usage.setUser(user);
-      usage.setServiceType("SUBTITLE");
-      usage.setYearMonth(currentYearMonth);
-      usage.setProcessCount(1);
-    }
-    userProcessingUsageRepository.save(usage);
   }
 
   private Map<String, String> getFFmpegQualitySettings(String quality) {

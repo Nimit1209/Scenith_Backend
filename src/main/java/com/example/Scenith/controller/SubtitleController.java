@@ -26,14 +26,11 @@ public class SubtitleController {
 
 
     private final SubtitleService subtitleService;
-    private final PlanLimitsService planLimitsService;
-    private final UserProcessingUsageRepository userProcessingUsageRepository;
+
 
     @Autowired
-    public SubtitleController(SubtitleService subtitleService, PlanLimitsService planLimitsService, UserProcessingUsageRepository userProcessingUsageRepository) {
+    public SubtitleController(SubtitleService subtitleService) {
         this.subtitleService = subtitleService;
-        this.planLimitsService = planLimitsService;
-        this.userProcessingUsageRepository = userProcessingUsageRepository;
     }
 
     @PostMapping("/upload")
@@ -148,30 +145,4 @@ public class SubtitleController {
         }
     }
 
-    @GetMapping("/plan-limits")
-    public ResponseEntity<?> getPlanLimits(@RequestHeader("Authorization") String token) {
-        try {
-            User user = subtitleService.getUserFromToken(token);
-
-            int videosPerMonth = planLimitsService.getMaxVideoProcessingPerMonth(user);
-            int maxVideoLength = planLimitsService.getMaxVideoLengthMinutes(user);
-            String maxQuality = planLimitsService.getMaxAllowedQuality(user);
-
-            // Get current usage
-            String currentYearMonth = YearMonth.now().toString();
-            Optional<UserProcessingUsage> usageOpt = userProcessingUsageRepository
-                    .findByUserAndServiceTypeAndYearMonth(user, "SUBTITLE", currentYearMonth);
-            int videosUsed = usageOpt.map(UserProcessingUsage::getProcessCount).orElse(0);
-
-            Map<String, Object> response = new HashMap<>();
-            response.put("videosPerMonth", videosPerMonth);
-            response.put("videosUsed", videosUsed);
-            response.put("maxVideoLength", maxVideoLength);
-            response.put("maxQuality", maxQuality);
-
-            return ResponseEntity.ok(response);
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
-        }
-    }
 }

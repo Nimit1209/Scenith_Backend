@@ -33,7 +33,7 @@ public class SubtitleMedia {
     @Column(name = "processed_cdn_url")
     private String processedCdnUrl;
 
-    @Column(name = "subtitles_json", columnDefinition = "TEXT")
+    @Column(name = "subtitles_json", columnDefinition = "LONGTEXT")
     private String subtitlesJson; // Stores subtitles as JSON array of TextSegment-like objects
 
     @Column(name = "status", nullable = false)

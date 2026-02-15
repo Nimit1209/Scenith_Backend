@@ -31,6 +31,7 @@ public class UnifiedTaskWorker {
     private final PodcastClipService podcastClipService;
     private final AspectRatioService aspectRatioService;
     private final ObjectMapper objectMapper;
+    private final GlobalProcessingLock processingLock; // ← NEW
 
     @Value("${sqs.queue.url}")
     private String queueUrl;
@@ -44,14 +45,14 @@ public class UnifiedTaskWorker {
         try {
             // Receive up to 5 messages at once for better throughput
             List<Message> messages = sqsService.receiveMessages(queueUrl, 5);
-            
+
             if (messages.isEmpty()) {
                 logger.debug("No messages in queue");
                 return;
             }
-            
+
             logger.info("Received {} messages from queue", messages.size());
-            
+
             for (Message message : messages) {
                 processMessage(message);
             }
@@ -65,53 +66,73 @@ public class UnifiedTaskWorker {
      */
     private void processMessage(Message message) {
         String taskType = "UNKNOWN";
+        String taskId = message.messageId();
+
         try {
             // Check retry count to prevent infinite loops
             String receiveCountStr = message.attributesAsStrings()
-                .getOrDefault("ApproximateReceiveCount", "1");
+                    .getOrDefault("ApproximateReceiveCount", "1");
             int receiveCount = Integer.parseInt(receiveCountStr);
-            
+
             if (receiveCount > MAX_RETRIES) {
-                logger.error("Message {} exceeded max retries ({}), deleting", 
-                    message.messageId(), MAX_RETRIES);
+                logger.error("Message {} exceeded max retries ({}), deleting",
+                        taskId, MAX_RETRIES);
                 sqsService.deleteMessage(message.receiptHandle(), queueUrl);
                 return;
             }
 
             // Parse message body
             Map<String, Object> taskDetails = objectMapper.readValue(
-                message.body(), 
-                new TypeReference<Map<String, Object>>() {}
+                    message.body(),
+                    new TypeReference<Map<String, Object>>() {}
             );
-            
+
             taskType = (String) taskDetails.get("taskType");
-            
+
             if (taskType == null || taskType.isEmpty()) {
-                logger.error("Message missing taskType, deleting: messageId={}", 
-                    message.messageId());
+                logger.error("Message missing taskType, deleting: messageId={}", taskId);
                 sqsService.deleteMessage(message.receiptHandle(), queueUrl);
                 return;
             }
-            
-            logger.info("Processing task: type={}, messageId={}, attempt={}", 
-                taskType, message.messageId(), receiveCount);
 
-            // Route to appropriate service based on task type
-            boolean processed = routeTask(taskType, taskDetails);
-            
-            if (processed) {
-                // Delete message only after successful processing
-                sqsService.deleteMessage(message.receiptHandle(), queueUrl);
-                logger.info("✓ Successfully completed task: type={}, messageId={}", 
-                    taskType, message.messageId());
-            } else {
-                logger.warn("Task type not recognized: {}", taskType);
-                sqsService.deleteMessage(message.receiptHandle(), queueUrl);
+            logger.info("Processing task: type={}, messageId={}, attempt={}",
+                    taskType, taskId, receiveCount);
+
+            // ==================== CRITICAL CHANGE ====================
+            // Acquire global processing lock BEFORE executing heavy task
+            // This ensures only ONE heavy job runs at a time
+            // =========================================================
+
+            boolean lockAcquired = processingLock.acquireLock(taskType, taskId);
+
+            if (!lockAcquired) {
+                logger.error("Failed to acquire processing lock for task: type={}, messageId={}",
+                        taskType, taskId);
+                // Don't delete - let it retry
+                return;
             }
-            
+
+            try {
+                // Route to appropriate service based on task type
+                boolean processed = routeTask(taskType, taskDetails);
+
+                if (processed) {
+                    // Delete message only after successful processing
+                    sqsService.deleteMessage(message.receiptHandle(), queueUrl);
+                    logger.info("✓ Successfully completed task: type={}, messageId={}",
+                            taskType, taskId);
+                } else {
+                    logger.warn("Task type not recognized: {}", taskType);
+                    sqsService.deleteMessage(message.receiptHandle(), queueUrl);
+                }
+            } finally {
+                // ALWAYS release lock, even if processing failed
+                processingLock.releaseLock(taskType, taskId);
+            }
+
         } catch (Exception e) {
-            logger.error("✗ Failed to process message: type={}, messageId={}, error={}", 
-                taskType, message.messageId(), e.getMessage(), e);
+            logger.error("✗ Failed to process message: type={}, messageId={}, error={}",
+                    taskType, taskId, e.getMessage(), e);
             // Message will be retried (visibility timeout expires and it becomes visible again)
             // After MAX_RETRIES, it will be deleted or sent to DLQ if configured
         }
@@ -131,23 +152,23 @@ public class UnifiedTaskWorker {
                 case "PROCESS_SUBTITLES":
                     handleProcessSubtitles(taskDetails);
                     return true;
-                    
+
                 case "VIDEO_FILTER":
                     handleVideoFilter(taskDetails);
                     return true;
-                    
+
                 case "VIDEO_SPEED":
                     handleVideoSpeed(taskDetails);
                     return true;
-                    
+
                 case "PODCAST_CLIP":
                     handlePodcastClip(taskDetails);
                     return true;
-                    
+
                 case "ASPECT_RATIO":
                     handleAspectRatio(taskDetails);
                     return true;
-                    
+
                 default:
                     return false;
             }
@@ -167,7 +188,7 @@ public class UnifiedTaskWorker {
     private void handleProcessSubtitles(Map<String, Object> taskDetails) throws IOException, InterruptedException {
         Long mediaId = getLongValue(taskDetails, "mediaId");
         Long userId = getLongValue(taskDetails, "userId");
-        String quality = getStringValue(taskDetails, "quality");   // ← this is the fix
+        String quality = getStringValue(taskDetails, "quality");
 
         subtitleService.processSubtitlesTask(mediaId, userId, quality);
     }
@@ -175,8 +196,9 @@ public class UnifiedTaskWorker {
     private String getStringValue(Map<String, Object> map, String key) {
         Object value = map.get(key);
         if (value == null) return null;
-        return value.toString();  // safe conversion
+        return value.toString();
     }
+
     private void handleVideoFilter(Map<String, Object> taskDetails) {
         Map<String, String> stringMap = convertToStringMap(taskDetails);
         videoFilterJobService.processJobFromSqs(stringMap);
@@ -204,10 +226,10 @@ public class UnifiedTaskWorker {
      */
     private Map<String, String> convertToStringMap(Map<String, Object> source) {
         return source.entrySet().stream()
-            .collect(java.util.stream.Collectors.toMap(
-                Map.Entry::getKey,
-                e -> String.valueOf(e.getValue())
-            ));
+                .collect(java.util.stream.Collectors.toMap(
+                        Map.Entry::getKey,
+                        e -> String.valueOf(e.getValue())
+                ));
     }
 
     /**

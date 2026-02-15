@@ -203,41 +203,60 @@ public class VideoSpeedService {
             throw new IllegalStateException("Video is already being processed");
         }
 
-        // Validate processing limits (using video duration from metadata if available)
-        // Note: For exact duration validation, you'd need to download and probe the video first
-        // For now, we'll do basic validation
-        double videoDuration = getVideoDuration(video.getOriginalFilePath());
-        validateProcessingLimits(user, quality, videoDuration);
+        // Download video temporarily to check duration
+        Path tempDir = Paths.get(baseDir).resolve("temp/validation").toAbsolutePath().normalize();
+        Files.createDirectories(tempDir);
 
-        // Set quality
-        String finalQuality = quality != null ? quality : "720p";
-        video.setQuality(finalQuality);
+        String tempFileName = "validate_" + System.currentTimeMillis() + ".mp4";
+        Path tempFilePath = tempDir.resolve(tempFileName);
 
-        // Reset fields for export
-        video.setStatus("PENDING");
-        video.setProgress(10.0);
-        video.setCdnUrl(null);
-        video.setOutputFilePath(null);
-        video.setLastModified(LocalDateTime.now());
-        videoSpeedRepository.save(video);
+        try {
+            // Download from R2 to temp location
+            cloudflareR2Service.downloadFile(video.getOriginalFilePath(), tempFilePath.toString());
 
-        // Queue processing task to SQS
-        Map<String, String> taskDetails = new HashMap<>();
-        taskDetails.put("videoId", id.toString());
-        taskDetails.put("taskType", "VIDEO_SPEED");
-        taskDetails.put("userId", user.getId().toString());
-        taskDetails.put("originalFilePath", video.getOriginalFilePath());
-        taskDetails.put("speed", String.valueOf(video.getSpeed()));
-        taskDetails.put("quality", finalQuality);
+            // Now get duration from the local file
+            double videoDuration = getVideoDuration(tempFilePath.toString());
 
-        String messageBody = objectMapper.writeValueAsString(taskDetails);
-        sqsService.sendMessage(messageBody, videoExportQueueUrl);
+            // Validate processing limits
+            validateProcessingLimits(user, quality, videoDuration);
 
-        logger.info("Queued video speed processing task for videoId={}, userId={}", id, user.getId());
+            // Set quality
+            String finalQuality = quality != null ? quality : "720p";
+            video.setQuality(finalQuality);
 
-        return video;
+            // Reset fields for export
+            video.setStatus("PENDING");
+            video.setProgress(10.0);
+            video.setCdnUrl(null);
+            video.setOutputFilePath(null);
+            video.setLastModified(LocalDateTime.now());
+            videoSpeedRepository.save(video);
+
+            // Queue processing task to SQS
+            Map<String, String> taskDetails = new HashMap<>();
+            taskDetails.put("videoId", id.toString());
+            taskDetails.put("taskType", "VIDEO_SPEED");
+            taskDetails.put("userId", user.getId().toString());
+            taskDetails.put("originalFilePath", video.getOriginalFilePath());
+            taskDetails.put("speed", String.valueOf(video.getSpeed()));
+            taskDetails.put("quality", finalQuality);
+
+            String messageBody = objectMapper.writeValueAsString(taskDetails);
+            sqsService.sendMessage(messageBody, videoExportQueueUrl);
+
+            logger.info("Queued video speed processing task for videoId={}, userId={}", id, user.getId());
+
+            return video;
+
+        } finally {
+            // Clean up temp file
+            try {
+                Files.deleteIfExists(tempFilePath);
+            } catch (IOException e) {
+                logger.warn("Failed to delete temp validation file: {}", tempFilePath, e);
+            }
+        }
     }
-
     /**
      * Process speed task (called by SQS consumer)
      */

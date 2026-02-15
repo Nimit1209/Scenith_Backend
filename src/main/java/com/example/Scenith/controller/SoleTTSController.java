@@ -7,6 +7,7 @@ import com.example.Scenith.repository.SoleTTSRepository;
 import com.example.Scenith.repository.UserPlanRepository;
 import com.example.Scenith.repository.UserRepository;
 import com.example.Scenith.security.JwtUtil;
+import com.example.Scenith.service.PlanLimitsService;
 import com.example.Scenith.service.SoleTTSService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -27,13 +28,15 @@ public class SoleTTSController {
     private final UserRepository userRepository;
     private final SoleTTSRepository soleTTSRepository;
     private final UserPlanRepository userPlanRepository;
+    private final PlanLimitsService planLimitsService;
 
-    public SoleTTSController(SoleTTSService soleTTSService, JwtUtil jwtUtil, UserRepository userRepository, SoleTTSRepository soleTTSRepository, UserPlanRepository userPlanRepository) {
+    public SoleTTSController(SoleTTSService soleTTSService, JwtUtil jwtUtil, UserRepository userRepository, SoleTTSRepository soleTTSRepository, UserPlanRepository userPlanRepository, PlanLimitsService planLimitsService) {
         this.soleTTSService = soleTTSService;
         this.jwtUtil = jwtUtil;
         this.userRepository = userRepository;
         this.soleTTSRepository = soleTTSRepository;
         this.userPlanRepository = userPlanRepository;
+        this.planLimitsService = planLimitsService;
     }
 
     @PostMapping("/generate")
@@ -106,11 +109,12 @@ public class SoleTTSController {
         try {
             User user = getUserFromToken(token);
             long monthlyUsage = soleTTSService.getUserTtsUsage(user);
-            long monthlyLimit = user.getMonthlyTtsLimit();
+            long monthlyLimit = planLimitsService.getMonthlyTtsLimit(user);
             long monthlyRemaining = monthlyLimit > 0 ? monthlyLimit - monthlyUsage : -1;
             long dailyUsage = soleTTSService.getUserDailyTtsUsage(user);
-            long dailyLimit = user.getDailyTtsLimit();
-            long dailyRemaining = dailyLimit > 0 ? dailyLimit - dailyUsage : -1; // -1 means unlimited
+            long dailyLimit = planLimitsService.getDailyTtsLimit(user);
+            long maxCharRequest = planLimitsService.getMaxCharsPerRequest(user);
+            long dailyRemaining = dailyLimit > 0 ? dailyLimit - dailyUsage : -1;
 
             Map<String, Object> response = new HashMap<>();
             response.put("monthly", Map.of(
@@ -123,6 +127,7 @@ public class SoleTTSController {
                     "limit", dailyLimit,
                     "remaining", dailyRemaining
             ));
+            response.put("maxCharRequest", maxCharRequest);
             response.put("role", user.getRole().toString());
 
             return ResponseEntity.ok(response);

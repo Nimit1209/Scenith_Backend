@@ -248,7 +248,7 @@ public class PlanLimitsService {
     public long getDailyImageGenLimit(User user) {
         switch (user.getRole()) {
             case BASIC:
-                return 3;
+                return 1;
             case CREATOR:
                 return 15;
             case ADMIN:
@@ -262,7 +262,7 @@ public class PlanLimitsService {
     public long getMonthlyImageGenLimit(User user) {
         switch (user.getRole()) {
             case BASIC:
-                return 30;
+                return 5;
             case CREATOR:
                 return 400;
             case ADMIN:
