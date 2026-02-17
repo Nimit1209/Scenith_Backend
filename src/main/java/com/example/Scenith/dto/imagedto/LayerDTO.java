@@ -78,6 +78,8 @@ public class LayerDTO {
   // Add these fields to the LayerDTO class
   private String backgroundBorder;
   private Integer backgroundBorderRadius;
+  private String shapeMask;
+  private Integer maskRadius;
 
   @Data
   public static class TextSegmentDTO {

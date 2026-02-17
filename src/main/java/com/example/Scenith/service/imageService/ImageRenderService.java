@@ -252,6 +252,10 @@ public class ImageRenderService {
             command.add(cropW + "x" + cropH + "+" + cropX + "+" + cropY);
             command.add("+repage");
         }
+        if (layer.getShapeMask() != null && !"none".equalsIgnoreCase(layer.getShapeMask())) {
+            applyShapeMask(command, layer.getShapeMask(), layer.getMaskRadius(),
+                    (int)Math.round(layer.getWidth()), (int)Math.round(layer.getHeight()));
+        }
 
         // **FIXED: Rotation without extent - let it expand naturally**
         if (layer.getRotation() != null && layer.getRotation() != 0) {
@@ -1740,6 +1744,157 @@ public class ImageRenderService {
             }
         } catch (IOException e) {
             logger.warn("Failed to cleanup temp directory: {}", e.getMessage());
+        }
+    }
+    /**
+     * Apply shape mask to image layer
+     */
+    private void applyShapeMask(List<String> command, String shapeMask, Integer maskRadius, int width, int height) {
+        String maskPath = null;
+
+        switch (shapeMask.toLowerCase()) {
+            case "circle":
+                command.add("(");
+                command.add("-size");
+                command.add(width + "x" + height);
+                command.add("xc:black");
+                command.add("-fill");
+                command.add("white");
+                command.add("-draw");
+                command.add(String.format("circle %d,%d %d,%d",
+                        width/2, height/2, width/2, 0));
+                command.add(")");
+                command.add("-alpha");
+                command.add("off");
+                command.add("-compose");
+                command.add("CopyOpacity");
+                command.add("-composite");
+                break;
+
+            case "rounded-square":
+                int radius = maskRadius != null ? maskRadius : 20;
+                command.add("(");
+                command.add("-size");
+                command.add(width + "x" + height);
+                command.add("xc:black");
+                command.add("-fill");
+                command.add("white");
+                command.add("-draw");
+                command.add(String.format("roundrectangle 0,0 %d,%d %d,%d",
+                        width-1, height-1, radius, radius));
+                command.add(")");
+                command.add("-alpha");
+                command.add("off");
+                command.add("-compose");
+                command.add("CopyOpacity");
+                command.add("-composite");
+                break;
+
+            case "heart":
+                command.add("(");
+                command.add("-size");
+                command.add(width + "x" + height);
+                command.add("xc:black");
+                command.add("-fill");
+                command.add("white");
+                command.add("-draw");
+                // Heart shape path (simplified for ImageMagick)
+                command.add(String.format(
+                        "path 'M %d,%d " +
+                                "C %d,%d %d,%d %d,%d " +
+                                "C %d,%d %d,%d %d,%d " +
+                                "L %d,%d Z'",
+                        width/2, (int)(height*0.3),
+                        (int)(width*0.2), (int)(height*0.1), (int)(width*0.1), (int)(height*0.3), width/2, (int)(height*0.6),
+                        (int)(width*0.9), (int)(height*0.3), (int)(width*0.8), (int)(height*0.1), width/2, (int)(height*0.3)
+                ));
+                command.add(")");
+                command.add("-alpha");
+                command.add("off");
+                command.add("-compose");
+                command.add("CopyOpacity");
+                command.add("-composite");
+                break;
+
+            case "star":
+                command.add("(");
+                command.add("-size");
+                command.add(width + "x" + height);
+                command.add("xc:black");
+                command.add("-fill");
+                command.add("white");
+                command.add("-draw");
+                // 5-point star
+                double cx = width / 2.0;
+                double cy = height / 2.0;
+                double outerR = Math.min(width, height) / 2.0;
+                double innerR = outerR * 0.4;
+                StringBuilder starPath = new StringBuilder("polygon ");
+                for (int i = 0; i < 10; i++) {
+                    double angle = Math.PI / 2 + (2 * Math.PI * i / 10);
+                    double r = (i % 2 == 0) ? outerR : innerR;
+                    int x = (int)(cx + r * Math.cos(angle));
+                    int y = (int)(cy - r * Math.sin(angle));
+                    starPath.append(x).append(",").append(y).append(" ");
+                }
+                command.add(starPath.toString().trim());
+                command.add(")");
+                command.add("-alpha");
+                command.add("off");
+                command.add("-compose");
+                command.add("CopyOpacity");
+                command.add("-composite");
+                break;
+
+            case "hexagon":
+                command.add("(");
+                command.add("-size");
+                command.add(width + "x" + height);
+                command.add("xc:black");
+                command.add("-fill");
+                command.add("white");
+                command.add("-draw");
+                command.add(String.format("polygon %d,%d %d,%d %d,%d %d,%d %d,%d %d,%d",
+                        (int)(width*0.25), 0,
+                        (int)(width*0.75), 0,
+                        width, height/2,
+                        (int)(width*0.75), height,
+                        (int)(width*0.25), height,
+                        0, height/2
+                ));
+                command.add(")");
+                command.add("-alpha");
+                command.add("off");
+                command.add("-compose");
+                command.add("CopyOpacity");
+                command.add("-composite");
+                break;
+
+            case "octagon":
+                command.add("(");
+                command.add("-size");
+                command.add(width + "x" + height);
+                command.add("xc:black");
+                command.add("-fill");
+                command.add("white");
+                command.add("-draw");
+                command.add(String.format("polygon %d,%d %d,%d %d,%d %d,%d %d,%d %d,%d %d,%d %d,%d",
+                        (int)(width*0.3), 0,
+                        (int)(width*0.7), 0,
+                        width, (int)(height*0.3),
+                        width, (int)(height*0.7),
+                        (int)(width*0.7), height,
+                        (int)(width*0.3), height,
+                        0, (int)(height*0.7),
+                        0, (int)(height*0.3)
+                ));
+                command.add(")");
+                command.add("-alpha");
+                command.add("off");
+                command.add("-compose");
+                command.add("CopyOpacity");
+                command.add("-composite");
+                break;
         }
     }
 }
