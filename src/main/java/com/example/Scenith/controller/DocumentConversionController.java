@@ -29,71 +29,6 @@ public class DocumentConversionController {
         this.objectMapper = objectMapper;
     }
 
-// ============================================================================
-// ADD/UPDATE THESE METHODS IN DocumentConversionController.java
-// ============================================================================
-//
-//    /**
-//     * Convert Word to PDF - NOT AVAILABLE (UPDATED)
-//     * Replace the existing convertWordToPdf method
-//     */
-//    @PostMapping("/word-to-pdf")
-//    public ResponseEntity<?> convertWordToPdf(
-//            @RequestHeader("Authorization") String token,
-//            @RequestParam("file") MultipartFile wordFile) {
-//        try {
-//            User user = documentConversionService.getUserFromToken(token);
-//            DocumentConversion result = documentConversionService.convertWordToPdf(user, wordFile);
-//            return ResponseEntity.status(501).body(Map.of(
-//                    "message", "Word to PDF conversion is not available",
-//                    "error", "This feature requires LibreOffice which is not installed. Please convert your Word document to PDF using Microsoft Word, Google Docs, or an online converter before uploading.",
-//                    "status", "NOT_IMPLEMENTED",
-//                    "availableOperations", Arrays.asList(
-//                            "PDF to Word",
-//                            "Merge PDFs",
-//                            "Split PDF",
-//                            "Compress PDF",
-//                            "Rotate PDF",
-//                            "Images to PDF",
-//                            "PDF to Images",
-//                            "Add Watermark",
-//                            "Lock/Unlock PDF",
-//                            "Rearrange PDF Pages"
-//                    )
-//            ));
-//        } catch (Exception e) {
-//            return ResponseEntity.status(501).body(Map.of(
-//                    "message", "Word to PDF conversion not available",
-//                    "error", e.getMessage()
-//            ));
-//        }
-//    }
-//
-//    /**
-//     * Convert PDF to Word - Enhanced (UPDATED)
-//     * Replace the existing convertPdfToWord method
-//     */
-//    @PostMapping("/pdf-to-word")
-//    public ResponseEntity<?> convertPdfToWord(
-//            @RequestHeader("Authorization") String token,
-//            @RequestParam("file") MultipartFile pdfFile) {
-//        try {
-//            User user = documentConversionService.getUserFromToken(token);
-//            DocumentConversion result = documentConversionService.convertPdfToWord(user, pdfFile);
-//            return ResponseEntity.ok(Map.of(
-//                    "message", "PDF to Word conversion completed successfully",
-//                    "data", result,
-//                    "note", "Formatting may differ from original PDF. Complex layouts, images, and tables may not be preserved."
-//            ));
-//        } catch (Exception e) {
-//            return ResponseEntity.status(500).body(Map.of(
-//                    "message", "PDF to Word conversion failed",
-//                    "error", e.getMessage(),
-//                    "suggestion", "Make sure your PDF contains extractable text content"
-//            ));
-//        }
-//    }
-
     /**
      * Merge multiple PDFs with optional page arrangement
      */
@@ -567,6 +502,145 @@ public class DocumentConversionController {
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of(
                     "message", "Failed to get page count",
+                    "error", e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Convert Word to PDF
+     * POST /api/documents/word-to-pdf
+     */
+    @PostMapping("/word-to-pdf")
+    public ResponseEntity<?> convertWordToPdf(
+            @RequestHeader("Authorization") String token,
+            @RequestParam("file") MultipartFile wordFile) {
+        try {
+            User user = documentConversionService.getUserFromToken(token);
+
+            // Validate file
+            if (wordFile.isEmpty()) {
+                return ResponseEntity.status(400).body(Map.of(
+                        "message", "No file uploaded",
+                        "error", "Please select a Word document (.doc or .docx)"
+                ));
+            }
+
+            DocumentConversion result = documentConversionService.convertWordToPdf(user, wordFile);
+            return ResponseEntity.ok(Map.of(
+                    "message", "Word document converted to PDF successfully",
+                    "data", result
+            ));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(400).body(Map.of(
+                    "message", "Invalid file type",
+                    "error", e.getMessage()
+            ));
+        } catch (Exception e) {
+            logger.error("Word to PDF conversion failed", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "message", "Word to PDF conversion failed",
+                    "error", e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Convert PDF to Word
+     * POST /api/documents/pdf-to-word
+     */
+    @PostMapping("/pdf-to-word")
+    public ResponseEntity<?> convertPdfToWord(
+            @RequestHeader("Authorization") String token,
+            @RequestParam("uploadId") Long uploadId) {
+        try {
+            User user = documentConversionService.getUserFromToken(token);
+            DocumentConversion result = documentConversionService.convertPdfToWord(user, uploadId);
+
+            return ResponseEntity.ok(Map.of(
+                    "message", "PDF converted to Word successfully",
+                    "data", result,
+                    "note", "Best results for text-based PDFs. Scanned PDFs or complex layouts may lose some formatting."
+            ));
+        } catch (Exception e) {
+            logger.error("PDF to Word conversion failed", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "message", "PDF to Word conversion failed",
+                    "error", e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Apply OCR to PDF (make scanned PDF searchable)
+     * POST /api/documents/ocr-pdf
+     */
+    @PostMapping("/ocr-pdf")
+    public ResponseEntity<?> ocrPdf(
+            @RequestHeader("Authorization") String token,
+            @RequestParam("uploadId") Long uploadId,
+            @RequestParam(required = false, defaultValue = "eng") String language) {
+        try {
+            User user = documentConversionService.getUserFromToken(token);
+
+            Map<String, Object> options = new HashMap<>();
+            options.put("language", language);
+
+            DocumentConversion result = documentConversionService.ocrPdf(user, uploadId, options);
+            return ResponseEntity.ok(Map.of(
+                    "message", "OCR applied successfully - PDF is now searchable",
+                    "data", result,
+                    "languageUsed", language
+            ));
+        } catch (Exception e) {
+            logger.error("OCR failed", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "message", "OCR processing failed",
+                    "error", e.getMessage(),
+                    "suggestion", "Make sure the PDF contains clear, readable scanned images"
+            ));
+        }
+    }
+
+    /**
+     * Add page numbers to PDF
+     * POST /api/documents/add-page-numbers
+     */
+    @PostMapping("/add-page-numbers")
+    public ResponseEntity<?> addPageNumbers(
+            @RequestHeader("Authorization") String token,
+            @RequestParam("uploadId") Long uploadId,
+            @RequestParam(required = false) Integer startPage,
+            @RequestParam(required = false) Integer endPage,
+            @RequestParam(required = false, defaultValue = "1") Integer startNumber,
+            @RequestParam(required = false, defaultValue = "bottom-center") String position,
+            @RequestParam(required = false, defaultValue = "10") Integer fontSize,
+            @RequestParam(required = false, defaultValue = "true") Boolean removeExisting) {
+        try {
+            User user = documentConversionService.getUserFromToken(token);
+
+            Map<String, Object> options = new HashMap<>();
+            if (startPage != null) options.put("startPage", startPage);
+            if (endPage != null) options.put("endPage", endPage);
+            options.put("startNumber", startNumber);
+            options.put("position", position);
+            options.put("fontSize", fontSize);
+            options.put("removeExisting", removeExisting);
+
+            DocumentConversion result = documentConversionService.addPageNumbers(user, uploadId, options);
+            return ResponseEntity.ok(Map.of(
+                    "message", "Page numbers added successfully",
+                    "data", result
+            ));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(400).body(Map.of(
+                    "message", "Invalid parameters",
+                    "error", e.getMessage()
+            ));
+        } catch (Exception e) {
+            logger.error("Add page numbers failed", e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "message", "Adding page numbers failed",
                     "error", e.getMessage()
             ));
         }

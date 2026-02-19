@@ -50,6 +50,9 @@ public class DocumentConversion {
     @Column(name = "file_size_bytes")
     private Long fileSizeBytes;
 
+    @Column(name = "post_processing_metadata", columnDefinition = "LONGTEXT")
+    private String postProcessingMetadata;
+
     // Constructors
     public DocumentConversion() {
         this.createdAt = LocalDateTime.now();

@@ -64,55 +64,113 @@ public class DocumentConversionService {
      * Word to PDF Conversion - NOT AVAILABLE (UPDATED)
      * Replace the existing convertWordToPdf method
      */
-    public DocumentConversion convertWordToPdf(User user, MultipartFile wordFile) throws IOException {
-        logger.info("Word to PDF conversion requested for user: {}", user.getId());
+    /**
+     * Word to PDF Conversion
+     */
+    public DocumentConversion convertWordToPdf(User user, MultipartFile wordFile)
+            throws IOException, InterruptedException {
+        logger.info("Converting Word to PDF for user: {}", user.getId());
 
-        // Create a simple error response without processing
-        DocumentConversion conversion = new DocumentConversion();
-        conversion.setUser(user);
-        conversion.setOperationType("WORD_TO_PDF");
-        conversion.setStatus("FAILED");
-        conversion.setErrorMessage(
-                "Word to PDF conversion is not available. " +
-                        "Please convert your Word document to PDF using Microsoft Word, Google Docs, or an online converter " +
-                        "before uploading. You can then use our PDF tools for merging, splitting, compressing, and other operations."
-        );
-        conversion.setCreatedAt(LocalDateTime.now());
+        // Validate file type
+        String filename = wordFile.getOriginalFilename();
+        if (filename == null || (!filename.endsWith(".doc") && !filename.endsWith(".docx"))) {
+            throw new IllegalArgumentException("Only .doc and .docx files are supported");
+        }
 
-        documentConversionRepository.save(conversion);
+        // Create temporary upload
+        DocumentUpload upload = createTempUpload(user, wordFile);
 
-        throw new IOException(
-                "Word to PDF conversion is not available. " +
-                        "Please convert to PDF first using Microsoft Word, Google Docs, or an online converter."
-        );
+        try {
+            return processDocumentConversion(user, List.of(upload), "WORD_TO_PDF", null);
+        } finally {
+            // Clean up temp upload if needed
+            documentUploadRepository.delete(upload);
+        }
     }
 
-//    /**
-//     * PDF to Word Conversion - Enhanced with better error handling (UPDATED)
-//     * Replace the existing convertPdfToWord method
-//     */
-//    public DocumentConversion convertPdfToWord(User user, MultipartFile pdfFile) throws IOException, InterruptedException {
-//        logger.info("Converting PDF to Word for user: {}", user.getId());
-//        try {
-//            return processDocumentConversion(user, Collections.singletonList(pdfFile), "PDF_TO_WORD", null);
-//        } catch (IOException e) {
-//            // Log the error and create a failed conversion record
-//            logger.error("PDF to Word conversion failed for user {}: {}", user.getId(), e.getMessage());
-//
-//            // Create failed conversion record
-//            DocumentConversion conversion = new DocumentConversion();
-//            conversion.setUser(user);
-//            conversion.setOperationType("PDF_TO_WORD");
-//            conversion.setOriginalFileNames(objectMapper.writeValueAsString(Collections.singletonList(pdfFile.getOriginalFilename())));
-//            conversion.setStatus("FAILED");
-//            conversion.setErrorMessage(e.getMessage());
-//            conversion.setCreatedAt(LocalDateTime.now());
-//
-//            documentConversionRepository.save(conversion);
-//
-//            throw e;
-//        }
-//    }
+    /**
+     * PDF to Word Conversion
+     */
+    public DocumentConversion convertPdfToWord(User user, Long uploadId)
+            throws IOException, InterruptedException {
+        logger.info("Converting PDF to Word for user: {}", user.getId());
+
+        DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                .orElseThrow(() -> new RuntimeException("Upload not found"));
+        if (!upload.getUser().getId().equals(user.getId())) {
+            throw new RuntimeException("Unauthorized access");
+        }
+
+        return processDocumentConversion(user, List.of(upload), "PDF_TO_WORD", null);
+    }
+
+    /**
+     * OCR PDF
+     */
+    public DocumentConversion ocrPdf(User user, Long uploadId, Map<String, Object> options)
+            throws IOException, InterruptedException {
+        logger.info("Applying OCR to PDF for user: {}", user.getId());
+
+        DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                .orElseThrow(() -> new RuntimeException("Upload not found"));
+        if (!upload.getUser().getId().equals(user.getId())) {
+            throw new RuntimeException("Unauthorized access");
+        }
+
+        return processDocumentConversion(user, List.of(upload), "OCR_PDF", options);
+    }
+
+    /**
+     * Add Page Numbers to PDF
+     */
+    public DocumentConversion addPageNumbers(User user, Long uploadId, Map<String, Object> options)
+            throws IOException, InterruptedException {
+        logger.info("Adding page numbers to PDF for user: {}", user.getId());
+
+        DocumentUpload upload = documentUploadRepository.findById(uploadId)
+                .orElseThrow(() -> new RuntimeException("Upload not found"));
+        if (!upload.getUser().getId().equals(user.getId())) {
+            throw new RuntimeException("Unauthorized access");
+        }
+
+        // Validate options
+        if (options != null) {
+            Integer startPage = (Integer) options.get("startPage");
+            Integer endPage = (Integer) options.get("endPage");
+
+            if (startPage != null && endPage != null && startPage > endPage) {
+                throw new IllegalArgumentException("Start page cannot be greater than end page");
+            }
+        }
+
+        return processDocumentConversion(user, List.of(upload), "ADD_PAGE_NUMBERS", options);
+    }
+
+    /**
+     * Helper method to create temporary upload from MultipartFile
+     */
+    private DocumentUpload createTempUpload(User user, MultipartFile file) throws IOException {
+        String timestamp = String.valueOf(System.currentTimeMillis());
+        String tempPath = String.format("documents/%s/%s/temp/%s",
+                user.getId(), timestamp, file.getOriginalFilename());
+
+        // Upload to R2
+        File tempFile = File.createTempFile("upload_", file.getOriginalFilename());
+        file.transferTo(tempFile);
+        cloudflareR2Service.uploadFile(tempPath, tempFile);
+        tempFile.delete();
+
+        // Create DocumentUpload entity
+        DocumentUpload upload = new DocumentUpload();
+        upload.setUser(user);
+        upload.setFileName(file.getOriginalFilename());
+        upload.setFilePath(tempPath);
+        upload.setFileSizeBytes(file.getSize());
+        upload.setCreatedAt(LocalDateTime.now());
+
+        return documentUploadRepository.save(upload);
+    }
+
     public DocumentConversion mergePdfs(User user, List<Long> uploadIds, Map<String, Object> options)
             throws IOException, InterruptedException {
         logger.info("Merging {} PDFs for user: {}", uploadIds.size(), user.getId());
@@ -294,7 +352,6 @@ public class DocumentConversionService {
             outputFile = new File(outputPath);
 
             // Build and execute command
-            // Build and execute command
             List<String> command = buildConversionCommand(
                     operationType,
                     inputPaths,
@@ -302,25 +359,47 @@ public class DocumentConversionService {
                     options
             );
 
-            logger.debug("Executing command: {}", String.join(" ", command));
+            logger.info("Executing command: {}", String.join(" ", command));
 
-            // Execute conversion
+            // ============================================================
+            // CRITICAL FIX: Proper process execution with output capture
+            // ============================================================
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.directory(new File(workDir));
-            pb.redirectErrorStream(true);
+            pb.redirectErrorStream(true);  // Merge stderr into stdout
 
             Process process = pb.start();
 
+            // Capture output in REAL-TIME with INFO-level logging
             StringBuilder output = new StringBuilder();
+            StringBuilder jsonOutput = new StringBuilder();
+            boolean capturingJson = false;
+
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     output.append(line).append("\n");
-                    logger.debug("Process output: {}", line);
+
+                    // CHANGED: Use logger.info instead of logger.debug
+                    logger.info("Process output: {}", line);
+
+                    // Also print to console for immediate visibility
+                    System.out.println("[Python] " + line);
+                    System.out.flush();
+
+                    // Capture JSON output (Python script prints JSON at the end)
+                    if (line.trim().startsWith("{")) {
+                        capturingJson = true;
+                    }
+                    if (capturingJson) {
+                        jsonOutput.append(line);
+                    }
                 }
             }
 
             int exitCode = process.waitFor();
+            logger.info("Process completed with exit code: {}", exitCode);
+
             if (exitCode != 0) {
                 logger.error("Conversion failed with exit code: {}, output: {}", exitCode, output);
                 throw new IOException("Document conversion failed: " + output);
@@ -332,6 +411,19 @@ public class DocumentConversionService {
                 throw new IOException("Output file not created");
             }
 
+            // ============================================================
+            // CRITICAL FIX: Parse Python JSON response for post-processing data
+            // ============================================================
+            Map<String, Object> pythonResult = null;
+            try {
+                if (jsonOutput.length() > 0) {
+                    pythonResult = objectMapper.readValue(jsonOutput.toString(), Map.class);
+                    logger.info("Python result parsed: {}", objectMapper.writeValueAsString(pythonResult));
+                }
+            } catch (Exception e) {
+                logger.warn("Failed to parse Python JSON response: {}", e.getMessage());
+            }
+
             // Upload output to R2
             String r2OutputPath = String.format("documents/%s/%s/output/%s", user.getId(), timestamp, outputFileName);
             cloudflareR2Service.uploadFile(r2OutputPath, outputFile);
@@ -339,6 +431,15 @@ public class DocumentConversionService {
 
             // Generate URLs
             Map<String, String> outputUrls = cloudflareR2Service.generateUrls(r2OutputPath, 3600);
+
+            // ============================================================
+            // CRITICAL FIX: Extract post-processing metadata from Python result
+            // ============================================================
+            Map<String, Object> postProcessingData = null;
+            if (pythonResult != null && pythonResult.containsKey("post_processing")) {
+                postProcessingData = (Map<String, Object>) pythonResult.get("post_processing");
+                logger.info("Post-processing data extracted: {}", objectMapper.writeValueAsString(postProcessingData));
+            }
 
             // Create and save DocumentConversion entity
             DocumentConversion conversion = new DocumentConversion();
@@ -353,6 +454,14 @@ public class DocumentConversionService {
 
             if (options != null) {
                 conversion.setProcessingOptions(objectMapper.writeValueAsString(options));
+            }
+
+            // ============================================================
+            // CRITICAL FIX: Store post-processing metadata in database
+            // ============================================================
+            if (postProcessingData != null) {
+                conversion.setPostProcessingMetadata(objectMapper.writeValueAsString(postProcessingData));
+                logger.info("Stored post-processing metadata in database");
             }
 
             conversion.setStatus("SUCCESS");
@@ -419,19 +528,37 @@ public class DocumentConversionService {
         command.add(documentConversionScriptPath);
         command.add(operationType);
 
-        switch (operationType) {
-            case "COMPRESS_PDF":
-                // ADD DEBUG LOGGING
-                logger.info("=== COMPRESS_PDF DEBUG ===");
-                logger.info("Input path: {}", inputPaths.get(0));
-                logger.info("Output path: {}", outputPath);
-                if (options != null) {
-                    logger.info("Options: {}", objectMapper.writeValueAsString(options));
-                } else {
-                    logger.warn("Options is NULL!");
-                }
-                logger.info("=== END DEBUG ===");
+        // Log the operation being performed
+        logger.info("=== BUILDING COMMAND FOR: {} ===", operationType);
+        logger.info("Input path: {}", inputPaths.get(0));
+        logger.info("Output path: {}", outputPath);
+        if (options != null) {
+            logger.info("Options: {}", objectMapper.writeValueAsString(options));
+        }
+        logger.info("=== END DEBUG ===");
 
+        switch (operationType) {
+            case "WORD_TO_PDF":
+                command.add(inputPaths.get(0));
+                command.add(outputPath);
+                break;
+
+            case "PDF_TO_WORD":
+                command.add(inputPaths.get(0));
+                command.add(outputPath);
+                break;
+
+            case "OCR_PDF":
+                command.add(inputPaths.get(0));
+                command.add(outputPath);
+                break;
+
+            case "ADD_PAGE_NUMBERS":
+                command.add(inputPaths.get(0));
+                command.add(outputPath);
+                break;
+
+            case "COMPRESS_PDF":
                 command.add(inputPaths.get(0));
                 command.add(outputPath);
                 break;
@@ -442,7 +569,7 @@ public class DocumentConversionService {
             case "SPLIT_PDF":
             case "ROTATE_PDF":
             case "ADD_WATERMARK":
-            case "REARRANGE_PDF":  // Add this!
+            case "REARRANGE_PDF":
                 command.add(inputPaths.get(0));
                 command.add(outputPath);
                 break;
@@ -462,6 +589,9 @@ public class DocumentConversionService {
             command.add(objectMapper.writeValueAsString(options));
         }
 
+        // Log the final command
+        logger.info("Final command: {}", String.join(" ", command));
+
         return command;
     }
 
@@ -470,6 +600,14 @@ public class DocumentConversionService {
         String timestamp = String.valueOf(System.currentTimeMillis());
 
         switch (operationType) {
+            case "WORD_TO_PDF":
+                return baseName + "_" + timestamp + ".pdf";
+            case "PDF_TO_WORD":
+                return baseName + "_" + timestamp + ".docx";
+            case "OCR_PDF":
+                return baseName + "_ocr_" + timestamp + ".pdf";
+            case "ADD_PAGE_NUMBERS":
+                return baseName + "_numbered_" + timestamp + ".pdf";
             case "IMAGES_TO_PDF":
                 return baseName + "_" + timestamp + ".pdf";
             case "MERGE_PDF":

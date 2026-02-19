@@ -36,10 +36,67 @@ RUN yum install -y \
     cairo-devel \
     && yum clean all
 
-# Install ghostscript
-RUN yum install -y --setopt=protected_multilib=false \
-    ghostscript-9.54.0-9.amzn2.0.13.x86_64 || \
-    yum install -y ghostscript.x86_64
+# Build Ghostscript 10.02.1 from source (OCRmyPDF requires 9.55+)
+RUN cd /tmp && \
+    wget https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10021/ghostscript-10.02.1.tar.gz && \
+    tar -xzf ghostscript-10.02.1.tar.gz && \
+    cd ghostscript-10.02.1 && \
+    ./configure --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    ln -sf /usr/local/bin/gs /usr/bin/gs && \
+    rm -rf /tmp/ghostscript-10.02.1*
+
+# ============================================================================
+# DOCUMENT CONVERSION DEPENDENCIES (SAFE ADDITIVE LAYER)
+# Must be installed BEFORE ImageMagick-from-source and Python build
+# ============================================================================
+
+# ============================================================================
+# Build Tesseract OCR from source (Amazon Linux 2 doesn't have it in repos)
+# ============================================================================
+
+# Install Leptonica (required by Tesseract)
+RUN cd /tmp && \
+    wget http://www.leptonica.org/source/leptonica-1.82.0.tar.gz && \
+    tar -xzf leptonica-1.82.0.tar.gz && \
+    cd leptonica-1.82.0 && \
+    ./configure --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/leptonica-1.82.0*
+
+# Build Tesseract OCR from source
+RUN cd /tmp && \
+    wget https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.3.0.tar.gz && \
+    tar -xzf 5.3.0.tar.gz && \
+    cd tesseract-5.3.0 && \
+    ./autogen.sh && \
+    PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/lib64/pkgconfig" ./configure --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/tesseract-5.3.0* /tmp/5.3.0.tar.gz
+
+# Download Tesseract language data files
+RUN mkdir -p /usr/local/share/tessdata && \
+    cd /usr/local/share/tessdata && \
+    wget https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata && \
+    wget https://github.com/tesseract-ocr/tessdata/raw/main/spa.traineddata && \
+    wget https://github.com/tesseract-ocr/tessdata/raw/main/fra.traineddata && \
+    wget https://github.com/tesseract-ocr/tessdata/raw/main/deu.traineddata
+
+# Set Tesseract data path
+ENV TESSDATA_PREFIX=/usr/local/share/tessdata
+
+# ============================================================================
+# Install OCRmyPDF system dependencies (but NOT the Python package yet)
+# We'll install the Python package AFTER Python is built
+# ============================================================================
+# Skip optional OCRmyPDF dependencies (not available in Amazon Linux 2)
+# OCRmyPDF will work fine without these - they're only for image optimization
 
 # Install ImageMagick WITHOUT custom HarfBuzz interference
 # Use system libraries for SVG support
@@ -181,6 +238,31 @@ RUN cd /tmp && \
 RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
     /usr/local/bin/pip3.11 install --upgrade pip setuptools wheel
 
+# ============================================================================
+# DOCUMENT CONVERSION PYTHON DEPENDENCIES
+# ============================================================================
+
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install \
+        "pytesseract==0.3.10" \
+        "pdf2image==1.16.3"
+
+# ============================================================================
+# NOW Install OCRmyPDF (AFTER Python is available)
+# ============================================================================
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/pip3.11 install \
+        "ocrmypdf==15.4.4" \
+        "beautifulsoup4==4.12.3" \
+        "lxml==5.3.0" \
+        "pikepdf==8.15.1"
+
+# Verify OCRmyPDF installation (with proper library path)
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    /usr/local/bin/ocrmypdf --version && \
+    echo "OCRmyPDF installed successfully"
+RUN yum install -y poppler-utils
+
 RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
     /usr/local/bin/pip3.11 install "torch==2.6.0+cpu" --index-url https://download.pytorch.org/whl/cpu && \
     /usr/local/bin/pip3.11 install "torchaudio==2.6.0+cpu" --index-url https://download.pytorch.org/whl/cpu
@@ -242,19 +324,24 @@ ENV FFPROBE_PATH=/usr/local/bin/ffprobe
 ENV PYTHON_PATH=/usr/local/bin/python3.11
 ENV YT_DLP_PATH=/usr/local/bin/yt-dlp
 ENV IMAGEMAGICK_PATH=/usr/local/bin/magick
+ENV TESSERACT_PATH=/usr/local/bin/tesseract
+ENV OCRMYPDF_PATH=/usr/local/bin/ocrmypdf
 ENV OMP_NUM_THREADS=1
 ENV OPENCV_IO_MAX_IMAGE_PIXELS=1073741824
 ENV SSL_CERT_DIR=/etc/pki/tls/certs
 ENV SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
 
 # Verify installations
-RUN echo "Verifying installations..." && \
+RUN export LD_LIBRARY_PATH=/usr/lib64/openssl11:/usr/local/lib:$LD_LIBRARY_PATH && \
+    echo "Verifying installations..." && \
     /usr/local/bin/ffmpeg -version | head -1 && \
     /usr/local/bin/python3.11 --version && \
     /usr/local/bin/python3.11 -c "import ssl; print('SSL module available')" && \
     /usr/local/bin/python3.11 -c "import rembg; print('Rembg module available')" && \
     /usr/local/bin/python3.11 -c "import torch; print('PyTorch version:', torch.__version__)" && \
     /usr/local/bin/python3.11 -c "import PIL; print('Pillow version:', PIL.__version__)" && \
+    /usr/local/bin/python3.11 -c "import ocrmypdf; print('OCRmyPDF module available')" && \
+    /usr/local/bin/ocrmypdf --version && \
     echo "Setup verification complete."
 
 # ============================================================================
@@ -269,7 +356,7 @@ RUN rpm --import https://yum.corretto.aws/corretto.key && \
     yum clean all
 
 # Set Java environment
-ENV JAVA_OPTS="-Xms512m -Xmx1024m"
+ENV JAVA_OPTS="-Xms384m -Xmx768m -XX:MaxMetaspaceSize=256m -XX:+UseG1GC"
 ENV SPRING_PROFILES_ACTIVE=prod
 ENV DOCUMENT_CONVERSION_SCRIPT_PATH=/app/scripts/document_converter.py
 
@@ -288,6 +375,8 @@ COPY scripts/convert_media.py /app/scripts/
 COPY scripts/whisper_transcribe.py /app/scripts/
 COPY scripts/whisper_transcribe.py /temp/scripts/
 COPY scripts/document_converter.py /app/scripts/
+COPY scripts/ocr_postprocessor.py /app/scripts/
+COPY scripts/ocr_postprocessor.py /temp/scripts/
 COPY scripts/document_converter.py /temp/scripts/
 
 # Make scripts executable
