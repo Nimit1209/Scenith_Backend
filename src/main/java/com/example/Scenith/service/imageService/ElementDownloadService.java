@@ -2,10 +2,13 @@ package com.example.Scenith.service.imageService;
 
 import com.example.Scenith.entity.User;
 import com.example.Scenith.entity.imageentity.ElementDownload;
+import com.example.Scenith.entity.imageentity.ElementDownloadUsage;
 import com.example.Scenith.entity.imageentity.ImageElement;
 import com.example.Scenith.repository.imagerepository.ElementDownloadRepository;
+import com.example.Scenith.repository.imagerepository.ElementDownloadUsageRepository;
 import com.example.Scenith.repository.imagerepository.ImageElementRepository;
 import com.example.Scenith.service.CloudflareR2Service;
+import com.example.Scenith.service.PlanLimitsService;
 import org.apache.batik.transcoder.TranscoderException;
 import org.apache.batik.transcoder.TranscoderInput;
 import org.apache.batik.transcoder.TranscoderOutput;
@@ -25,6 +28,8 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.LocalDate;
+import java.time.YearMonth;
 
 @Service
 public class ElementDownloadService {
@@ -34,13 +39,17 @@ public class ElementDownloadService {
     private final ElementDownloadRepository downloadRepository;
     private final ImageElementRepository elementRepository;
     private final CloudflareR2Service cloudflareR2Service;
+    private final ElementDownloadUsageRepository downloadUsageRepository;
+    private final PlanLimitsService planLimitsService;
 
     public ElementDownloadService(ElementDownloadRepository downloadRepository,
                                   ImageElementRepository elementRepository,
-                                  CloudflareR2Service cloudflareR2Service) {
+                                  CloudflareR2Service cloudflareR2Service, ElementDownloadUsageRepository downloadUsageRepository, PlanLimitsService planLimitsService) {
         this.downloadRepository = downloadRepository;
         this.elementRepository = elementRepository;
         this.cloudflareR2Service = cloudflareR2Service;
+        this.downloadUsageRepository = downloadUsageRepository;
+        this.planLimitsService = planLimitsService;
     }
 
     /**
@@ -49,12 +58,60 @@ public class ElementDownloadService {
     @Transactional
     public DownloadResult downloadElement(Long elementId, String format, String resolution,
                                           String color, User user, String ipAddress) throws IOException {
-        logger.info("Downloading element {} in format {} | resolution {} | color {}",
-                elementId, format, resolution, color);
+        logger.info("Downloading element {} in format {} with resolution {}", elementId, format, resolution);
 
-        // 1. Validate element exists
         ImageElement element = elementRepository.findById(elementId)
                 .orElseThrow(() -> new IllegalArgumentException("Element not found"));
+
+        format = format.toUpperCase();
+
+        // ---- Enforce limits for logged-in users ----
+        if (user != null) {
+            // SVG format check
+            if ("SVG".equals(format) && !planLimitsService.canDownloadSvg(user)) {
+                throw new IllegalArgumentException("SVG download requires SVG_PRO plan or CREATOR/STUDIO/ADMIN role.");
+            }
+
+            // Resolution check
+            int[] dimensions = parseResolutionForValidation(resolution);
+            int maxRes = planLimitsService.getMaxElementDownloadResolution(user);
+            if (dimensions[0] > maxRes || dimensions[1] > maxRes) {
+                throw new IllegalArgumentException(
+                        "Resolution exceeds your plan limit. Max allowed: " + maxRes + "x" + maxRes);
+            }
+
+            // Daily limit check
+            int dailyLimit = planLimitsService.getDailyElementDownloadLimit(user);
+            if (dailyLimit > 0) {
+                int dailyUsage = getDailyDownloadCount(user);
+                if (dailyUsage >= dailyLimit) {
+                    throw new IllegalStateException(
+                            "Daily download limit reached (" + dailyLimit + "/day). Upgrade your plan for more.");
+                }
+            }
+
+            // Monthly limit check
+            int monthlyLimit = planLimitsService.getMonthlyElementDownloadLimit(user);
+            if (monthlyLimit > 0) {
+                int monthlyUsage = getMonthlyDownloadCount(user);
+                if (monthlyUsage >= monthlyLimit) {
+                    throw new IllegalStateException(
+                            "Monthly download limit reached (" + monthlyLimit + "/month). Upgrade your plan for more.");
+                }
+            }
+
+            // Increment usage
+            incrementDownloadUsage(user);
+        } else {
+            // Anonymous users: restrict to PNG/JPG only, max 512x512
+            if ("SVG".equals(format)) {
+                throw new IllegalArgumentException("SVG download requires an account with SVG_PRO plan.");
+            }
+            int[] dimensions = parseResolutionForValidation(resolution);
+            if (dimensions[0] > 512 || dimensions[1] > 512) {
+                throw new IllegalArgumentException("Resolution exceeds limit for guests. Max allowed: 512x512");
+            }
+        }
 
         // 2. Record download (moved early - good practice)
         recordDownload(elementId, user != null ? user.getId() : null, format, resolution, ipAddress);
@@ -421,5 +478,38 @@ public class ElementDownloadService {
         byte[] fileContent = svgContent.getBytes();
         String filename = sanitizeFilename(elementName) + ".svg";
         return new DownloadResult(new ByteArrayResource(fileContent), filename, "image/svg+xml");
+    }
+    private int[] parseResolutionForValidation(String resolution) {
+        if (resolution == null || resolution.isEmpty()) {
+            return new int[]{512, 512}; // default
+        }
+        String[] parts = resolution.split("x");
+        if (parts.length != 2) return new int[]{512, 512};
+        try {
+            return new int[]{Integer.parseInt(parts[0]), Integer.parseInt(parts[1])};
+        } catch (NumberFormatException e) {
+            return new int[]{512, 512};
+        }
+    }
+
+    public int getDailyDownloadCount(User user) {
+        return downloadUsageRepository
+                .findByUserIdAndUsageDate(user.getId(), LocalDate.now())
+                .map(ElementDownloadUsage::getDailyCount)
+                .orElse(0);
+    }
+
+    public int getMonthlyDownloadCount(User user) {
+        return downloadUsageRepository
+                .sumMonthlyCountByUserIdAndYearMonth(user.getId(), YearMonth.now().toString());
+    }
+
+    private void incrementDownloadUsage(User user) {
+        ElementDownloadUsage usage = downloadUsageRepository
+                .findByUserIdAndUsageDate(user.getId(), LocalDate.now())
+                .orElseGet(() -> new ElementDownloadUsage(user.getId()));
+        usage.setDailyCount(usage.getDailyCount() + 1);
+        usage.setMonthlyCount(usage.getMonthlyCount() + 1);
+        downloadUsageRepository.save(usage);
     }
 }

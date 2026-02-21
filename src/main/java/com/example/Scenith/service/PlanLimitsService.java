@@ -353,4 +353,42 @@ public class PlanLimitsService {
             default -> 1280;
         };
     }
+    // ==================== ELEMENT DOWNLOAD LIMITS ====================
+
+    public boolean canDownloadSvg(User user) {
+        if (user.getRole() == User.Role.CREATOR || user.getRole() == User.Role.STUDIO || user.getRole() == User.Role.ADMIN) {
+            return true;
+        }
+        return getActivePlan(user, PlanType.SVG_PRO).isPresent();
+    }
+
+    public int getMaxElementDownloadResolution(User user) {
+        if (user.getRole() == User.Role.CREATOR || user.getRole() == User.Role.STUDIO || user.getRole() == User.Role.ADMIN) {
+            return Integer.MAX_VALUE; // Unlimited
+        }
+        if (getActivePlan(user, PlanType.SVG_PRO).isPresent()) {
+            return 2048;
+        }
+        return 512; // BASIC without SVG_PRO
+    }
+
+    public int getMonthlyElementDownloadLimit(User user) {
+        if (user.getRole() == User.Role.CREATOR || user.getRole() == User.Role.STUDIO || user.getRole() == User.Role.ADMIN) {
+            return -1; // Unlimited
+        }
+        if (getActivePlan(user, PlanType.SVG_PRO).isPresent()) {
+            return -1; // Unlimited
+        }
+        return 10; // BASIC without SVG_PRO
+    }
+
+    public int getDailyElementDownloadLimit(User user) {
+        if (user.getRole() == User.Role.CREATOR || user.getRole() == User.Role.STUDIO || user.getRole() == User.Role.ADMIN) {
+            return -1;
+        }
+        if (getActivePlan(user, PlanType.SVG_PRO).isPresent()) {
+            return -1;
+        }
+        return 2; // BASIC without SVG_PRO
+    }
 }

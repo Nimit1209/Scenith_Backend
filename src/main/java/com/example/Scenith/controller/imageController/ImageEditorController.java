@@ -7,6 +7,7 @@ import com.example.Scenith.entity.User;
 import com.example.Scenith.entity.imageentity.ImageAsset;
 import com.example.Scenith.entity.imageentity.ImageElement;
 import com.example.Scenith.entity.imageentity.ImageProject;
+import com.example.Scenith.service.PlanLimitsService;
 import com.example.Scenith.service.imageService.ElementDownloadService;
 import com.example.Scenith.service.imageService.ImageAssetService;
 import com.example.Scenith.service.imageService.ImageEditorService;
@@ -33,6 +34,7 @@ public class ImageEditorController {
     private final ImageAssetService imageAssetService;
     private final ImageElementService imageElementService;
     private final ElementDownloadService elementDownloadService;
+    private final PlanLimitsService planLimitsService;
 
 
     /**
@@ -338,9 +340,11 @@ public class ImageEditorController {
                     .contentType(org.springframework.http.MediaType.parseMediaType(result.getContentType()))
                     .body(result.getResource());
 
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalStateException var11) {
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
+        } catch (IllegalArgumentException var12) {
             return ResponseEntity.badRequest().build();
-        } catch (IOException e) {
+        } catch (IOException var13) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
@@ -357,6 +361,38 @@ public class ImageEditorController {
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("message", "Failed to retrieve stats"));
+        }
+    }
+    @GetMapping({"/elements/{id}/download-usage"})
+    public ResponseEntity<?> getDownloadUsage(@PathVariable Long id, @RequestHeader(value = "Authorization",required = false) String token) {
+        try {
+            if (token != null && !token.isEmpty()) {
+                User user = this.imageEditorService.getUserFromToken(token);
+                int daily = this.elementDownloadService.getDailyDownloadCount(user);
+                int monthly = this.elementDownloadService.getMonthlyDownloadCount(user);
+                return ResponseEntity.ok(Map.of("dailyCount", daily, "monthlyCount", monthly));
+            } else {
+                return ResponseEntity.ok(Map.of("dailyCount", 0, "monthlyCount", 0));
+            }
+        } catch (Exception var6) {
+            return ResponseEntity.ok(Map.of("dailyCount", 0, "monthlyCount", 0));
+        }
+    }
+
+    @GetMapping({"/elements/download-limits"})
+    public ResponseEntity<?> getDownloadLimits(@RequestHeader(value = "Authorization",required = false) String token) {
+        try {
+            User user = null;
+            if (token != null && !token.isEmpty()) {
+                try {
+                    user = this.imageEditorService.getUserFromToken(token);
+                } catch (Exception var4) {
+                }
+            }
+
+            return user == null ? ResponseEntity.ok(Map.of("canDownloadSvg", false, "maxResolution", 512, "dailyLimit", 2, "monthlyLimit", 10, "plan", "GUEST")) : ResponseEntity.ok(Map.of("canDownloadSvg", this.planLimitsService.canDownloadSvg(user), "maxResolution", this.planLimitsService.getMaxElementDownloadResolution(user), "dailyLimit", this.planLimitsService.getDailyElementDownloadLimit(user), "monthlyLimit", this.planLimitsService.getMonthlyElementDownloadLimit(user), "plan", user.getRole().toString()));
+        } catch (Exception var5) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Failed to fetch limits"));
         }
     }
 }

@@ -5,5 +5,6 @@ public enum PlanType {
     AI_VOICE_PRO,
     AI_SUBTITLE_PRO,
     AI_SPEED_PRO,
-    BG_REMOVAL_PRO
+    BG_REMOVAL_PRO,
+    SVG_PRO
 }
