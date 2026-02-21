@@ -24,7 +24,7 @@ public class ElementDownloadUsage {
     @Column(name = "daily_count", nullable = false)
     private int dailyCount = 0;
 
-    @Column(name = "year_month", nullable = false)
+    @Column(name = "usage_year_month", nullable = false)
     private String yearMonth; // Format: "2025-06"
 
     @Column(name = "monthly_count", nullable = false)

@@ -162,6 +162,7 @@ public class PaymentController {
                 "AI_VOICE_PRO".equals(planType) ||
                 "AI_SUBTITLE_PRO".equals(planType) ||
                 "BG_REMOVAL_PRO".equals(planType) ||
+                "SVG_PRO".equals(planType) ||
                 "AI_SPEED_PRO".equals(planType);
     }
 

@@ -41,7 +41,7 @@ public class PlanLimitsService {
 
     public long getDailyTtsLimit(User user) {
         long bundledLimit = switch (user.getRole()) {
-            case BASIC -> 200;
+            case BASIC -> 700;
             case CREATOR -> 15000;
             case STUDIO -> -1;
             case ADMIN -> -1;
@@ -58,7 +58,7 @@ public class PlanLimitsService {
 
     public long getMaxCharsPerRequest(User user) {
         long bundledLimit = switch (user.getRole()) {
-            case BASIC -> 150;
+            case BASIC -> 200;
             case CREATOR -> 3500;
             case STUDIO -> 5000;
             case ADMIN -> 10000;
