@@ -51,6 +51,7 @@ public class JwtFilter extends OncePerRequestFilter {
                 path.startsWith("/api/ai-voices/voices-by-gender") ||
                 path.startsWith("/api/ai-voices/voices-by-language-and-gender") ||
                 path.startsWith("/api/image-editor/templates") ||
+                path.startsWith("/unsubscribe")||
                 path.startsWith("/videos/")) {
             filterChain.doFilter(request, response);
             return;

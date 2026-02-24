@@ -36,42 +36,38 @@ public class SesEmailService {
      */
     public void sendEmail(String to, String subject, String htmlBody) {
         try {
-            Destination destination = Destination.builder()
-                    .toAddresses(to)
+
+            String unsubscribeUrl = "https://api.scenith.in/unsubscribe?email=" + to;
+
+            String rawMessage =
+                    "From: " + fromName + " <" + fromEmail + ">\n" +
+                            "To: " + to + "\n" +
+                            "Subject: " + subject + "\n" +
+                            "MIME-Version: 1.0\n" +
+                            "Content-Type: text/html; charset=UTF-8\n" +
+
+                            // ⭐ REQUIRED FOR GMAIL UNSUBSCRIBE BUTTON
+                            "List-Unsubscribe: <mailto:unsubscribe@scenith.in>, <" + unsubscribeUrl + ">\n" +
+                            "List-Unsubscribe-Post: List-Unsubscribe=One-Click\n" +
+
+                            "\n" +
+                            htmlBody;
+
+            RawMessage rm = RawMessage.builder()
+                    .data(software.amazon.awssdk.core.SdkBytes.fromUtf8String(rawMessage))
                     .build();
 
-            Content subjectContent = Content.builder()
-                    .data(subject)
-                    .charset("UTF-8")
+            SendRawEmailRequest request = SendRawEmailRequest.builder()
+                    .rawMessage(rm)
                     .build();
 
-            Content htmlContent = Content.builder()
-                    .data(htmlBody)
-                    .charset("UTF-8")
-                    .build();
+            sesClient.sendRawEmail(request);
 
-            Body body = Body.builder()
-                    .html(htmlContent)
-                    .build();
+            logger.debug("✅ RAW SES email sent to {}", to);
 
-            Message message = Message.builder()
-                    .subject(subjectContent)
-                    .body(body)
-                    .build();
-
-            SendEmailRequest emailRequest = SendEmailRequest.builder()
-                    .destination(destination)
-                    .message(message)
-                    .source(fromName + " <" + fromEmail + ">")
-                    .build();
-
-            SendEmailResponse response = sesClient.sendEmail(emailRequest);
-
-            logger.debug("✅ Email sent to: {} | MessageId: {}", to, response.messageId());
-
-        } catch (SesException e) {
-            logger.error("❌ SES failed to: {} | Error: {}", to, e.awsErrorDetails().errorMessage());
-            throw new RuntimeException("SES send failed: " + e.awsErrorDetails().errorMessage(), e);
+        } catch (Exception e) {
+            logger.error("❌ RAW SES failed to {}: {}", to, e.getMessage());
+            throw new RuntimeException(e);
         }
     }
 

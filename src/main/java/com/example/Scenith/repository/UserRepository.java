@@ -21,6 +21,10 @@ public interface UserRepository extends JpaRepository<User, Long> {
     @Query("SELECT u FROM User u WHERE u.planExpiresAt IS NOT NULL AND u.planExpiresAt < :now AND u.role != 'BASIC'")
     List<User> findAllExpiredPremiumUsers(@Param("now") LocalDateTime now);
 
-    @Query("SELECT u.email, u.name FROM User u")
+    @Query("SELECT u.email, u.name FROM User u WHERE u.marketingSubscribed = true")
     List<Object[]> findAllEmailAndName();
+
+    @Modifying
+    @Query("UPDATE User u SET u.marketingSubscribed = false WHERE u.email = :email")
+    void unsubscribeUser(@Param("email") String email);
 }

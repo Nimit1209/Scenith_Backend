@@ -53,6 +53,16 @@ public class User {
 
     @Column
     private LocalDateTime planExpiresAt;
+    @Column(name = "marketing_subscribed", nullable = false)
+    private boolean marketingSubscribed = true;
+
+    public boolean isMarketingSubscribed() {
+        return marketingSubscribed;
+    }
+
+    public void setMarketingSubscribed(boolean marketingSubscribed) {
+        this.marketingSubscribed = marketingSubscribed;
+    }
 
     // Add getter and setter
     public String getProfilePicture() {
