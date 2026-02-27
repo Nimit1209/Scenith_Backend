@@ -160,15 +160,48 @@ public class DocumentUploadService {
             return "file_" + timestamp;
         }
 
-        int lastDotIndex = originalFileName.lastIndexOf('.');
+        String sanitized = sanitizeFileName(originalFileName);
+        int lastDotIndex = sanitized.lastIndexOf('.');
+
         if (lastDotIndex == -1) {
-            // No extension
-            return originalFileName + "_" + timestamp;
+            return sanitized + "_" + timestamp + "_" + System.nanoTime();
         }
 
-        String nameWithoutExtension = originalFileName.substring(0, lastDotIndex);
-        String extension = originalFileName.substring(lastDotIndex);
+        String nameWithoutExtension = sanitized.substring(0, lastDotIndex);
+        String extension = sanitized.substring(lastDotIndex).toLowerCase();
 
-        return nameWithoutExtension + "_" + timestamp + "_" + System.nanoTime() + extension;
+        // Replace dots in the name part with underscores to avoid path confusion
+        String safeName = nameWithoutExtension.replace('.', '_');
+
+        return safeName + "_" + timestamp + "_" + System.nanoTime() + extension;
+    }
+
+    /**
+     * Sanitize filename: remove/replace characters that cause issues in
+     * file systems, R2 paths, and shell commands.
+     * Preserves the final extension dot only.
+     */
+    private String sanitizeFileName(String fileName) {
+        if (fileName == null) return "file";
+
+        // Normalize unicode characters
+        String normalized = java.text.Normalizer.normalize(fileName, java.text.Normalizer.Form.NFC);
+
+        // Replace spaces and problematic characters with underscores
+        // Keep alphanumerics, dots, hyphens, underscores
+        String sanitized = normalized.replaceAll("[^a-zA-Z0-9._-]", "_");
+
+        // Collapse multiple consecutive underscores
+        sanitized = sanitized.replaceAll("_{2,}", "_");
+
+        // Remove leading/trailing underscores or dots
+        sanitized = sanitized.replaceAll("^[_.]|[_.]$", "");
+
+        // Ensure it's not empty after sanitization
+        if (sanitized.isEmpty() || sanitized.equals(".")) {
+            sanitized = "file";
+        }
+
+        return sanitized;
     }
 }

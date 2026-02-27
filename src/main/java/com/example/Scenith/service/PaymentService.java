@@ -157,6 +157,9 @@ public class PaymentService {
                 "AI_SUBTITLE_PRO".equals(planType) ||
                 "BG_REMOVAL_PRO".equals(planType) ||
                 "SVG_PRO".equals(planType) ||
-                "AI_SPEED_PRO".equals(planType);
+                "AI_SPEED_PRO".equals(planType) ||
+                "VIDEO_GEN_STARTER".equals(planType) ||
+                "VIDEO_GEN_PRO".equals(planType) ||
+                "VIDEO_GEN_ELITE".equals(planType);
     }
 }
