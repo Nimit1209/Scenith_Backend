@@ -69,7 +69,6 @@ public class VideoGenPlanService {
     public int getMonthlyCredits(User user) {
         if (hasActivePlan(user, PlanType.VIDEO_GEN_ELITE))   return 100;
         if (hasActivePlan(user, PlanType.VIDEO_GEN_PRO))     return 40;
-        if (hasActivePlan(user, PlanType.VIDEO_GEN_STARTER)) return 10;
         return 0;
     }
 
@@ -78,7 +77,6 @@ public class VideoGenPlanService {
     public int getDailyCredits(User user) {
         if (hasActivePlan(user, PlanType.VIDEO_GEN_ELITE))   return 20;
         if (hasActivePlan(user, PlanType.VIDEO_GEN_PRO))     return 8;
-        if (hasActivePlan(user, PlanType.VIDEO_GEN_STARTER)) return 2;
         return 0;
     }
 
@@ -87,7 +85,6 @@ public class VideoGenPlanService {
     public int getMaxDurationSeconds(User user) {
         if (hasActivePlan(user, PlanType.VIDEO_GEN_ELITE))   return 10;
         if (hasActivePlan(user, PlanType.VIDEO_GEN_PRO))     return 10;
-        if (hasActivePlan(user, PlanType.VIDEO_GEN_STARTER)) return 5;
         return 0;
     }
 
@@ -105,7 +102,6 @@ public class VideoGenPlanService {
     public VideoGenTier getUserVideoGenTier(User user) {
         if (hasActivePlan(user, PlanType.VIDEO_GEN_ELITE))   return VideoGenTier.ELITE;
         if (hasActivePlan(user, PlanType.VIDEO_GEN_PRO))     return VideoGenTier.PRO;
-        if (hasActivePlan(user, PlanType.VIDEO_GEN_STARTER)) return VideoGenTier.STARTER;
         return null;
     }
 
@@ -135,8 +131,7 @@ public class VideoGenPlanService {
      * Use this as a gate before showing the video generation UI.
      */
     public boolean hasAnyVideoGenPlan(User user) {
-        return hasActivePlan(user, PlanType.VIDEO_GEN_STARTER)
-                || hasActivePlan(user, PlanType.VIDEO_GEN_PRO)
+        return hasActivePlan(user, PlanType.VIDEO_GEN_PRO)
                 || hasActivePlan(user, PlanType.VIDEO_GEN_ELITE);
     }
 
@@ -146,7 +141,6 @@ public class VideoGenPlanService {
     public String getActivePlanName(User user) {
         if (hasActivePlan(user, PlanType.VIDEO_GEN_ELITE))   return "VIDEO_GEN_ELITE";
         if (hasActivePlan(user, PlanType.VIDEO_GEN_PRO))     return "VIDEO_GEN_PRO";
-        if (hasActivePlan(user, PlanType.VIDEO_GEN_STARTER)) return "VIDEO_GEN_STARTER";
         return "NONE";
     }
 

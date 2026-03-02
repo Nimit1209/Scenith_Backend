@@ -185,16 +185,9 @@ public class SoleTTSController {
     }
 
     private boolean hasHistoryAccess(User user) {
-        // Allow if user is not BASIC
-        if (user.getRole() != User.Role.BASIC) {
-            return true;
-        }
-
-        // If BASIC, check if they have AI_VOICE_PRO plan
-        return userPlanRepository.findActiveUserPlan(
-                user,
-                PlanType.AI_VOICE_PRO,
-                LocalDateTime.now()
-        ).isPresent();
+        if (user.isAdmin()) return true;
+        return planLimitsService.getActiveUserPlans(user).stream()
+                .anyMatch(p -> p.getPlanType() == PlanType.CREATOR
+                        || p.getPlanType() == PlanType.STUDIO);
     }
 }

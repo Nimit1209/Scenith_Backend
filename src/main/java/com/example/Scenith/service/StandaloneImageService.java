@@ -3,6 +3,7 @@ package com.example.Scenith.service;
 import com.example.Scenith.entity.StandaloneImage;
 import com.example.Scenith.entity.StandaloneImageUsage;
 import com.example.Scenith.entity.User;
+import com.example.Scenith.entity.UserPlan;
 import com.example.Scenith.repository.StandaloneImageRepository;
 import com.example.Scenith.repository.StandaloneImageUsageRepository;
 import com.example.Scenith.repository.UserRepository;
@@ -269,7 +270,13 @@ public class StandaloneImageService {
     stats.put("monthlyLimit", monthlyLimit);
     stats.put("remaining", monthlyLimit == -1 ? -1 : monthlyLimit - usage.getCount());
     stats.put("maxQuality", maxQuality);
-    stats.put("userRole", user.getRole().toString());
+    List<UserPlan> activePlans = planLimitsService.getActiveUserPlans(user);
+    String planLabel = activePlans.stream()
+            .map(p -> p.getPlanType().toString())
+            .filter(t -> t.equals("STUDIO") || t.equals("CREATOR"))
+            .findFirst()
+            .orElse(user.isAdmin() ? "ADMIN" : "BASIC");
+    stats.put("userRole", planLabel);
 
     return stats;
   }

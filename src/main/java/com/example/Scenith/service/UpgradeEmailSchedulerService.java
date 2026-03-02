@@ -22,31 +22,33 @@ public class UpgradeEmailSchedulerService {
 
     private final ScheduledUpgradeEmailRepository scheduledUpgradeEmailRepository;
     private final EmailService emailService;
+    private final PlanLimitsService planLimitsService;
 
     @Value("${app.frontend.url}")
     private String frontendUrl;
 
     public UpgradeEmailSchedulerService(
             ScheduledUpgradeEmailRepository scheduledUpgradeEmailRepository,
-            EmailService emailService) {
+            EmailService emailService, PlanLimitsService planLimitsService) {
         this.scheduledUpgradeEmailRepository = scheduledUpgradeEmailRepository;
         this.emailService = emailService;
+        this.planLimitsService = planLimitsService;
     }
 
     public void scheduleUpgradeEmail(User user, String triggerAction) {
-        if (user.getRole() != User.Role.BASIC && user.getRole() != User.Role.CREATOR) {
-            logger.debug("User {} has role {}, skipping upgrade email", user.getEmail(), user.getRole());
+        // Only send upgrade emails to non-admin users who don't have Studio plan
+        // (no point upselling someone already on the highest tier)
+        if (user.isAdmin()) {
+            logger.debug("User {} is admin, skipping upgrade email", user.getEmail());
             return;
         }
 
         LocalDateTime scheduledTime = LocalDateTime.now().plusHours(1);
         ScheduledUpgradeEmail scheduledEmail = new ScheduledUpgradeEmail(user, scheduledTime, triggerAction);
         scheduledUpgradeEmailRepository.save(scheduledEmail);
-        
-        logger.info("Scheduled upgrade email for user {} ({}) at {}", 
-                user.getEmail(), user.getRole(), scheduledTime);
-    }
 
+        logger.info("Scheduled upgrade email for user {} at {}", user.getEmail(), scheduledTime);
+    }
     @Scheduled(fixedRate = 300000) // 5 minutes
     @Transactional
     public void processPendingEmails() {

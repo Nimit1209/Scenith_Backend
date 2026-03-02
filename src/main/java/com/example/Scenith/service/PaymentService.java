@@ -71,34 +71,23 @@ public class PaymentService {
 
             User user = payment.getUser();
             String planType = payment.getPlanType();
+            PlanType plan = PlanType.valueOf(planType);
 
-            // Check if it's a bundled plan or individual plan
-            if (isBundledPlan(planType)) {
-                // Upgrade user's main role (CREATOR or STUDIO)
-                User.Role newRole = User.Role.valueOf(planType);
-                user.setRole(newRole);
-                user.setPlanExpiresAt(LocalDateTime.now().plusDays(30)); // 30-day access
-                userRepository.save(user);
-            } else if (isIndividualPlan(planType)) {
-                // Add individual service plan to UserPlan table
-                PlanType individualPlan = PlanType.valueOf(planType);
+            // Deactivate existing plan of same type if present
+            userPlanRepository.findActiveUserPlan(user, plan, LocalDateTime.now())
+                    .ifPresent(existingPlan -> {
+                        existingPlan.setActive(false);
+                        userPlanRepository.save(existingPlan);
+                    });
 
-                // Check if user already has this plan (deactivate old one if exists)
-                userPlanRepository.findActiveUserPlan(user, individualPlan, LocalDateTime.now())
-                        .ifPresent(existingPlan -> {
-                            existingPlan.setActive(false);
-                            userPlanRepository.save(existingPlan);
-                        });
-
-                // Create new user plan
-                UserPlan userPlan = new UserPlan();
-                userPlan.setUser(user);
-                userPlan.setPlanType(individualPlan);
-                userPlan.setStartDate(LocalDateTime.now());
-                userPlan.setExpiryDate(LocalDateTime.now().plusDays(30)); // 30-day access
-                userPlan.setActive(true);
-                userPlanRepository.save(userPlan);
-            }
+            // All plans (bundled + video gen) go into user_plans table
+            UserPlan userPlan = new UserPlan();
+            userPlan.setUser(user);
+            userPlan.setPlanType(plan);
+            userPlan.setStartDate(LocalDateTime.now());
+            userPlan.setExpiryDate(LocalDateTime.now().plusDays(30));
+            userPlan.setActive(true);
+            userPlanRepository.save(userPlan);
         } else {
             payment.setStatus(Payment.PaymentStatus.FAILED);
         }
@@ -117,25 +106,14 @@ public class PaymentService {
     /**
      * Scheduled job to downgrade expired bundled plans
      */
-    @Scheduled(cron = "0 0 3 * * ?") // Every day at 3:00 AM
+    @Scheduled(cron = "0 0 3 * * ?")
     @Transactional
     public void downgradeExpiredUsers() {
         LocalDateTime now = LocalDateTime.now();
 
-        // Downgrade expired bundled plans (User.role)
-        userRepository.findAllExpiredPremiumUsers(now)
-                .forEach(user -> {
-                    System.out.println("Downgrading expired bundled plan for user: " + user.getEmail() +
-                            " (expired on: " + user.getPlanExpiresAt() + ")");
-                    user.setRole(User.Role.BASIC);
-                    user.setPlanExpiresAt(null);
-                    userRepository.save(user);
-                });
-
-        // Deactivate expired individual plans (UserPlan table)
         List<UserPlan> expiredPlans = userPlanRepository.findByActiveTrueAndExpiryDateBefore(now);
         expiredPlans.forEach(plan -> {
-            System.out.println("Deactivating expired individual plan: " + plan.getPlanType() +
+            System.out.println("Deactivating expired plan: " + plan.getPlanType() +
                     " for user: " + plan.getUser().getEmail() +
                     " (expired on: " + plan.getExpiryDate() + ")");
             plan.setActive(false);
@@ -145,7 +123,12 @@ public class PaymentService {
 
     // Helper methods
     private boolean isValidPlanType(String planType) {
-        return isBundledPlan(planType) || isIndividualPlan(planType);
+        try {
+            PlanType.valueOf(planType);
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
     }
 
     private boolean isBundledPlan(String planType) {
@@ -153,13 +136,7 @@ public class PaymentService {
     }
 
     private boolean isIndividualPlan(String planType) {
-        return "AI_VOICE_PRO".equals(planType) ||
-                "AI_SUBTITLE_PRO".equals(planType) ||
-                "BG_REMOVAL_PRO".equals(planType) ||
-                "SVG_PRO".equals(planType) ||
-                "AI_SPEED_PRO".equals(planType) ||
-                "VIDEO_GEN_STARTER".equals(planType) ||
-                "VIDEO_GEN_PRO".equals(planType) ||
+        return "VIDEO_GEN_PRO".equals(planType) ||
                 "VIDEO_GEN_ELITE".equals(planType);
     }
 }

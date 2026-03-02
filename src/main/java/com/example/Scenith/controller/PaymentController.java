@@ -5,6 +5,7 @@ import com.example.Scenith.entity.User;
 import com.example.Scenith.repository.UserRepository;
 import com.example.Scenith.security.JwtUtil;
 import com.example.Scenith.service.PaymentService;
+import com.example.Scenith.service.PlanLimitsService;
 import com.paypal.core.PayPalHttpClient;
 import com.paypal.http.HttpResponse;
 import com.paypal.orders.*;
@@ -31,6 +32,7 @@ public class PaymentController {
     private final UserRepository userRepository;
     private final RazorpayClient razorpayClient;
     private final PayPalHttpClient payPalHttpClient;
+    private final PlanLimitsService planLimitsService;
 
     @Value("${razorpay.key.id}")
     private String razorpayKeyId;
@@ -38,12 +40,13 @@ public class PaymentController {
     @Value("${razorpay.key.secret}")
     private String razorpayKeySecret;
 
-    public PaymentController(PaymentService paymentService, JwtUtil jwtUtil, UserRepository userRepository, RazorpayClient razorpayClient, PayPalHttpClient payPalHttpClient) {
+    public PaymentController(PaymentService paymentService, JwtUtil jwtUtil, UserRepository userRepository, RazorpayClient razorpayClient, PayPalHttpClient payPalHttpClient, PlanLimitsService planLimitsService) {
         this.paymentService = paymentService;
         this.jwtUtil = jwtUtil;
         this.userRepository = userRepository;
         this.razorpayClient = razorpayClient;
         this.payPalHttpClient = payPalHttpClient;
+        this.planLimitsService = planLimitsService;
     }
 
     /**
@@ -112,7 +115,7 @@ public class PaymentController {
 
             // ✅ UPDATED: Support individual plans too
             if (!isValidPlanType(planType)) {
-                return ResponseEntity.badRequest().body("Invalid plan type. Must be one of: CREATOR, STUDIO, AI_VOICE_PRO, AI_SUBTITLE_PRO, AI_SPEED_PRO");
+                return ResponseEntity.badRequest().body("Invalid plan type. Must be one of: CREATOR, STUDIO, VIDEO_GEN_PRO, VIDEO_GEN_ELITE");
             }
 
             // Create internal payment
@@ -159,12 +162,6 @@ public class PaymentController {
     private boolean isValidPlanType(String planType) {
         return "CREATOR".equals(planType) ||
                 "STUDIO".equals(planType) ||
-                "AI_VOICE_PRO".equals(planType) ||
-                "AI_SUBTITLE_PRO".equals(planType) ||
-                "BG_REMOVAL_PRO".equals(planType) ||
-                "SVG_PRO".equals(planType) ||
-                "AI_SPEED_PRO".equals(planType) ||
-                "VIDEO_GEN_STARTER".equals(planType) ||
                 "VIDEO_GEN_PRO".equals(planType) ||
                 "VIDEO_GEN_ELITE".equals(planType);
     }
@@ -257,5 +254,21 @@ public class PaymentController {
         String email = jwtUtil.extractEmail(token.substring(7));
         return userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("User not found"));
+    }
+    @GetMapping("/active-plans")
+    public ResponseEntity<?> getActivePlans(@RequestHeader("Authorization") String token) {
+        try {
+            User user = getUserFromToken(token);
+            var plans = planLimitsService.getActiveUserPlans(user)
+                    .stream()
+                    .map(p -> Map.of(
+                            "planType", p.getPlanType().toString(),
+                            "expiryDate", p.getExpiryDate() != null ? p.getExpiryDate().toString() : ""
+                    ))
+                    .toList();
+            return ResponseEntity.ok(plans);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body("Error: " + e.getMessage());
+        }
     }
 }

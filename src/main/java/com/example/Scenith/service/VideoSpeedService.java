@@ -507,7 +507,7 @@ public class VideoSpeedService {
      * Validate video duration against user limits
      */
     private void validateVideoDuration(User user, double videoDuration) {
-        int maxMinutes = user.getMaxVideoLengthMinutes();
+        int maxMinutes = planLimitsService.getMaxSpeedVideoLengthMinutes(user);
         if (maxMinutes > 0 && videoDuration > maxMinutes * 60) {
             throw new IllegalArgumentException(
                     "Video length exceeds maximum allowed (" + maxMinutes + " minutes). Upgrade your plan."

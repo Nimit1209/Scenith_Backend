@@ -20,157 +20,65 @@ public class PlanLimitsService {
     // ==================== AI VOICE LIMITS ====================
 
     public long getMonthlyTtsLimit(User user) {
-        // Get limit from bundled plan
-        long bundledLimit = switch (user.getRole()) {
-            case BASIC -> 2000;
-            case CREATOR -> 60000;
-            case STUDIO -> 200000;
-            case ADMIN -> -1;
-        };
-
-        // Get limit from individual plan (if exists)
-        Optional<UserPlan> voicePlan = getActivePlan(user, PlanType.AI_VOICE_PRO);
-        if (voicePlan.isPresent()) {
-            long individualLimit = 50000;
-            // Return the BETTER limit (-1 means unlimited, so it always wins)
-            return getBetterLimit(bundledLimit, individualLimit);
-        }
-
-        return bundledLimit;
+        if (user.isAdmin()) return -1;
+        if (isStudio(user))   return 250000;
+        if (isCreator(user))  return 75000;
+        return 2000;
     }
 
     public long getDailyTtsLimit(User user) {
-        long bundledLimit = switch (user.getRole()) {
-            case BASIC -> 700;
-            case CREATOR -> 15000;
-            case STUDIO -> -1;
-            case ADMIN -> -1;
-        };
-
-        Optional<UserPlan> voicePlan = getActivePlan(user, PlanType.AI_VOICE_PRO);
-        if (voicePlan.isPresent()) {
-            long individualLimit = 10000;
-            return getBetterLimit(bundledLimit, individualLimit);
-        }
-
-        return bundledLimit;
+        if (user.isAdmin()) return -1;
+        if (isStudio(user))   return -1;
+        if (isCreator(user))  return 20000;
+        return 200;
     }
-
     public long getMaxCharsPerRequest(User user) {
-        long bundledLimit = switch (user.getRole()) {
-            case BASIC -> 200;
-            case CREATOR -> 3500;
-            case STUDIO -> 5000;
-            case ADMIN -> 10000;
-        };
-
-        Optional<UserPlan> voicePlan = getActivePlan(user, PlanType.AI_VOICE_PRO);
-        if (voicePlan.isPresent()) {
-            long individualLimit = 2500;
-            return getBetterLimit(bundledLimit, individualLimit);
-        }
-
-        return bundledLimit;
+        if (user.isAdmin()) return 10000;
+        if (isStudio(user))   return 6000;
+        if (isCreator(user))  return 4000;
+        return 150;
     }
+
 
     // ==================== SUBTITLE LIMITS ====================
 
     public int getMaxVideoProcessingPerMonth(User user) {
-        int bundledLimit = switch (user.getRole()) {
-            case BASIC -> 5;
-            case CREATOR -> 45;
-            case STUDIO, ADMIN -> -1;
-        };
-
-        Optional<UserPlan> subtitlePlan = getActivePlan(user, PlanType.AI_SUBTITLE_PRO);
-        if (subtitlePlan.isPresent()) {
-            int individualLimit = 30;
-            return (int) getBetterLimit(bundledLimit, individualLimit);
-        }
-
-        return bundledLimit;
+        if (user.isAdmin() || isStudio(user)) return -1;
+        if (isCreator(user)) return 60;
+        return 5;
     }
 
+
     public int getMaxVideoLengthMinutes(User user) {
-        int bundledLimit = switch (user.getRole()) {
-            case BASIC -> 5;
-            case CREATOR -> 30;
-            case STUDIO, ADMIN -> -1;
-        };
-
-        Optional<UserPlan> subtitlePlan = getActivePlan(user, PlanType.AI_SUBTITLE_PRO);
-        if (subtitlePlan.isPresent()) {
-            int individualLimit = 20;
-            return (int) getBetterLimit(bundledLimit, individualLimit);
-        }
-
-        return bundledLimit;
+        if (user.isAdmin() || isStudio(user)) return -1;
+        if (isCreator(user)) return 30;
+        return 5;
     }
 
     public String getMaxAllowedQuality(User user) {
-        String bundledQuality = switch (user.getRole()) {
-            case BASIC -> "720p";
-            case CREATOR -> "1440p";
-            case STUDIO, ADMIN -> "4k";
-        };
-
-        Optional<UserPlan> subtitlePlan = getActivePlan(user, PlanType.AI_SUBTITLE_PRO);
-        if (subtitlePlan.isPresent()) {
-            String individualQuality = "1440p";
-            return getBetterQuality(bundledQuality, individualQuality);
-        }
-
-        return bundledQuality;
+        if (user.isAdmin() || isStudio(user)) return "4k";
+        if (isCreator(user)) return "1440p";
+        return "720p";
     }
+
 
     // ==================== VIDEO SPEED LIMITS ====================
 
     public int getMaxSpeedProcessingPerMonth(User user) {
-        int bundledLimit = switch (user.getRole()) {
-            case BASIC -> 5;
-            case CREATOR -> 45;
-            case STUDIO, ADMIN -> -1;
-        };
-
-        Optional<UserPlan> speedPlan = getActivePlan(user, PlanType.AI_SPEED_PRO);
-        if (speedPlan.isPresent()) {
-            int individualLimit = 30;
-            return (int) getBetterLimit(bundledLimit, individualLimit);
-        }
-
-        return bundledLimit;
+        if (user.isAdmin() || isStudio(user)) return -1;
+        if (isCreator(user)) return 60;
+        return 5;
     }
-
     public int getMaxSpeedVideoLengthMinutes(User user) {
-        int bundledLimit = switch (user.getRole()) {
-            case BASIC -> 5;
-            case CREATOR -> 30;
-            case STUDIO, ADMIN -> -1;
-        };
-
-        Optional<UserPlan> speedPlan = getActivePlan(user, PlanType.AI_SPEED_PRO);
-        if (speedPlan.isPresent()) {
-            int individualLimit = 20;
-            return (int) getBetterLimit(bundledLimit, individualLimit);
-        }
-
-        return bundledLimit;
+        if (user.isAdmin() || isStudio(user)) return -1;
+        if (isCreator(user)) return 30;
+        return 5;
     }
 
     public String getMaxSpeedAllowedQuality(User user) {
-        String bundledQuality = switch (user.getRole()) {
-            case BASIC -> "720p";
-            case CREATOR -> "1440p";
-            case STUDIO, ADMIN -> "4k";
-        };
-
-        Optional<UserPlan> speedPlan = getActivePlan(user, PlanType.AI_SPEED_PRO);
-        if (speedPlan.isPresent()) {
-            String individualQuality = "1440p";
-            return getBetterQuality(bundledQuality, individualQuality);
-        }
-
-        return bundledQuality;
+        if (user.isAdmin() || isStudio(user)) return "4k";
+        if (isCreator(user)) return "1440p";
+        return "720p";
     }
 
     // ==================== QUALITY VALIDATION ====================
@@ -189,33 +97,6 @@ public class PlanLimitsService {
 
     // ==================== HELPER METHODS ====================
 
-    private Optional<UserPlan> getActivePlan(User user, PlanType planType) {
-        return userPlanRepository.findActiveUserPlan(user, planType, LocalDateTime.now());
-    }
-
-    /**
-     * Returns the better limit between two limits.
-     * -1 means unlimited, so it always wins.
-     * Otherwise, returns the higher value.
-     */
-    private long getBetterLimit(long limit1, long limit2) {
-        // If either is unlimited (-1), return unlimited
-        if (limit1 == -1 || limit2 == -1) {
-            return -1;
-        }
-        // Otherwise return the higher limit
-        return Math.max(limit1, limit2);
-    }
-
-    /**
-     * Returns the better quality between two quality strings.
-     * Higher resolution is better.
-     */
-    private String getBetterQuality(String quality1, String quality2) {
-        int q1 = parseQuality(quality1);
-        int q2 = parseQuality(quality2);
-        return q1 >= q2 ? quality1 : quality2;
-    }
 
     private int parseQuality(String quality) {
         return switch (quality.toLowerCase()) {
@@ -233,73 +114,31 @@ public class PlanLimitsService {
 
     // ==================== PUBLIC UTILITY ====================
 
-    /**
-     * Get all active plans for a user (useful for displaying in UI)
-     */
-    public java.util.List<UserPlan> getActiveUserPlans(User user) {
-        java.util.List<UserPlan> plans = userPlanRepository.findByUserAndActiveTrue(user);
-        LocalDateTime now = LocalDateTime.now();
-        return plans.stream()
-                .filter(plan -> plan.getExpiryDate() == null || plan.getExpiryDate().isAfter(now))
-                .toList();
-    }
-
 
     public long getDailyImageGenLimit(User user) {
-        switch (user.getRole()) {
-            case BASIC:
-                return 1;
-            case CREATOR:
-                return 15;
-            case ADMIN:
-            case STUDIO:
-                return 30;
-            default:
-                return 0;
-        }
+        if (user.isAdmin() || isStudio(user)) return 30;
+        if (isCreator(user)) return 15;
+        return 1;
     }
 
     public long getMonthlyImageGenLimit(User user) {
-        switch (user.getRole()) {
-            case BASIC:
-                return 5;
-            case CREATOR:
-                return 400;
-            case ADMIN:
-            case STUDIO:
-                return 900;
-            default:
-                return 0;
-        }
+        if (user.isAdmin() || isStudio(user)) return 900;
+        if (isCreator(user)) return 400;
+        return 5;
     }
 
     public int getImagesPerRequest(User user) {
-        switch (user.getRole()) {
-            case BASIC:
-            case ADMIN:
-                return 1;
-            case CREATOR:
-                return 2;
-            case STUDIO:
-                return 4;
-            default:
-                return 1;
-        }
+        if (isStudio(user)) return 4;
+        if (isCreator(user)) return 2;
+        return 1;
     }
 
     public String getImageResolution(User user) {
-        switch (user.getRole()) {
-            case BASIC:
-            case ADMIN:
-                return "1024x1024";  // Changed from 512x512
-            case CREATOR:
-                return "896x1152";   // Changed from 768x768, portrait orientation
-            case STUDIO:
-                return "1024x1024";  // Changed from 768x768
-            default:
-                return "1024x1024";
-        }
+        if (isStudio(user))  return "1024x1024";
+        if (isCreator(user)) return "896x1152";
+        return "1024x1024";
     }
+
 
     public int getImageSteps(User user) {
         return 22; // Same for all plans
@@ -312,83 +151,73 @@ public class PlanLimitsService {
     // ==================== BACKGROUND REMOVAL LIMITS ====================
 
     public int getMonthlyBackgroundRemovalLimit(User user) {
-        int bundledLimit = switch (user.getRole()) {
-            case BASIC -> 10;
-            case CREATOR -> 500;
-            case STUDIO, ADMIN -> 2000;
-        };
-
-        Optional<UserPlan> bgRemovalPlan = getActivePlan(user, PlanType.BG_REMOVAL_PRO);
-        if (bgRemovalPlan.isPresent()) {
-            int individualLimit = 300;
-            return (int) getBetterLimit(bundledLimit, individualLimit);
-        }
-
-        return bundledLimit;
+        if (user.isAdmin() || isStudio(user)) return 1500;
+        if (isCreator(user)) return 500;
+        return 5;
     }
 
+
     public String getMaxBackgroundRemovalQuality(User user) {
-        String bundledQuality = switch (user.getRole()) {
-            case BASIC -> "720p";
-            case CREATOR -> "1080p";
-            case STUDIO, ADMIN -> "4k";
-        };
-
-        Optional<UserPlan> bgRemovalPlan = getActivePlan(user, PlanType.BG_REMOVAL_PRO);
-        if (bgRemovalPlan.isPresent()) {
-            String individualQuality = "1080p"; // Full HD for BG PRO plan
-            return getBetterQuality(bundledQuality, individualQuality);
-        }
-
-        return bundledQuality;
+        if (user.isAdmin() || isStudio(user)) return "4k";
+        if (isCreator(user)) return "1080p";
+        return "720p";
     }
 
     public int getMaxBackgroundRemovalDimension(User user) {
         String quality = getMaxBackgroundRemovalQuality(user);
         return switch (quality.toLowerCase()) {
-            case "720p" -> 1280;
-            case "1080p" -> 1920;
+            case "720p"       -> 1280;
+            case "1080p"      -> 1920;
             case "1440p", "2k" -> 2560;
-            case "4k" -> 3840;
-            default -> 1280;
+            case "4k"         -> 3840;
+            default           -> 1280;
         };
     }
     // ==================== ELEMENT DOWNLOAD LIMITS ====================
 
     public boolean canDownloadSvg(User user) {
-        if (user.getRole() == User.Role.CREATOR || user.getRole() == User.Role.STUDIO || user.getRole() == User.Role.ADMIN) {
-            return true;
-        }
-        return getActivePlan(user, PlanType.SVG_PRO).isPresent();
+        return isPremium(user);
     }
 
     public int getMaxElementDownloadResolution(User user) {
-        if (user.getRole() == User.Role.CREATOR || user.getRole() == User.Role.STUDIO || user.getRole() == User.Role.ADMIN) {
-            return Integer.MAX_VALUE; // Unlimited
-        }
-        if (getActivePlan(user, PlanType.SVG_PRO).isPresent()) {
-            return 2048;
-        }
-        return 512; // BASIC without SVG_PRO
+        if (isPremium(user)) return Integer.MAX_VALUE;
+        return 512;
     }
 
+
     public int getMonthlyElementDownloadLimit(User user) {
-        if (user.getRole() == User.Role.CREATOR || user.getRole() == User.Role.STUDIO || user.getRole() == User.Role.ADMIN) {
-            return -1; // Unlimited
-        }
-        if (getActivePlan(user, PlanType.SVG_PRO).isPresent()) {
-            return -1; // Unlimited
-        }
-        return 10; // BASIC without SVG_PRO
+        if (isPremium(user)) return -1;
+        return 10;
     }
 
     public int getDailyElementDownloadLimit(User user) {
-        if (user.getRole() == User.Role.CREATOR || user.getRole() == User.Role.STUDIO || user.getRole() == User.Role.ADMIN) {
-            return -1;
-        }
-        if (getActivePlan(user, PlanType.SVG_PRO).isPresent()) {
-            return -1;
-        }
-        return 2; // BASIC without SVG_PRO
+        if (isPremium(user)) return -1;
+        return 2;
     }
+
+    private boolean hasActivePlan(User user, PlanType planType) {
+        return userPlanRepository.findActiveUserPlan(user, planType, LocalDateTime.now()).isPresent();
+    }
+
+    private boolean isCreator(User user) {
+        return hasActivePlan(user, PlanType.CREATOR);
+    }
+
+    private boolean isStudio(User user) {
+        return hasActivePlan(user, PlanType.STUDIO);
+    }
+
+    private boolean isPremium(User user) {
+        return isCreator(user) || isStudio(user) || user.isAdmin();
+    }
+
+    // ADD this method in the "PUBLIC UTILITY" section:
+    public java.util.List<UserPlan> getActiveUserPlans(User user) {
+        return userPlanRepository.findByUserAndActiveTrue(user)
+                .stream()
+                .filter(plan -> plan.getExpiryDate() == null
+                        || plan.getExpiryDate().isAfter(LocalDateTime.now()))
+                .toList();
+    }
+
 }

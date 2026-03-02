@@ -27,17 +27,6 @@ public class Payment {
     @Column(nullable = false)
     private String planType; // Can be: CREATOR, STUDIO, AI_VOICE_PRO, AI_SUBTITLE_PRO, AI_SPEED_PRO
 
-    // Add helper method to check if it's a bundled or individual plan
-    public boolean isBundledPlan() {
-        return planType.equals("CREATOR") || planType.equals("STUDIO");
-    }
-
-    public boolean isIndividualPlan() {
-        return planType.equals("AI_VOICE_PRO") ||
-                planType.equals("AI_SUBTITLE_PRO") ||
-                planType.equals("AI_SPEED_PRO");
-    }
-
     @Column(nullable = false)
     private Double amount;
 
