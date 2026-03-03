@@ -163,6 +163,7 @@ public class PaymentController {
         return "CREATOR".equals(planType) ||
                 "STUDIO".equals(planType) ||
                 "VIDEO_GEN_PRO".equals(planType) ||
+                "CREATOR_LITE".equals(planType)  ||
                 "VIDEO_GEN_ELITE".equals(planType);
     }
 

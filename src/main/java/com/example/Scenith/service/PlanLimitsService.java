@@ -23,6 +23,7 @@ public class PlanLimitsService {
         if (user.isAdmin()) return -1;
         if (isStudio(user))   return 250000;
         if (isCreator(user))  return 75000;
+        if (isCreatorLite(user)) return 10000;
         return 2000;
     }
 
@@ -30,13 +31,15 @@ public class PlanLimitsService {
         if (user.isAdmin()) return -1;
         if (isStudio(user))   return -1;
         if (isCreator(user))  return 20000;
-        return 200;
+        if (isCreatorLite(user)) return 2500;
+        return 500;
     }
     public long getMaxCharsPerRequest(User user) {
         if (user.isAdmin()) return 10000;
         if (isStudio(user))   return 6000;
         if (isCreator(user))  return 4000;
-        return 150;
+        if (isCreatorLite(user)) return 700;
+        return 200;
     }
 
 
@@ -45,6 +48,7 @@ public class PlanLimitsService {
     public int getMaxVideoProcessingPerMonth(User user) {
         if (user.isAdmin() || isStudio(user)) return -1;
         if (isCreator(user)) return 60;
+        if (isCreatorLite(user)) return 30;
         return 5;
     }
 
@@ -52,12 +56,14 @@ public class PlanLimitsService {
     public int getMaxVideoLengthMinutes(User user) {
         if (user.isAdmin() || isStudio(user)) return -1;
         if (isCreator(user)) return 30;
+        if (isCreatorLite(user)) return 10;
         return 5;
     }
 
     public String getMaxAllowedQuality(User user) {
         if (user.isAdmin() || isStudio(user)) return "4k";
         if (isCreator(user)) return "1440p";
+        if (isCreatorLite(user)) return "1080p";
         return "720p";
     }
 
@@ -67,17 +73,20 @@ public class PlanLimitsService {
     public int getMaxSpeedProcessingPerMonth(User user) {
         if (user.isAdmin() || isStudio(user)) return -1;
         if (isCreator(user)) return 60;
+        if (isCreatorLite(user)) return 30;
         return 5;
     }
     public int getMaxSpeedVideoLengthMinutes(User user) {
         if (user.isAdmin() || isStudio(user)) return -1;
         if (isCreator(user)) return 30;
+        if (isCreatorLite(user)) return 10;
         return 5;
     }
 
     public String getMaxSpeedAllowedQuality(User user) {
         if (user.isAdmin() || isStudio(user)) return "4k";
         if (isCreator(user)) return "1440p";
+        if (isCreatorLite(user)) return "1080p";
         return "720p";
     }
 
@@ -118,12 +127,14 @@ public class PlanLimitsService {
     public long getDailyImageGenLimit(User user) {
         if (user.isAdmin() || isStudio(user)) return 30;
         if (isCreator(user)) return 15;
+        if (isCreatorLite(user)) return 5;
         return 1;
     }
 
     public long getMonthlyImageGenLimit(User user) {
         if (user.isAdmin() || isStudio(user)) return 900;
         if (isCreator(user)) return 400;
+        if (isCreatorLite(user)) return 50;
         return 5;
     }
 
@@ -153,6 +164,7 @@ public class PlanLimitsService {
     public int getMonthlyBackgroundRemovalLimit(User user) {
         if (user.isAdmin() || isStudio(user)) return 1500;
         if (isCreator(user)) return 500;
+        if (isCreatorLite(user)) return 100;
         return 5;
     }
 
@@ -160,6 +172,7 @@ public class PlanLimitsService {
     public String getMaxBackgroundRemovalQuality(User user) {
         if (user.isAdmin() || isStudio(user)) return "4k";
         if (isCreator(user)) return "1080p";
+        if (isCreatorLite(user)) return "1080p";
         return "720p";
     }
 
@@ -176,7 +189,7 @@ public class PlanLimitsService {
     // ==================== ELEMENT DOWNLOAD LIMITS ====================
 
     public boolean canDownloadSvg(User user) {
-        return isPremium(user);
+        return isPremium(user) || isCreatorLite(user);
     }
 
     public int getMaxElementDownloadResolution(User user) {
@@ -207,8 +220,12 @@ public class PlanLimitsService {
         return hasActivePlan(user, PlanType.STUDIO);
     }
 
+    private boolean isCreatorLite(User user) {
+        return hasActivePlan(user, PlanType.CREATOR_LITE);
+    }
+
     private boolean isPremium(User user) {
-        return isCreator(user) || isStudio(user) || user.isAdmin();
+        return isCreatorLite(user) || isCreator(user) || isStudio(user) || user.isAdmin();
     }
 
     // ADD this method in the "PUBLIC UTILITY" section:

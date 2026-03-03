@@ -69,5 +69,10 @@ public enum PlanType {
      * - All models including Google Veo 3
      * - Max 10 seconds per video
      */
-    VIDEO_GEN_ELITE
+    VIDEO_GEN_ELITE,
+    /**
+     * Creator Lite — Entry-level bundled plan
+     * ₹99/month
+     */
+    CREATOR_LITE,
 }
