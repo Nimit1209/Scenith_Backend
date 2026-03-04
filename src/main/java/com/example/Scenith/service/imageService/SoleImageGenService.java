@@ -1,12 +1,13 @@
+// REPLACE entire class in SoleImageGenService.java
+
 package com.example.Scenith.service.imageService;
 
 import com.example.Scenith.entity.User;
+import com.example.Scenith.entity.UserImageGenCredits;
 import com.example.Scenith.entity.imageentity.SoleImageGen;
-import com.example.Scenith.entity.imageentity.UserDailyImageGenUsage;
-import com.example.Scenith.entity.imageentity.UserImageGenUsage;
+import com.example.Scenith.enums.ImageGenModel;
+import com.example.Scenith.repository.UserImageGenCreditsRepository;
 import com.example.Scenith.repository.imagerepository.SoleImageGenRepository;
-import com.example.Scenith.repository.imagerepository.UserDailyImageGenUsageRepository;
-import com.example.Scenith.repository.imagerepository.UserImageGenUsageRepository;
 import com.example.Scenith.service.PlanLimitsService;
 import com.example.Scenith.service.CloudflareR2Service;
 import okhttp3.*;
@@ -25,290 +26,387 @@ import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 
 @Service
 public class SoleImageGenService {
 
     private static final Logger logger = LoggerFactory.getLogger(SoleImageGenService.class);
-    private static final String STABILITY_API_URL = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image";
 
     private final SoleImageGenRepository soleImageGenRepository;
-    private final UserImageGenUsageRepository userImageGenUsageRepository;
-    private final UserDailyImageGenUsageRepository userDailyImageGenUsageRepository;
+    private final UserImageGenCreditsRepository creditsRepository;
     private final PlanLimitsService planLimitsService;
     private final CloudflareR2Service cloudflareR2Service;
     private final OkHttpClient httpClient;
 
     @Value("${app.image-gen-api-key-path:/app/credentials/image-gen-api-key.txt}")
-    private String apiKeyPath;
+    private String stabilityKeyPath;
 
-    private String apiKey;
+    @Value("${app.openai-api-key-path:/app/credentials/openai-api-key.txt}")
+    private String openAiKeyPath;
+
+    @Value("${app.google-ai-api-key-path:/app/credentials/google-ai-api-key.txt}")
+    private String googleAiKeyPath;
+
+    @Value("${app.bfl-api-key-path:/app/credentials/bfl-api-key.txt}")
+    private String bflKeyPath;
+
+    @Value("${app.xai-api-key-path:/app/credentials/xai-api-key.txt}")
+    private String xaiKeyPath;
+
+    // Lazy-loaded API keys
+    private String openAiKey;
+    private String googleAiKey;
+    private String bflKey;
+    private String xaiKey;
+    private String stabilityKey;
 
     public SoleImageGenService(
             SoleImageGenRepository soleImageGenRepository,
-            UserImageGenUsageRepository userImageGenUsageRepository,
-            UserDailyImageGenUsageRepository userDailyImageGenUsageRepository,
+            UserImageGenCreditsRepository creditsRepository,
             PlanLimitsService planLimitsService,
-            CloudflareR2Service cloudflareR2Service) throws IOException {
+            CloudflareR2Service cloudflareR2Service) {
         this.soleImageGenRepository = soleImageGenRepository;
-        this.userImageGenUsageRepository = userImageGenUsageRepository;
-        this.userDailyImageGenUsageRepository = userDailyImageGenUsageRepository;
-        this.planLimitsService = planLimitsService;
-        this.cloudflareR2Service = cloudflareR2Service;
-        this.httpClient = new OkHttpClient();
+        this.creditsRepository      = creditsRepository;
+        this.planLimitsService      = planLimitsService;
+        this.cloudflareR2Service    = cloudflareR2Service;
+        this.httpClient = new OkHttpClient.Builder()
+                .connectTimeout(java.time.Duration.ofSeconds(30))
+                .readTimeout(java.time.Duration.ofSeconds(120))
+                .writeTimeout(java.time.Duration.ofSeconds(30))
+                // No callTimeout — FLUX polling loop manages its own timing
+                .build();
     }
 
-    /**
-     * Lazy load API key from file (server-ready path)
-     */
-    private String getApiKey() throws IOException {
-        if (this.apiKey == null) {
-            File credentialsFile = new File(apiKeyPath);
-            if (!credentialsFile.exists()) {
-                throw new IOException("Image generation API key file not found at: " + apiKeyPath);
-            }
-            this.apiKey = Files.readString(credentialsFile.toPath()).trim();
-            logger.info("Loaded Stability AI API key from: {}", apiKeyPath);
-        }
-        return this.apiKey;
+    // ── API key loading ───────────────────────────────────────────────────────
+
+    private String loadKeyFromPath(String path) throws IOException {
+        Path p = Path.of(path);
+        if (!Files.exists(p)) throw new IOException("API key file not found: " + p);
+        return Files.readString(p).trim();
     }
 
-    public List<SoleImageGen> generateImages(
+    private String getOpenAiKey()    throws IOException { if (openAiKey    == null) openAiKey    = loadKeyFromPath(openAiKeyPath);    return openAiKey; }
+    private String getGoogleAiKey()  throws IOException { if (googleAiKey  == null) googleAiKey  = loadKeyFromPath(googleAiKeyPath);  return googleAiKey; }
+    private String getBflKey()       throws IOException { if (bflKey       == null) bflKey       = loadKeyFromPath(bflKeyPath);       return bflKey; }
+    private String getXaiKey()       throws IOException { if (xaiKey       == null) xaiKey       = loadKeyFromPath(xaiKeyPath);       return xaiKey; }
+    private String getStabilityKey() throws IOException { if (stabilityKey == null) stabilityKey = loadKeyFromPath(stabilityKeyPath); return stabilityKey; }
+    // ── Public API ────────────────────────────────────────────────────────────
+
+    public SoleImageGen generateImage(
             User user,
             String prompt,
-            String negativePrompt) throws IOException, InterruptedException {
+            String negativePrompt,
+            ImageGenModel model) throws IOException {
 
-        // Validate input
-        if (prompt == null || prompt.trim().isEmpty()) {
-            throw new IllegalArgumentException("Prompt is required and cannot be empty");
-        }
+        if (prompt == null || prompt.isBlank())
+            throw new IllegalArgumentException("Prompt cannot be empty");
 
-        // Get plan limits
-        long dailyLimit = planLimitsService.getDailyImageGenLimit(user);
-        long monthlyLimit = planLimitsService.getMonthlyImageGenLimit(user);
-        int imagesPerRequest = planLimitsService.getImagesPerRequest(user);
-        String resolution = planLimitsService.getImageResolution(user);
-        int steps = planLimitsService.getImageSteps(user);
-        double cfgScale = planLimitsService.getImageCfgScale(user);
+        // 1. Access control
+        if (!planLimitsService.canAccessImageModel(user, model))
+            throw new IllegalStateException("Your plan does not include access to " + model.getDisplayName());
 
-        // Check monthly limit
-        if (monthlyLimit > 0) {
-            long monthlyUsage = getUserMonthlyImageGenUsage(user);
-            if (monthlyUsage + 1 > monthlyLimit) {
-                throw new IllegalStateException(
-                        "Monthly AI Image Generation limit exceeded for plan: " + user.getRole()
-                                + " (Limit: " + monthlyLimit + ", Used: " + monthlyUsage + ")"
-                );
-            }
-        }
+        int credCost = model.getCreditsPerImage();
 
-        // Check daily limit
-        if (dailyLimit > 0) {
-            long dailyUsage = getUserDailyImageGenUsage(user);
-            if (dailyUsage + 1 > dailyLimit) {
-                throw new IllegalStateException(
-                        "Daily AI Image Generation limit exceeded for plan: " + user.getRole()
-                                + " (Daily Limit: " + dailyLimit + ", Used Today: " + dailyUsage + ")"
-                );
-            }
-        }
+        // 2. Daily cap
+        UserImageGenCredits credits = getOrCreateCredits(user);
+        rolloverDailyIfNeeded(credits);
 
-        int width, height;
-        switch (resolution) {
-            case "1024x1024":
-                width = 1024;
-                height = 1024;
-                break;
-            case "1152x896":
-                width = 1152;
-                height = 896;
-                break;
-            case "1216x832":
-                width = 1216;
-                height = 832;
-                break;
-            case "1344x768":
-                width = 1344;
-                height = 768;
-                break;
-            case "1536x640":
-                width = 1536;
-                height = 640;
-                break;
-            case "640x1536":
-                width = 640;
-                height = 1536;
-                break;
-            case "768x1344":
-                width = 768;
-                height = 1344;
-                break;
-            case "832x1216":
-                width = 832;
-                height = 1216;
-                break;
-            case "896x1152":
-                width = 896;
-                height = 1152;
-                break;
-            default:
-                width = 1024;
-                height = 1024;
-        }
+        int dailyLimit   = planLimitsService.getDailyImageGenCredits(user);
+        int monthlyLimit = planLimitsService.getMonthlyImageGenCredits(user);
 
-        // Build request JSON
-        JSONObject requestBody = new JSONObject();
-        JSONArray textPrompts = new JSONArray();
+        if (dailyLimit > 0 && credits.getTodayCreditsUsed() + credCost > dailyLimit)
+            throw new IllegalStateException(
+                    "Daily image credit limit reached (limit: " + dailyLimit +
+                            ", used: " + credits.getTodayCreditsUsed() + ", cost: " + credCost + ")");
 
-        JSONObject positivePrompt = new JSONObject();
-        positivePrompt.put("text", prompt);
-        positivePrompt.put("weight", 1);
-        textPrompts.put(positivePrompt);
+        if (monthlyLimit > 0 && credits.getCreditsUsed() + credCost > monthlyLimit)
+            throw new IllegalStateException(
+                    "Monthly image credit limit reached (limit: " + monthlyLimit +
+                            ", used: " + credits.getCreditsUsed() + ", cost: " + credCost + ")");
 
-        if (negativePrompt != null && !negativePrompt.trim().isEmpty()) {
-            JSONObject negPrompt = new JSONObject();
-            negPrompt.put("text", negativePrompt);
-            negPrompt.put("weight", -1);
-            textPrompts.put(negPrompt);
-        }
+        // 3. Call the correct API
+        byte[] imageBytes = callImageApi(model, prompt, negativePrompt);
 
-        requestBody.put("text_prompts", textPrompts);
-        requestBody.put("cfg_scale", cfgScale);
-        requestBody.put("height", height);
-        requestBody.put("width", width);
-        requestBody.put("steps", steps);
-        requestBody.put("samples", imagesPerRequest);
-
-        // Make API request
-        RequestBody body = RequestBody.create(requestBody.toString(), MediaType.parse("application/json"));
-
-        Request request = new Request.Builder()
-                .url(STABILITY_API_URL)
-                .addHeader("Content-Type", "application/json")
-                .addHeader("Accept", "application/json")
-                .addHeader("Authorization", "Bearer " + getApiKey())
-                .post(body)
-                .build();
-
-        List<SoleImageGen> generatedImages = new ArrayList<>();
-
-        // Use temporary directory pattern (same as reference code)
-        String tempDir = System.getProperty("java.io.tmpdir") + File.separator + "videoeditor";
+        // 4. Upload to R2
+        String tempDir = System.getProperty("java.io.tmpdir") + File.separator + "imagegen";
         Path tempDirPath = Path.of(tempDir);
         Files.createDirectories(tempDirPath);
 
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                String errorBody = response.body() != null ? response.body().string() : "Unknown error";
-                logger.error("Stability API error: {}", errorBody);
-                throw new IOException("Stability API request failed: " + response.code() + " - " + errorBody);
-            }
+        String tempFileName = "img_" + System.currentTimeMillis() + ".png";
+        Path tempFilePath = tempDirPath.resolve(tempFileName);
+        File tempFile = tempFilePath.toFile();
+        SoleImageGen saved;
 
-            String responseBody = response.body().string();
-            JSONObject jsonResponse = new JSONObject(responseBody);
-            JSONArray artifacts = jsonResponse.getJSONArray("artifacts");
+        try {
+            try (FileOutputStream fos = new FileOutputStream(tempFile)) { fos.write(imageBytes); }
 
-            // Process each generated image
-            for (int i = 0; i < artifacts.length(); i++) {
-                JSONObject artifact = artifacts.getJSONObject(i);
-                String base64Image = artifact.getString("base64");
+            String r2Path = "images/sole_image_gen/" + user.getId() + "/" + UUID.randomUUID() + ".png";
+            cloudflareR2Service.uploadFile(r2Path, tempFile);
+            logger.info("Uploaded generated image to R2: {}", r2Path);
 
-                // Decode image
-                byte[] imageBytes = Base64.getDecoder().decode(base64Image);
+            // 5. Persist entity
+            SoleImageGen entity = new SoleImageGen();
+            entity.setUser(user);
+            entity.setPrompt(prompt);
+            entity.setNegativePrompt(negativePrompt);
+            entity.setImagePath(r2Path);
+            entity.setResolution("1024x1024");
+            entity.setSteps(0);
+            entity.setCfgScale(0.0);
+            entity.setCreatedAt(LocalDateTime.now());
+            saved = soleImageGenRepository.save(entity);
 
-                // Create temporary file for upload
-                String tempFileName = "img_" + System.currentTimeMillis() + "_" + i + ".png";
-                Path tempFilePath = tempDirPath.resolve(tempFileName);
-                File tempFile = tempFilePath.toFile();
+        } finally {
+            Files.deleteIfExists(tempFilePath);
+        }
 
-                try {
-                    // Write to temporary file
-                    try (FileOutputStream fos = new FileOutputStream(tempFile)) {
-                        fos.write(imageBytes);
-                    }
+        // 6. Deduct credits
+        credits.setCreditsUsed(credits.getCreditsUsed() + credCost);
+        credits.setTodayCreditsUsed(credits.getTodayCreditsUsed() + credCost);
+        creditsRepository.save(credits);
 
-                    logger.debug("Saved generated image to temp file: {}", tempFile.getAbsolutePath());
+        return saved;
+    }
 
-                    // Define R2 path - maintain same folder structure as local
-                    String userR2Dir = "images/sole_image_gen/" + user.getId();
-                    String uniqueFilename = UUID.randomUUID().toString() + ".png";
-                    String imageR2Path = userR2Dir + "/" + uniqueFilename;
+    // ── Per-model API dispatchers ─────────────────────────────────────────────
 
-                    // Upload to R2
-                    cloudflareR2Service.uploadFile(imageR2Path, tempFile);
-                    logger.info("Uploaded generated image to R2: {}", imageR2Path);
+    private byte[] callImageApi(ImageGenModel model, String prompt, String negativePrompt) throws IOException {
+        return switch (model) {
+            case STABILITY_AI_CORE -> callStabilityCore(prompt, negativePrompt);
+            case GPT_IMAGE_1_MINI  -> callOpenAI(prompt, "low");
+            case GPT_IMAGE_1_MEDIUM -> callOpenAI(prompt, "medium");
+            case IMAGEN_4_FAST     -> callImagen(model, prompt);
+            case IMAGEN_4_STANDARD -> callImagen(model, prompt);
+            case FLUX_1_1_PRO      -> callFlux(prompt);
+            case GROK_AURORA       -> callGrok(prompt);
+        };
+    }
 
-                    // Generate URLs
-                    Map<String, String> urls = cloudflareR2Service.generateUrls(imageR2Path, 3600);
+    private byte[] callStabilityCore(String prompt, String negativePrompt) throws IOException {
+        JSONObject body = new JSONObject();
+        JSONArray textPrompts = new JSONArray();
+        textPrompts.put(new JSONObject().put("text", prompt).put("weight", 1));
+        if (negativePrompt != null && !negativePrompt.isBlank())
+            textPrompts.put(new JSONObject().put("text", negativePrompt).put("weight", -1));
 
-                    // Create entity
-                    SoleImageGen soleImageGen = new SoleImageGen();
-                    soleImageGen.setUser(user);
-                    soleImageGen.setPrompt(prompt);
-                    soleImageGen.setNegativePrompt(negativePrompt);
-                    soleImageGen.setImagePath(imageR2Path);
-                    soleImageGen.setResolution(resolution);
-                    soleImageGen.setSteps(steps);
-                    soleImageGen.setCfgScale(cfgScale);
-                    soleImageGen.setCreatedAt(LocalDateTime.now());
+        body.put("text_prompts", textPrompts);
+        body.put("cfg_scale", 7);
+        body.put("height", 1024);
+        body.put("width", 1024);
+        body.put("steps", 30);
+        body.put("samples", 1);
 
-                    soleImageGenRepository.save(soleImageGen);
-                    generatedImages.add(soleImageGen);
+        Request req = new Request.Builder()
+                .url("https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image")
+                .addHeader("Authorization", "Bearer " + getStabilityKey())
+                .addHeader("Accept", "application/json")
+                .post(RequestBody.create(body.toString(), MediaType.parse("application/json")))
+                .build();
 
-                } finally {
-                    // Clean up temporary file
-                    try {
-                        Files.deleteIfExists(tempFilePath);
-                        logger.debug("Deleted temporary image file: {}", tempFile.getAbsolutePath());
-                    } catch (IOException e) {
-                        logger.warn("Failed to delete temporary image file: {}", tempFile.getAbsolutePath(), e);
-                    }
-                }
-            }
-
-            // Update usage (only count as 1 generation regardless of number of images)
-            updateUserMonthlyImageGenUsage(user, 1);
-            updateUserDailyImageGenUsage(user, 1);
-
-            return generatedImages;
+        try (Response resp = httpClient.newCall(req).execute()) {
+            assertSuccess(resp, "Stability AI");
+            JSONObject json = new JSONObject(resp.body().string());
+            return Base64.getDecoder().decode(json.getJSONArray("artifacts").getJSONObject(0).getString("base64"));
         }
     }
 
-    public long getUserMonthlyImageGenUsage(User user) {
-        YearMonth currentMonth = YearMonth.now();
-        return userImageGenUsageRepository.findByUserAndMonth(user, currentMonth)
-                .map(UserImageGenUsage::getGenerationsUsed)
-                .orElse(0L);
+    private byte[] callOpenAI(String prompt, String quality) throws IOException {
+        JSONObject body = new JSONObject();
+        body.put("model", "gpt-image-1");
+        body.put("prompt", prompt);
+        body.put("n", 1);
+        body.put("size", "1024x1024");
+        body.put("quality", quality);
+        // gpt-image-1 does not accept response_format — it always returns b64_json
+
+        Request req = new Request.Builder()
+                .url("https://api.openai.com/v1/images/generations")
+                .addHeader("Authorization", "Bearer " + getOpenAiKey())
+                .post(RequestBody.create(body.toString(), MediaType.parse("application/json")))
+                .build();
+
+        try (Response resp = httpClient.newCall(req).execute()) {
+            assertSuccess(resp, "OpenAI");
+            String bodyStr = resp.body().string();
+            JSONObject json = new JSONObject(bodyStr);
+            JSONObject imageObj = json.getJSONArray("data").getJSONObject(0);
+            // gpt-image-1 returns b64_json directly
+            if (imageObj.has("b64_json")) {
+                return Base64.getDecoder().decode(imageObj.getString("b64_json"));
+            }
+            // fallback: if url is returned instead, download it
+            return downloadUrl(imageObj.getString("url"));
+        }
     }
 
-    private void updateUserMonthlyImageGenUsage(User user, long count) {
-        YearMonth currentMonth = YearMonth.now();
-        UserImageGenUsage usage = userImageGenUsageRepository.findByUserAndMonth(user, currentMonth)
-                .orElseGet(() -> new UserImageGenUsage(user, currentMonth));
+    private byte[] callImagen(ImageGenModel model, String prompt) throws IOException {
+        String modelId = model.getApiModelId();
+        String url = "https://generativelanguage.googleapis.com/v1beta/models/"
+                + modelId + ":predict";   // ← removed ?key= from URL
 
-        usage.setGenerationsUsed(usage.getGenerationsUsed() + count);
-        userImageGenUsageRepository.save(usage);
+        JSONObject instance  = new JSONObject().put("prompt", prompt);
+        JSONObject parameters = new JSONObject()
+                .put("sampleCount", 1)
+                .put("aspectRatio", "1:1")
+                .put("safetySetting", "block_low_and_above");
+
+        JSONObject body = new JSONObject();
+        body.put("instances", new JSONArray().put(instance));
+        body.put("parameters", parameters);
+
+        Request req = new Request.Builder()
+                .url(url)
+                .addHeader("x-goog-api-key", getGoogleAiKey())   // ← correct header
+                .addHeader("Content-Type", "application/json")
+                .post(RequestBody.create(body.toString(), MediaType.parse("application/json")))
+                .build();
+
+        try (Response resp = httpClient.newCall(req).execute()) {
+            assertSuccess(resp, "Google Imagen");
+            String respBody = resp.body().string();
+            logger.debug("Google Imagen raw response: {}", respBody);
+            JSONObject json = new JSONObject(respBody);
+
+            // Imagen 4 returns predictions[].bytesBase64Encoded
+            JSONArray predictions = json.getJSONArray("predictions");
+            if (predictions.length() == 0)
+                throw new IOException("Google Imagen returned empty predictions array");
+
+            JSONObject prediction = predictions.getJSONObject(0);
+
+            // Field name varies slightly across model versions — handle both
+            String b64;
+            if (prediction.has("bytesBase64Encoded")) {
+                b64 = prediction.getString("bytesBase64Encoded");
+            } else if (prediction.has("imageBytes")) {
+                b64 = prediction.getJSONObject("imageBytes").getString("bytesBase64Encoded");
+            } else {
+                throw new IOException("Google Imagen response missing image bytes. Full response: " + respBody);
+            }
+            return Base64.getDecoder().decode(b64);
+        }
     }
 
-    public long getUserDailyImageGenUsage(User user) {
-        LocalDate today = LocalDate.now();
-        return userDailyImageGenUsageRepository.findByUserAndUsageDate(user, today)
-                .map(UserDailyImageGenUsage::getGenerationsUsed)
-                .orElse(0L);
+    private byte[] callFlux(String prompt) throws IOException {
+        JSONObject body = new JSONObject();
+        body.put("prompt", prompt);
+        body.put("width", 1024);
+        body.put("height", 1024);
+        body.put("prompt_upsampling", false);
+        body.put("safety_tolerance", 2);
+        body.put("output_format", "png");
+
+        Request submitReq = new Request.Builder()
+                .url("https://api.bfl.ai/v1/flux-pro-1.1")  // ← was: api.us1.bfl.ai
+                .addHeader("x-key", getBflKey())
+                .post(RequestBody.create(body.toString(), MediaType.parse("application/json")))
+                .build();
+
+        String pollingUrl;  // ← use polling_url directly from response
+        try (Response resp = httpClient.newCall(submitReq).execute()) {
+            assertSuccess(resp, "BFL FLUX (submit)");
+            JSONObject submitJson = new JSONObject(resp.body().string());
+            pollingUrl = submitJson.getString("polling_url");  // ← was: getString("id") then constructing URL manually
+        }
+
+        logger.info("BFL FLUX job submitted, polling: {}", pollingUrl);
+        try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        for (int i = 0; i < 22; i++) {
+            Request pollReq = new Request.Builder()
+                    .url(pollingUrl)          // ← use polling_url directly
+                    .addHeader("x-key", getBflKey())
+                    .get()
+                    .build();
+
+            try (Response pollResp = httpClient.newCall(pollReq).execute()) {
+                if (!pollResp.isSuccessful()) {
+                    try { Thread.sleep(4000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    continue;
+                }
+                String pollBodyStr = pollResp.body().string();
+                JSONObject pollJson = new JSONObject(pollBodyStr);
+                String status = pollJson.optString("status", "Pending");
+                logger.debug("BFL FLUX poll {}: status={}", i + 1, status);
+
+                if ("Ready".equals(status)) {
+                    String imageUrl = pollJson.getJSONObject("result").getString("sample");
+                    return downloadUrl(imageUrl);
+                }
+                if ("Error".equals(status) || "Failed".equals(status) || "Request Moderated".equals(status)) {
+                    throw new IOException("FLUX generation failed with status: " + status + " — " + pollBodyStr);
+                }
+            }
+            try { Thread.sleep(4000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
+        throw new IOException("FLUX generation timed out after ~90 seconds.");
     }
 
-    private void updateUserDailyImageGenUsage(User user, long count) {
-        LocalDate today = LocalDate.now();
-        UserDailyImageGenUsage usage = userDailyImageGenUsageRepository.findByUserAndUsageDate(user, today)
-                .orElseGet(() -> new UserDailyImageGenUsage(user, today));
+    private byte[] callGrok(String prompt) throws IOException {
+        JSONObject body = new JSONObject();
+        body.put("model", "grok-2-image-1212");
+        body.put("prompt", prompt);
+        body.put("n", 1);
+        body.put("response_format", "b64_json");
 
-        usage.setGenerationsUsed(usage.getGenerationsUsed() + count);
-        userDailyImageGenUsageRepository.save(usage);
+        Request req = new Request.Builder()
+                .url("https://api.x.ai/v1/images/generations")
+                .addHeader("Authorization", "Bearer " + getXaiKey())
+                .post(RequestBody.create(body.toString(), MediaType.parse("application/json")))
+                .build();
+
+        try (Response resp = httpClient.newCall(req).execute()) {
+            assertSuccess(resp, "xAI Grok Aurora");
+            JSONObject json = new JSONObject(resp.body().string());
+            return Base64.getDecoder().decode(json.getJSONArray("data").getJSONObject(0).getString("b64_json"));
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private byte[] downloadUrl(String url) throws IOException {
+        Request req = new Request.Builder().url(url).get().build();
+        try (Response resp = httpClient.newCall(req).execute()) {
+            assertSuccess(resp, "image download");
+            return resp.body().bytes();
+        }
+    }
+
+    private void assertSuccess(Response resp, String provider) throws IOException {
+        if (!resp.isSuccessful()) {
+            String err = resp.body() != null ? resp.body().string() : "no body";
+            throw new IOException(provider + " API error " + resp.code() + ": " + err);
+        }
+    }
+
+    private UserImageGenCredits getOrCreateCredits(User user) {
+        String month = YearMonth.now().toString();
+        return creditsRepository.findByUserAndCreditMonth(user, month)
+                .orElseGet(() -> creditsRepository.save(new UserImageGenCredits(user, YearMonth.now())));
+    }
+
+    private void rolloverDailyIfNeeded(UserImageGenCredits credits) {
+        String today = LocalDate.now().toString();
+        if (!today.equals(credits.getLastResetDate())) {
+            credits.setTodayCreditsUsed(0);
+            credits.setLastResetDate(today);
+        }
+    }
+
+    // ── Usage queries (used by controller) ───────────────────────────────────
+
+    public int getMonthlyCreditsUsed(User user) {
+        return creditsRepository.findByUserAndCreditMonth(user, YearMonth.now().toString())
+                .map(UserImageGenCredits::getCreditsUsed).orElse(0);
+    }
+
+    public int getDailyCreditsUsed(User user) {
+        return creditsRepository.findByUserAndCreditMonth(user, YearMonth.now().toString())
+                .map(c -> {
+                    rolloverDailyIfNeeded(c);
+                    return c.getTodayCreditsUsed();
+                }).orElse(0);
     }
 
     public List<SoleImageGen> getUserGenerations(User user) {

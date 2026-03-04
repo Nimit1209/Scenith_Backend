@@ -42,42 +42,39 @@ public class SoleImageGenController {
             @RequestHeader("Authorization") String token,
             @RequestBody Map<String, Object> request) {
         try {
-            // Authenticate user
             User user = getUserFromToken(token);
 
-            // Extract parameters
-            String prompt = (String) request.get("prompt");
+            String prompt         = (String) request.get("prompt");
             String negativePrompt = (String) request.get("negativePrompt");
+            String modelName      = (String) request.get("model");
 
-            // Validate
-            if (prompt == null || prompt.trim().isEmpty()) {
+            if (prompt == null || prompt.isBlank())
                 return ResponseEntity.badRequest().body("Prompt is required and cannot be empty");
+            if (modelName == null || modelName.isBlank())
+                return ResponseEntity.badRequest().body("Model is required");
+
+            com.example.Scenith.enums.ImageGenModel model;
+            try {
+                model = com.example.Scenith.enums.ImageGenModel.valueOf(modelName.toUpperCase());
+            } catch (IllegalArgumentException e) {
+                return ResponseEntity.badRequest().body("Unknown model: " + modelName);
             }
 
-            // Generate images
-            List<SoleImageGen> images = soleImageGenService.generateImages(user, prompt, negativePrompt);
+            SoleImageGen image = soleImageGenService.generateImage(user, prompt, negativePrompt, model);
 
-            // Prepare response
-            List<Map<String, Object>> imagesList = new ArrayList<>();
-            for (SoleImageGen img : images) {
-                Map<String, Object> imgData = new HashMap<>();
-                imgData.put("id", img.getId());
-                imgData.put("imagePath", img.getImagePath());
-                imgData.put("prompt", img.getPrompt());
-                imgData.put("resolution", img.getResolution());
-                imgData.put("createdAt", img.getCreatedAt());
-                imagesList.add(imgData);
-            }
+            Map<String, Object> imgData = new HashMap<>();
+            imgData.put("id",        image.getId());
+            imgData.put("imagePath", image.getImagePath());
+            imgData.put("prompt",    image.getPrompt());
+            imgData.put("model",     model.getDisplayName());
+            imgData.put("credits",   model.getCreditsPerImage());
+            imgData.put("createdAt", image.getCreatedAt());
 
-            Map<String, Object> response = new HashMap<>();
-            response.put("images", imagesList);
-            response.put("count", images.size());
-
-            return ResponseEntity.ok(response);
+            return ResponseEntity.ok(imgData);
 
         } catch (IOException e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body("Error generating images: " + e.getMessage());
+                    .body("Error generating image: " + e.getMessage());
         } catch (IllegalArgumentException | IllegalStateException e) {
             return ResponseEntity.badRequest().body(e.getMessage());
         } catch (RuntimeException e) {
@@ -88,34 +85,39 @@ public class SoleImageGenController {
                     .body("Unexpected error: " + e.getMessage());
         }
     }
-
     @GetMapping("/usage")
     public ResponseEntity<?> getImageGenUsage(@RequestHeader("Authorization") String token) {
         try {
             User user = getUserFromToken(token);
 
-            long monthlyUsage = soleImageGenService.getUserMonthlyImageGenUsage(user);
-            long monthlyLimit = planLimitsService.getMonthlyImageGenLimit(user);
-            long monthlyRemaining = monthlyLimit > 0 ? monthlyLimit - monthlyUsage : -1;
+            int monthlyUsed      = soleImageGenService.getMonthlyCreditsUsed(user);
+            int monthlyLimit     = planLimitsService.getMonthlyImageGenCredits(user);
+            int dailyUsed        = soleImageGenService.getDailyCreditsUsed(user);
+            int dailyLimit       = planLimitsService.getDailyImageGenCredits(user);
 
-            long dailyUsage = soleImageGenService.getUserDailyImageGenUsage(user);
-            long dailyLimit = planLimitsService.getDailyImageGenLimit(user);
-            long dailyRemaining = dailyLimit > 0 ? dailyLimit - dailyUsage : -1;
+            List<Map<String, Object>> models = planLimitsService.getAvailableImageModels(user)
+                    .stream()
+                    .map(m -> {
+                        Map<String, Object> map = new HashMap<>();
+                        map.put("id",            m.name());
+                        map.put("displayName",   m.getDisplayName());
+                        map.put("creditsPerImage", m.getCreditsPerImage());
+                        return map;
+                    }).toList();
 
             Map<String, Object> response = new HashMap<>();
             response.put("monthly", Map.of(
-                    "used", monthlyUsage,
-                    "limit", monthlyLimit,
-                    "remaining", monthlyRemaining
+                    "used",      monthlyUsed,
+                    "limit",     monthlyLimit,
+                    "remaining", monthlyLimit - monthlyUsed
             ));
             response.put("daily", Map.of(
-                    "used", dailyUsage,
-                    "limit", dailyLimit,
-                    "remaining", dailyRemaining
+                    "used",      dailyUsed,
+                    "limit",     dailyLimit,
+                    "remaining", dailyLimit - dailyUsed
             ));
+            response.put("availableModels", models);
             response.put("role", user.getRole().toString());
-            response.put("imagesPerRequest", planLimitsService.getImagesPerRequest(user));
-            response.put("resolution", planLimitsService.getImageResolution(user));
 
             return ResponseEntity.ok(response);
 

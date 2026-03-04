@@ -124,32 +124,35 @@ public class PlanLimitsService {
     // ==================== PUBLIC UTILITY ====================
 
 
-    public long getDailyImageGenLimit(User user) {
-        if (user.isAdmin() || isStudio(user)) return 30;
-        if (isCreator(user)) return 15;
-        if (isCreatorLite(user)) return 5;
-        return 1;
+    public int getMonthlyImageGenCredits(User user) {
+        if (user.isAdmin())      return -1;        // unlimited for admin
+        if (isStudio(user))      return 500;        // Creator Odyssey
+        if (isCreator(user))     return 250;        // Creator Spark
+        if (isCreatorLite(user)) return 100;        // Creator Lite
+        return 0;                                   // Basic — no image gen
     }
 
-    public long getMonthlyImageGenLimit(User user) {
-        if (user.isAdmin() || isStudio(user)) return 900;
-        if (isCreator(user)) return 400;
-        if (isCreatorLite(user)) return 50;
-        return 5;
+    public int getDailyImageGenCredits(User user) {
+        if (user.isAdmin())      return -1;         // unlimited for admin
+        if (isStudio(user))      return 60;         // Creator Odyssey
+        if (isCreator(user))     return 30;         // Creator Spark
+        if (isCreatorLite(user)) return 15;         // Creator Lite
+        return 0;                                   // Basic — no image gen
     }
 
-    public int getImagesPerRequest(User user) {
-        if (isStudio(user)) return 4;
-        if (isCreator(user)) return 2;
-        return 1;
+    public boolean canAccessImageModel(User user, com.example.Scenith.enums.ImageGenModel model) {
+        // Admin gets everything
+        if (user.isAdmin()) return true;
+        // Any paid plan gets all models
+        if (isStudio(user) || isCreator(user) || isCreatorLite(user)) return true;
+        // Basic plan — no image gen
+        return false;
     }
-
-    public String getImageResolution(User user) {
-        if (isStudio(user))  return "1024x1024";
-        if (isCreator(user)) return "896x1152";
-        return "1024x1024";
+    public java.util.List<com.example.Scenith.enums.ImageGenModel> getAvailableImageModels(User user) {
+        return java.util.Arrays.stream(com.example.Scenith.enums.ImageGenModel.values())
+                .filter(m -> canAccessImageModel(user, m))
+                .toList();
     }
-
 
     public int getImageSteps(User user) {
         return 22; // Same for all plans
@@ -237,4 +240,24 @@ public class PlanLimitsService {
                 .toList();
     }
 
+// ==================== EXTERNAL TTS LIMITS (OpenAI / Azure / AWS) ====================
+    // Cost parity with Google (~$0.015-0.016/1K chars), so same limits apply
+
+    public long getMonthlyExternalTtsLimit(User user) {
+        // Same as Google — cost is identical
+        return getMonthlyTtsLimit(user);
+    }
+
+    public long getDailyExternalTtsLimit(User user) {
+        return getDailyTtsLimit(user);
+    }
+
+    public long getMaxExternalTtsCharsPerRequest(User user) {
+        return getMaxCharsPerRequest(user);
+    }
+
+    public boolean hasExternalTtsAccess(User user) {
+        // Only paid plans — BASIC users stay on Google only
+        return user.isAdmin() || isStudio(user) || isCreator(user) || isCreatorLite(user);
+    }
 }

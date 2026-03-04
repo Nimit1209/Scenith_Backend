@@ -1,0 +1,21 @@
+
+[
+{ "provider": "OPENAI", "voiceId": "alloy",   "humanName": "Alloy",   "gender": "Neutral", "language": "English (US)", "description": "Balanced and versatile", "profileUrl": "" },
+{ "provider": "OPENAI", "voiceId": "echo",    "humanName": "Echo",    "gender": "Male",    "language": "English (US)", "description": "Clear and measured", "profileUrl": "" },
+{ "provider": "OPENAI", "voiceId": "fable",   "humanName": "Fable",   "gender": "Neutral", "language": "English (US)", "description": "Warm storytelling tone", "profileUrl": "" },
+{ "provider": "OPENAI", "voiceId": "onyx",    "humanName": "Onyx",    "gender": "Male",    "language": "English (US)", "description": "Deep and authoritative", "profileUrl": "" },
+{ "provider": "OPENAI", "voiceId": "nova",    "humanName": "Nova",    "gender": "Female",  "language": "English (US)", "description": "Energetic and bright", "profileUrl": "" },
+{ "provider": "OPENAI", "voiceId": "shimmer", "humanName": "Shimmer", "gender": "Female",  "language": "English (US)", "description": "Soft and expressive", "profileUrl": "" },
+
+{ "provider": "AZURE", "voiceId": "en-US-JennyNeural",   "humanName": "Jenny",   "gender": "Female", "language": "English (US)",  "languageCode": "en-US", "profileUrl": "" },
+{ "provider": "AZURE", "voiceId": "en-US-GuyNeural",     "humanName": "Guy",     "gender": "Male",   "language": "English (US)",  "languageCode": "en-US", "profileUrl": "" },
+{ "provider": "AZURE", "voiceId": "en-GB-SoniaNeural",   "humanName": "Sonia",   "gender": "Female", "language": "English (UK)",  "languageCode": "en-GB", "profileUrl": "" },
+{ "provider": "AZURE", "voiceId": "en-GB-RyanNeural",    "humanName": "Ryan",    "gender": "Male",   "language": "English (UK)",  "languageCode": "en-GB", "profileUrl": "" },
+{ "provider": "AZURE", "voiceId": "hi-IN-SwaraNeural",   "humanName": "Swara",   "gender": "Female", "language": "Hindi (India)", "languageCode": "hi-IN", "profileUrl": "" },
+{ "provider": "AZURE", "voiceId": "hi-IN-MadhurNeural",  "humanName": "Madhur",  "gender": "Male",   "language": "Hindi (India)", "languageCode": "hi-IN", "profileUrl": "" },
+{ "provider": "AZURE", "voiceId": "es-ES-ElviraNeural",  "humanName": "Elvira",  "gender": "Female", "language": "Spanish (Spain)", "languageCode": "es-ES", "profileUrl": "" },
+{ "provider": "AZURE", "voiceId": "fr-FR-DeniseNeural",  "humanName": "Denise",  "gender": "Female", "language": "French (France)", "languageCode": "fr-FR", "profileUrl": "" },
+{ "provider": "AZURE", "voiceId": "de-DE-KatjaNeural",   "humanName": "Katja",   "gender": "Female", "language": "German (Germany)", "languageCode": "de-DE", "profileUrl": "" },
+{ "provider": "AZURE", "voiceId": "ja-JP-NanamiNeural",  "humanName": "Nanami",  "gender": "Female", "language": "Japanese",        "languageCode": "ja-JP", "profileUrl": "" }
+
+]

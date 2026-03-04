@@ -42,4 +42,19 @@ public class AiVoicesService {
         .filter(voice -> voice.getGender().equalsIgnoreCase(gender))
         .collect(Collectors.toList());
   }
+  public List<VoiceInfo> getExternalVoices(String providerFilter) {
+    ObjectMapper mapper = new ObjectMapper();
+    try (InputStream is = getClass().getClassLoader().getResourceAsStream("external_voices.json")) {
+      List<VoiceInfo> voices = mapper.readValue(is, new TypeReference<List<VoiceInfo>>() {});
+      if (providerFilter != null && !providerFilter.isBlank()) {
+        return voices.stream()
+                .filter(v -> providerFilter.equalsIgnoreCase(v.getProvider()))
+                .collect(Collectors.toList());
+      }
+      return voices;
+    } catch (IOException e) {
+      e.printStackTrace();
+      return Collections.emptyList();
+    }
+  }
 }

@@ -15,6 +15,10 @@ public class VoiceInfo {
   private String profileUrl;
   private String voiceStyle;
   private Map<String, String> ssmlConfig;
+  private String provider = "GOOGLE";
+  private String voiceId;
+  private String accent;
+  private String description;
 
   public VoiceInfo() {}
 }

@@ -7,6 +7,7 @@ import com.example.Scenith.repository.SoleTTSRepository;
 import com.example.Scenith.repository.UserPlanRepository;
 import com.example.Scenith.repository.UserRepository;
 import com.example.Scenith.security.JwtUtil;
+import com.example.Scenith.service.ExternalTtsService;
 import com.example.Scenith.service.PlanLimitsService;
 import com.example.Scenith.service.SoleTTSService;
 import org.springframework.http.HttpStatus;
@@ -29,14 +30,16 @@ public class SoleTTSController {
     private final SoleTTSRepository soleTTSRepository;
     private final UserPlanRepository userPlanRepository;
     private final PlanLimitsService planLimitsService;
+    private final ExternalTtsService externalTtsService;
 
-    public SoleTTSController(SoleTTSService soleTTSService, JwtUtil jwtUtil, UserRepository userRepository, SoleTTSRepository soleTTSRepository, UserPlanRepository userPlanRepository, PlanLimitsService planLimitsService) {
+    public SoleTTSController(SoleTTSService soleTTSService, JwtUtil jwtUtil, UserRepository userRepository, SoleTTSRepository soleTTSRepository, UserPlanRepository userPlanRepository, PlanLimitsService planLimitsService, ExternalTtsService externalTtsService) {
         this.soleTTSService = soleTTSService;
         this.jwtUtil = jwtUtil;
         this.userRepository = userRepository;
         this.soleTTSRepository = soleTTSRepository;
         this.userPlanRepository = userPlanRepository;
         this.planLimitsService = planLimitsService;
+        this.externalTtsService = externalTtsService;
     }
 
     @PostMapping("/generate")
@@ -130,6 +133,27 @@ public class SoleTTSController {
             response.put("maxCharRequest", maxCharRequest);
             response.put("role", user.getRole().toString());
 
+            Map<String, Object> externalUsage = new HashMap<>();
+            for (SoleTTS.TtsProvider p : new SoleTTS.TtsProvider[]{
+                    SoleTTS.TtsProvider.OPENAI, SoleTTS.TtsProvider.AZURE}) {
+                long elMonthly = externalTtsService.getMonthlyUsage(user, p);
+                long elDaily = externalTtsService.getDailyUsage(user, p);
+                long limit = planLimitsService.getMonthlyExternalTtsLimit(user);
+                long elMaxCharRequest = planLimitsService.getMaxExternalTtsCharsPerRequest(user);
+                long dailyLim = planLimitsService.getDailyExternalTtsLimit(user);
+                externalUsage.put(p.name().toLowerCase(), Map.of(
+                        "monthly", Map.of("used", elMonthly, "limit", limit, "remaining", limit > 0 ? limit - elMonthly : -1),
+                        "daily",   Map.of("used", elDaily,   "limit", dailyLim, "remaining", dailyLim > 0 ? dailyLim - elDaily : -1)
+                ));
+                externalUsage.put("maxCharRequest", elMaxCharRequest);
+            }
+
+            // Then add to the response map:
+            response.put("externalProviders", Map.of(
+                    "hasAccess", planLimitsService.hasExternalTtsAccess(user),
+                    "usage", externalUsage
+            ));
+
             return ResponseEntity.ok(response);
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
@@ -189,5 +213,58 @@ public class SoleTTSController {
         return planLimitsService.getActiveUserPlans(user).stream()
                 .anyMatch(p -> p.getPlanType() == PlanType.CREATOR
                         || p.getPlanType() == PlanType.STUDIO);
+    }
+    @PostMapping("/generate-external")
+    public ResponseEntity<?> generateExternalTTS(
+            @RequestHeader("Authorization") String token,
+            @RequestBody Map<String, Object> request) {
+        try {
+            User user = getUserFromToken(token);
+
+            String text = (String) request.get("text");
+            String voiceId = (String) request.get("voiceId");
+            String providerStr = (String) request.get("provider"); // "OPENAI" | "AZURE" | "AWS"
+
+            if (text == null || text.trim().isEmpty())
+                return ResponseEntity.badRequest().body("Text is required");
+            if (voiceId == null || voiceId.trim().isEmpty())
+                return ResponseEntity.badRequest().body("Voice ID is required");
+            if (providerStr == null || providerStr.trim().isEmpty())
+                return ResponseEntity.badRequest().body("Provider is required (OPENAI, AZURE, AWS)");
+
+            SoleTTS.TtsProvider provider;
+            try {
+                provider = SoleTTS.TtsProvider.valueOf(providerStr.toUpperCase());
+                if (provider == SoleTTS.TtsProvider.GOOGLE) {
+                    return ResponseEntity.badRequest().body("Use /generate endpoint for Google voices");
+                }
+            } catch (IllegalArgumentException e) {
+                return ResponseEntity.badRequest().body("Invalid provider. Use: OPENAI, AZURE, or AWS");
+            }
+
+            SoleTTS soleTTS = externalTtsService.generateTTS(user, text, voiceId, provider);
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("id", soleTTS.getId());
+            response.put("audioPath", soleTTS.getAudioPath());
+            response.put("createdAt", soleTTS.getCreatedAt());
+            response.put("provider", provider.name());
+
+            return ResponseEntity.ok(response);
+
+        } catch (IOException | InterruptedException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error generating audio: " + e.getMessage());
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body("Unauthorized: " + e.getMessage());
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Unexpected error: " + e.getMessage());
+        }
     }
 }

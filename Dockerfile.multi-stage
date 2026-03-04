@@ -388,6 +388,10 @@ COPY credentials/video-editor-tts-24b472478ab838d2168992684517cacfab4c11da.json 
 COPY src/main/resources/email-templates/ /app/resources/email-templates/
 COPY src/main/resources/image-gen-api-key.txt /app/credentials/image-gen-api-key.txt
 COPY credentials/fal-api-key.txt /app/credentials/fal-api-key.txt
+COPY credentials/bfl-api-key.txt /app/credentials/bfl-api-key.txt
+COPY credentials/xai-api-key.txt /app/credentials/xai-api-key.txt
+COPY credentials/google-ai-api-key.txt /app/credentials/google-ai-api-key.txt
+COPY credentials/openai-api-key.txt /app/credentials/openai-api-key.txt
 # Copy Spring Boot JAR (this changes most frequently)
 COPY target/Scenith-0.0.1-SNAPSHOT.jar app.jar
 

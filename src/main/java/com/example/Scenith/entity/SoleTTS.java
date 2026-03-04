@@ -80,4 +80,19 @@ public class SoleTTS {
     public void setPresignedUrl(String presignedUrl) {
         this.presignedUrl = presignedUrl;
     }
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private TtsProvider provider = TtsProvider.GOOGLE;
+
+    public TtsProvider getProvider() {
+        return provider;
+    }
+
+    public void setProvider(TtsProvider provider) {
+        this.provider = provider;
+    }
+
+    public enum TtsProvider {
+        GOOGLE, OPENAI, AZURE
+    }
 }
