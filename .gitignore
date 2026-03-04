@@ -61,4 +61,7 @@ docker-compose.yml
 # =========================
 src/main/resources/image-gen-api-key.txt
 credentials/*.json
+# API keys / credentials
+credentials/*
+!credentials/.gitkeep
 
