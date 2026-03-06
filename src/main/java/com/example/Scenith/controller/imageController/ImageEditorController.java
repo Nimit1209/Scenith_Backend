@@ -35,6 +35,7 @@ public class ImageEditorController {
     private final ImageElementService imageElementService;
     private final ElementDownloadService elementDownloadService;
     private final PlanLimitsService planLimitsService;
+    private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(ImageEditorController.class);
 
 
     /**
@@ -344,7 +345,11 @@ public class ImageEditorController {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
         } catch (IllegalArgumentException var12) {
             return ResponseEntity.badRequest().build();
-        } catch (IOException var13) {
+        }  catch (IOException e) {
+            logger.error("IOException during download elementId={}: {}", id, e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        } catch (Exception e) {
+            logger.error("Unexpected error during download elementId={}: {}", id, e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }

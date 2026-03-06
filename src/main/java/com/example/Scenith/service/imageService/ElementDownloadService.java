@@ -228,7 +228,7 @@ public class ElementDownloadService {
         try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
 
             // Read and potentially modify SVG content
-            String svgContent = Files.readString(svgPath);
+            String svgContent = convertRgbaColors(expandFeDropShadow(Files.readString(svgPath)));
 
             // Apply color if provided
             if (color != null && !color.isEmpty()) {
@@ -262,7 +262,7 @@ public class ElementDownloadService {
         try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
 
             // Read and potentially modify SVG content
-            String svgContent = Files.readString(svgPath);
+            String svgContent = convertRgbaColors(expandFeDropShadow(Files.readString(svgPath)));
 
             // Apply color if provided
             if (color != null && !color.isEmpty()) {
@@ -511,5 +511,105 @@ public class ElementDownloadService {
         usage.setDailyCount(usage.getDailyCount() + 1);
         usage.setMonthlyCount(usage.getMonthlyCount() + 1);
         downloadUsageRepository.save(usage);
+    }
+
+    /**
+     * Batik 1.17 does not support SVG 2.0's <feDropShadow> shorthand.
+     * This expands it into equivalent primitive filters Batik can handle.
+     *
+     * <feDropShadow dx="2" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.5"/>
+     * becomes:
+     * <feGaussianBlur stdDeviation="3" in="SourceGraphic" result="blur"/>
+     * <feOffset dx="2" dy="2" result="offset"/>
+     * <feFlood flood-color="#000" flood-opacity="0.5" result="flood"/>
+     * <feComposite in="flood" in2="offset" operator="in" result="shadow"/>
+     * <feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>
+     */
+    // NEW
+    private String expandFeDropShadow(String svgContent) {
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("<feDropShadow([^/]*?)/>");
+        java.util.regex.Matcher matcher = pattern.matcher(svgContent);
+        StringBuffer sb = new StringBuffer();
+
+        while (matcher.find()) {
+            String attrs = matcher.group(1);
+
+            String dx           = extractAttr(attrs, "dx", "2");
+            String dy           = extractAttr(attrs, "dy", "2");
+            String stdDeviation = extractAttr(attrs, "stdDeviation", "2");
+            String floodColor   = extractAttr(attrs, "flood-color", "black");
+            String floodOpacity = extractAttr(attrs, "flood-opacity", "1");
+
+            String replacement =
+                    "<feGaussianBlur stdDeviation=\"" + stdDeviation + "\" in=\"SourceGraphic\" result=\"_ds_blur\"/>" +
+                            "<feOffset dx=\"" + dx + "\" dy=\"" + dy + "\" in=\"_ds_blur\" result=\"_ds_offset\"/>" +
+                            "<feFlood flood-color=\"" + floodColor + "\" flood-opacity=\"" + floodOpacity + "\" result=\"_ds_flood\"/>" +
+                            "<feComposite in=\"_ds_flood\" in2=\"_ds_offset\" operator=\"in\" result=\"_ds_shadow\"/>" +
+                            "<feMerge><feMergeNode in=\"_ds_shadow\"/><feMergeNode in=\"SourceGraphic\"/></feMerge>";
+
+            matcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
+    }
+
+    private String extractAttr(String attrs, String name, String defaultValue) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile(name + "\\s*=\\s*\"([^\"]+)\"")
+                .matcher(attrs);
+        return m.find() ? m.group(1) : defaultValue;
+    }
+    /**
+     * Batik does not support rgba() in fill/stroke attributes or style properties.
+     * Converts rgba(r,g,b,a) → nearest hex color, using opacity attribute for transparency.
+     * For fill/stroke attributes, splits into color + fill-opacity/stroke-opacity.
+     */
+    private String convertRgbaColors(String svgContent) {
+        // Handle fill="rgba(...)" attribute
+        svgContent = replaceRgbaInAttr(svgContent, "fill");
+        // Handle stroke="rgba(...)" attribute
+        svgContent = replaceRgbaInAttr(svgContent, "stroke");
+        // Handle fill:rgba(...) and stroke:rgba(...) in style attributes
+        svgContent = replaceRgbaInStyle(svgContent);
+        return svgContent;
+    }
+
+    private String replaceRgbaInAttr(String svgContent, String attrName) {
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile(
+                attrName + "=\"rgba\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*([0-9.]+)\\s*\\)\"");
+        java.util.regex.Matcher m = p.matcher(svgContent);
+        StringBuffer sb = new StringBuffer();
+        while (m.find()) {
+            int r = Integer.parseInt(m.group(1));
+            int g = Integer.parseInt(m.group(2));
+            int b = Integer.parseInt(m.group(3));
+            float a = Float.parseFloat(m.group(4));
+            String hex = String.format("#%02x%02x%02x", r, g, b);
+            // Use fill-opacity / stroke-opacity for the alpha channel
+            String opacityAttr = attrName + "-opacity";
+            String replacement = attrName + "=\"" + hex + "\" " + opacityAttr + "=\"" + a + "\"";
+            m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    private String replaceRgbaInStyle(String svgContent) {
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile(
+                "(fill|stroke):rgba\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*([0-9.]+)\\s*\\)");
+        java.util.regex.Matcher m = p.matcher(svgContent);
+        StringBuffer sb = new StringBuffer();
+        while (m.find()) {
+            String prop = m.group(1);
+            int r = Integer.parseInt(m.group(2));
+            int g = Integer.parseInt(m.group(3));
+            int b = Integer.parseInt(m.group(4));
+            float a = Float.parseFloat(m.group(5));
+            String hex = String.format("#%02x%02x%02x", r, g, b);
+            String replacement = prop + ":" + hex + ";" + prop + "-opacity:" + a;
+            m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        m.appendTail(sb);
+        return sb.toString();
     }
 }
