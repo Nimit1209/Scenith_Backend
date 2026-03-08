@@ -100,8 +100,6 @@ public class ElementDownloadService {
                 }
             }
 
-            // Increment usage
-            incrementDownloadUsage(user);
         } else {
             // Anonymous users: restrict to PNG/JPG only, max 512x512
             if ("SVG".equals(format)) {
@@ -112,9 +110,6 @@ public class ElementDownloadService {
                 throw new IllegalArgumentException("Resolution exceeds limit for guests. Max allowed: 512x512");
             }
         }
-
-        // 2. Record download (moved early - good practice)
-        recordDownload(elementId, user != null ? user.getId() : null, format, resolution, ipAddress);
 
         // 3. Get R2 path
         String r2Path = element.getFilePath();
@@ -146,12 +141,20 @@ public class ElementDownloadService {
 
             format = (format != null ? format.trim().toUpperCase() : "PNG");
 
-            return switch (format) {
+            DownloadResult result = switch (format) {
                 case "SVG" -> downloadSvg(tempPath, element.getName(), color);
                 case "PNG" -> downloadAsPng(tempPath, element, resolution, color);
                 case "JPG", "JPEG" -> downloadAsJpg(tempPath, element, resolution, color);
                 default -> throw new IllegalArgumentException("Unsupported download format: " + format);
             };
+
+            // ✅ Only record AFTER successful download
+            recordDownload(elementId, user != null ? user.getId() : null, format, resolution, ipAddress);
+            if (user != null) {
+                incrementDownloadUsage(user);
+            }
+
+            return result;
 
         } finally {
             // Important: always try to clean up
