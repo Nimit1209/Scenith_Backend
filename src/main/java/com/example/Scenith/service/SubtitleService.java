@@ -9,7 +9,6 @@ import com.example.Scenith.repository.SubtitleMediaRepository;
 import com.example.Scenith.repository.UserProcessingUsageRepository;
 import com.example.Scenith.repository.UserRepository;
 import com.example.Scenith.security.JwtUtil;
-import com.example.Scenith.sqs.SqsService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,8 +18,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
-import software.amazon.awssdk.services.sqs.SqsClient;
-import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 
 import javax.imageio.ImageIO;
 import java.awt.*;
@@ -32,6 +29,7 @@ import java.awt.image.BufferedImage;
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.time.YearMonth;
 import java.util.*;
@@ -43,327 +41,540 @@ import java.util.stream.Collectors;
 
 @Service
 public class SubtitleService {
+
   private static final Logger logger = LoggerFactory.getLogger(SubtitleService.class);
 
   private final JwtUtil jwtUtil;
   private final SubtitleMediaRepository subtitleMediaRepository;
-  private final UserRepository userRepository;
-  private final CloudflareR2Service cloudflareR2Service;
   private final ObjectMapper objectMapper;
-  private final SqsClient sqsClient;
-  private final EmailService emailService;
-  private final SqsService sqsService;
+  private final UserRepository userRepository;
+  private final UserProcessingUsageRepository userProcessingUsageRepository;
+  private final PlanLimitsService planLimitsService;
+  private final CloudflareR2Service cloudflareR2Service;
   private final ProcessingEmailHelper emailHelper;
+  private final software.amazon.awssdk.services.sqs.SqsClient sqsClient;
 
-  @Value("${app.base-dir:/temp}")
+  // ── Paths from application-prod.properties / environment ──────────────────
+  @Value("${app.base-dir:/mnt/scenith-temp}")
   private String baseDir;
 
   @Value("${python.path:/usr/local/bin/python3.11}")
   private String pythonPath;
 
-  @Value("${app.subtitle-script-path:/app/scripts/whisper_subtitle.py}")
+  @Value("${whisper.script.path:/app/scripts/whisper_subtitle.py}")
   private String subtitleScriptPath;
 
   @Value("${app.ffmpeg-path:/usr/local/bin/ffmpeg}")
   private String ffmpegPath;
 
   @Value("${sqs.queue.url}")
-  private String videoExportQueueUrl;
+  private String sqsQueueUrl;
+  // ──────────────────────────────────────────────────────────────────────────
 
   public SubtitleService(
           JwtUtil jwtUtil,
           SubtitleMediaRepository subtitleMediaRepository,
-          UserRepository userRepository,
-          CloudflareR2Service cloudflareR2Service,
           ObjectMapper objectMapper,
-          SqsClient sqsClient, EmailService emailService, SqsService sqsService, ProcessingEmailHelper emailHelper) {
+          UserRepository userRepository,
+          UserProcessingUsageRepository userProcessingUsageRepository,
+          PlanLimitsService planLimitsService,
+          CloudflareR2Service cloudflareR2Service,
+          ProcessingEmailHelper emailHelper, software.amazon.awssdk.services.sqs.SqsClient sqsClient) {
     this.jwtUtil = jwtUtil;
     this.subtitleMediaRepository = subtitleMediaRepository;
-    this.userRepository = userRepository;
-    this.cloudflareR2Service = cloudflareR2Service;
     this.objectMapper = objectMapper;
-    this.
-            sqsClient = sqsClient;
-      this.emailService = emailService;
-      this.sqsService = sqsService;
-      this.emailHelper = emailHelper;
+    this.userRepository = userRepository;
+    this.userProcessingUsageRepository = userProcessingUsageRepository;
+    this.planLimitsService = planLimitsService;
+    this.cloudflareR2Service = cloudflareR2Service;
+    this.emailHelper = emailHelper;
+      this.sqsClient = sqsClient;
   }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  UPLOAD  – save to R2 (mirrors VideoSpeedService.uploadVideo)
+  // ══════════════════════════════════════════════════════════════════════════
 
   public SubtitleMedia uploadMedia(User user, MultipartFile mediaFile) throws IOException {
     logger.info("Uploading media for user: {}", user.getId());
 
     if (mediaFile == null || mediaFile.isEmpty()) {
-      logger.error("MultipartFile is null or empty for user: {}", user.getId());
       throw new IllegalArgumentException("Media file is null or empty");
     }
 
-    String absoluteBaseDir = baseDir.startsWith("/") ? baseDir : "/" + baseDir;
-    String tempFileName = "subtitle-" + System.currentTimeMillis() + "-" + mediaFile.getOriginalFilename();
-    String tempInputPath = absoluteBaseDir + File.separator + "videoeditor" + File.separator + tempFileName;
+    // ── Save to a temp file so ffprobe can measure duration ───────────────
+    Path tempDir = Paths.get(baseDir).resolve("temp/subtitle-upload").toAbsolutePath().normalize();
+    Files.createDirectories(tempDir);
 
-    File inputFile = null;
+    String tempFileName = System.currentTimeMillis() + "_" + sanitizeFilename(mediaFile.getOriginalFilename());
+    Path tempFilePath = tempDir.resolve(tempFileName);
+
     try {
-      inputFile = cloudflareR2Service.saveMultipartFileToTemp(mediaFile, tempInputPath);
-      logger.debug("Saved input media to: {}", inputFile.getAbsolutePath());
+      mediaFile.transferTo(tempFilePath.toFile());
 
-      if (inputFile.length() == 0) {
-        logger.error("Input file is empty: {}", inputFile.getAbsolutePath());
-        throw new IOException("Input file is empty");
+      if (!Files.exists(tempFilePath) || Files.size(tempFilePath) == 0) {
+        throw new IOException("Temp file is empty after transfer");
       }
 
+      // ── Validate duration before anything else ─────────────────────────
+      double videoDuration;
       try {
-        double videoDuration = getVideoDuration(inputFile);
-        if (videoDuration > 3 * 60) {
-          inputFile.delete();
-          throw new IllegalArgumentException(
-                  "Video length (" + (int)(videoDuration / 60) + " min " + (int)(videoDuration % 60) + " sec) exceeds the maximum allowed limit of 3 minutes. Please upload a shorter video."
-          );
-        }
+        videoDuration = getVideoDuration(tempFilePath.toFile());
       } catch (InterruptedException e) {
-        inputFile.delete();
         Thread.currentThread().interrupt();
         throw new IOException("Failed to validate video duration: " + e.getMessage());
       }
 
-      String r2OriginalPath = String.format("subtitles/%s/original/%s", user.getId(), mediaFile.getOriginalFilename());
-      cloudflareR2Service.uploadFile(r2OriginalPath, inputFile);
-      logger.info("Uploaded original media to R2: {}", r2OriginalPath);
+      int maxMinutes = planLimitsService.getMaxVideoLengthMinutes(user);
+      if (maxMinutes > 0 && videoDuration > maxMinutes * 60) {
+        throw new IllegalArgumentException(
+                "Video length (" + (int) (videoDuration / 60) + " min) exceeds maximum allowed ("
+                        + maxMinutes + " minutes). Upgrade your plan.");
+      }
 
-      Map<String, String> originalUrls = cloudflareR2Service.generateUrls(r2OriginalPath, 3600);
+      // ── Upload to R2 ────────────────────────────────────────────────────
+      String originalFileName = System.currentTimeMillis() + "_" + sanitizeFilename(mediaFile.getOriginalFilename());
+      String r2Path = "subtitles/" + user.getId() + "/original/" + originalFileName;
+      cloudflareR2Service.uploadFile(tempFilePath.toFile(), r2Path);
 
+      // ── Persist metadata ───────────────────────────────────────────────
       SubtitleMedia subtitleMedia = new SubtitleMedia();
       subtitleMedia.setUser(user);
-      subtitleMedia.setOriginalFileName(mediaFile.getOriginalFilename());
-      subtitleMedia.setOriginalPath(r2OriginalPath);
-      subtitleMedia.setOriginalCdnUrl(originalUrls.get("cdnUrl"));
+      subtitleMedia.setOriginalFileName(originalFileName);
+      subtitleMedia.setOriginalPath(r2Path);
+      // CDN URL via Cloudflare public access
+      subtitleMedia.setOriginalCdnUrl(cloudflareR2Service.generateDownloadUrl(r2Path, 0));
       subtitleMedia.setStatus("UPLOADED");
       subtitleMediaRepository.save(subtitleMedia);
 
-      logger.info("Saved metadata for user: {}, media: {}", user.getId(), mediaFile.getOriginalFilename());
+      logger.info("Uploaded media to R2 for user: {}, path: {}", user.getId(), r2Path);
       return subtitleMedia;
 
     } finally {
-      if (inputFile != null && inputFile.exists()) {
-        try {
-          Files.delete(inputFile.toPath());
-          logger.debug("Deleted temporary input file: {}", inputFile.getAbsolutePath());
-        } catch (IOException e) {
-          logger.warn("Failed to delete temporary input file: {}", inputFile.getAbsolutePath(), e);
-        }
-      }
+      try { Files.deleteIfExists(tempFilePath); } catch (IOException ignored) {}
     }
   }
 
-  public SubtitleMedia generateSubtitles(User user, Long mediaId, Map<String, String> styleParams) throws IOException, InterruptedException {
+  // ══════════════════════════════════════════════════════════════════════════
+  //  GENERATE SUBTITLES  – download from R2, run Whisper, store JSON
+  // ══════════════════════════════════════════════════════════════════════════
+
+  public SubtitleMedia generateSubtitles(User user, Long mediaId, Map<String, String> styleParams)
+          throws IOException, InterruptedException {
     logger.info("Generating subtitles for user: {}, mediaId: {}", user.getId(), mediaId);
 
     SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
-            .orElseThrow(() -> {
-              logger.error("Media not found for id: {}", mediaId);
-              return new IllegalArgumentException("Media not found");
-            });
+            .orElseThrow(() -> new IllegalArgumentException("Media not found"));
 
     if (!subtitleMedia.getUser().getId().equals(user.getId())) {
-      logger.error("User {} not authorized to generate subtitles for media {}", user.getId(), mediaId);
       throw new IllegalArgumentException("Not authorized to generate subtitles for this media");
     }
 
-    // Execute synchronously - NO queuing
-    return generateSubtitlesTask(mediaId, user.getId(), styleParams);
+    subtitleMedia.setStatus("PROCESSING");
+    subtitleMediaRepository.save(subtitleMedia);
+
+    // ── Download original from R2 to a local temp file ────────────────────
+    Path tempDir = Paths.get(baseDir).resolve("temp/subtitle-generate/" + mediaId).toAbsolutePath().normalize();
+    Files.createDirectories(tempDir);
+
+    Path tempInputPath = tempDir.resolve("input_" + System.currentTimeMillis() + getExtension(subtitleMedia.getOriginalFileName()));
+    File audioFile = null;
+
+    try {
+      logger.info("Downloading original file from R2: {}", subtitleMedia.getOriginalPath());
+      cloudflareR2Service.downloadFile(subtitleMedia.getOriginalPath(), tempInputPath.toString());
+
+      if (!Files.exists(tempInputPath) || Files.size(tempInputPath) == 0) {
+        throw new IOException("Downloaded input file is empty: " + tempInputPath);
+      }
+
+      // ── Extract audio ─────────────────────────────────────────────────
+      String audioFilePath = extractAudio(tempInputPath.toFile(), mediaId);
+      audioFile = new File(audioFilePath);
+
+      double audioDuration = getAudioDuration(audioFile);
+      if (audioDuration <= 0) {
+        throw new IOException("Audio file has invalid duration: " + audioDuration);
+      }
+
+      // ── Whisper transcription ─────────────────────────────────────────
+      List<Map<String, Object>> rawSubtitles = runWhisperScript(audioFile);
+      if (rawSubtitles.isEmpty()) {
+        throw new IOException("No subtitles generated by Whisper");
+      }
+
+      // ── Build SubtitleDTO list ────────────────────────────────────────
+      List<SubtitleDTO> subtitles = new ArrayList<>();
+      for (Map<String, Object> raw : rawSubtitles) {
+        double startTime = Math.max(0, ((Number) raw.get("start")).doubleValue());
+        double endTime = Math.min(audioDuration, ((Number) raw.get("end")).doubleValue());
+        String text = (String) raw.get("text");
+
+        if (endTime <= startTime || text == null || text.trim().isEmpty()) continue;
+
+        SubtitleDTO subtitle = new SubtitleDTO();
+        subtitle.setId(UUID.randomUUID().toString());
+        subtitle.setTimelineStartTime(startTime);
+        subtitle.setTimelineEndTime(endTime);
+        subtitle.setText(text.trim());
+
+        // Word-level timestamps
+        if (raw.containsKey("words")) {
+          @SuppressWarnings("unchecked")
+          List<Map<String, Object>> wordsRaw = (List<Map<String, Object>>) raw.get("words");
+          List<SubtitleDTO.WordTimestamp> wordTimestamps = new ArrayList<>();
+          for (Map<String, Object> wordData : wordsRaw) {
+            wordTimestamps.add(new SubtitleDTO.WordTimestamp(
+                    (String) wordData.get("word"),
+                    ((Number) wordData.get("start")).doubleValue(),
+                    ((Number) wordData.get("end")).doubleValue()
+            ));
+          }
+          subtitle.setWords(wordTimestamps);
+        }
+
+        // Styles
+        subtitle.setFontFamily(styleParams != null && styleParams.containsKey("fontFamily")
+                ? styleParams.get("fontFamily") : "Montserrat Alternates Black");
+        subtitle.setFontColor(styleParams != null && styleParams.containsKey("fontColor")
+                ? styleParams.get("fontColor") : "black");
+        subtitle.setBackgroundColor(styleParams != null && styleParams.containsKey("backgroundColor")
+                ? styleParams.get("backgroundColor") : "white");
+        subtitle.setBackgroundOpacity(1.0);
+        subtitle.setPositionX(0);
+        subtitle.setPositionY(350);
+        subtitle.setAlignment("center");
+        subtitle.setScale(1.5);
+        subtitle.setBackgroundH(50);
+        subtitle.setBackgroundW(50);
+        subtitle.setBackgroundBorderRadius(15);
+
+        subtitles.add(subtitle);
+      }
+
+      subtitleMedia.setSubtitlesJson(objectMapper.writeValueAsString(subtitles));
+      subtitleMedia.setStatus("SUCCESS");
+      subtitleMediaRepository.save(subtitleMedia);
+
+      logger.info("Successfully generated {} subtitles for mediaId: {}", subtitles.size(), mediaId);
+      return subtitleMedia;
+
+    } catch (Exception e) {
+      logger.error("Exception during subtitle generation for mediaId {}: {}", mediaId, e.getMessage(), e);
+      subtitleMedia.setStatus("FAILED");
+      subtitleMediaRepository.save(subtitleMedia);
+
+      if (e instanceof IOException) throw (IOException) e;
+      if (e instanceof InterruptedException) throw (InterruptedException) e;
+      throw new IOException("Subtitle generation failed: " + e.getMessage(), e);
+
+    } finally {
+      if (audioFile != null && audioFile.exists()) {
+        try { Files.delete(audioFile.toPath()); } catch (IOException ignored) {}
+      }
+      cleanUpTempDir(tempDir);
+    }
   }
 
-  public void queueProcessSubtitles(User user, Long mediaId, String quality ) throws IOException {
-    logger.info("Queueing subtitle processing for user: {}, mediaId: {}", user.getId(), mediaId);
+  // ══════════════════════════════════════════════════════════════════════════
+  //  PROCESS SUBTITLES  – called by SQS worker (queued by controller)
+  // ══════════════════════════════════════════════════════════════════════════
 
+  /**
+   * Called by the controller – validates, marks QUEUED, then pushes to SQS.
+   * Mirrors VideoSpeedService.queueVideoProcessing().
+   */
+  public SubtitleMedia queueProcessSubtitles(User user, Long mediaId, String quality) throws IOException {
     SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
-            .orElseThrow(() -> {
-              logger.error("Media not found for id: {}", mediaId);
-              return new IllegalArgumentException("Media not found");
-            });
+            .orElseThrow(() -> new IllegalArgumentException("Media not found: " + mediaId));
 
     if (!subtitleMedia.getUser().getId().equals(user.getId())) {
-      logger.error("User {} not authorized to process subtitles for media {}", user.getId(), mediaId);
+      throw new IllegalArgumentException("Not authorized to process this media");
+    }
+
+    if (subtitleMedia.getSubtitlesJson() == null || subtitleMedia.getSubtitlesJson().isEmpty()) {
+      throw new IllegalStateException("No subtitles available. Generate subtitles first.");
+    }
+
+    if ("PROCESSING".equals(subtitleMedia.getStatus()) || "QUEUED".equals(subtitleMedia.getStatus())) {
+      throw new IllegalStateException("Media is already being processed.");
+    }
+
+    String finalQuality = quality != null ? quality : "720p";
+
+    subtitleMedia.setStatus("QUEUED");
+    subtitleMedia.setProgress(0.0);
+    subtitleMedia.setQuality(finalQuality);
+    subtitleMediaRepository.save(subtitleMedia);
+
+    // Push to SQS – UnifiedTaskWorker will call processSubtitlesTask()
+    Map<String, String> taskPayload = new HashMap<>();
+    taskPayload.put("taskType",  "PROCESS_SUBTITLES");
+    taskPayload.put("mediaId",   String.valueOf(mediaId));
+    taskPayload.put("userId",    String.valueOf(user.getId()));
+    taskPayload.put("quality",   finalQuality);
+
+    try {
+      String messageBody = objectMapper.writeValueAsString(taskPayload);
+      sqsClient.sendMessage(b -> b
+              .queueUrl(sqsQueueUrl)
+              .messageBody(messageBody)
+              .build());
+      logger.info("Queued PROCESS_SUBTITLES task for mediaId: {}, userId: {}", mediaId, user.getId());
+    } catch (Exception e) {
+      // Roll back status so user can retry
+      subtitleMedia.setStatus("FAILED");
+      subtitleMediaRepository.save(subtitleMedia);
+      throw new IOException("Failed to queue subtitle processing: " + e.getMessage(), e);
+    }
+
+    return subtitleMedia;
+  }
+
+  /**
+   * Entry point called from UnifiedTaskWorker for PROCESS_SUBTITLES tasks.
+   */
+  public void processSubtitlesTask(Long mediaId, Long userId, String quality)
+          throws IOException, InterruptedException {
+
+    SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
+            .orElseThrow(() -> new IllegalArgumentException("Media not found: " + mediaId));
+
+    User user = subtitleMedia.getUser();
+    if (!user.getId().equals(userId)) {
+      throw new IllegalArgumentException("User mismatch for mediaId: " + mediaId);
+    }
+
+    processSubtitles(user, mediaId, quality);
+  }
+
+  /**
+   * Core processing – download from R2, render subtitled video, upload result to R2.
+   */
+  public SubtitleMedia processSubtitles(User user, Long mediaId, String quality)
+          throws IOException, InterruptedException {
+    logger.info("Processing subtitles for user: {}, mediaId: {}, quality: {}", user.getId(), mediaId, quality);
+
+    SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
+            .orElseThrow(() -> new IllegalArgumentException("Media not found"));
+
+    if (!subtitleMedia.getUser().getId().equals(user.getId())) {
       throw new IllegalArgumentException("Not authorized to process subtitles for this media");
     }
 
     if (subtitleMedia.getSubtitlesJson() == null || subtitleMedia.getSubtitlesJson().isEmpty()) {
-      logger.error("No subtitles available to process for mediaId: {}", mediaId);
       throw new IllegalStateException("No subtitles available to process");
     }
 
-    subtitleMedia.setStatus("QUEUED");
-    subtitleMedia.setProgress(0.0);
-    subtitleMediaRepository.save(subtitleMedia);
-    Map<String, String> taskDetails = new HashMap<>();
-    taskDetails.put("taskType", "PROCESS_SUBTITLES");  // ← ALREADY HAS THIS ✓
-    taskDetails.put("mediaId", mediaId.toString());
-    taskDetails.put("userId", user.getId().toString());
+    // ── Download original from R2 ────────────────────────────────────────
+    Path tempDir = Paths.get(baseDir)
+            .resolve("temp/subtitle-process/" + mediaId).toAbsolutePath().normalize();
+    Files.createDirectories(tempDir);
 
-    String messageBody = objectMapper.writeValueAsString(taskDetails);
-    sqsService.sendMessage(messageBody, videoExportQueueUrl);  // ← UPDATE THIS LINE
+    Path tempInputPath = tempDir.resolve("input_" + getExtension(subtitleMedia.getOriginalFileName()));
 
-    logger.info("Successfully queued subtitle processing for mediaId: {}", mediaId);
+    try {
+      logger.info("Downloading original file from R2: {}", subtitleMedia.getOriginalPath());
+      cloudflareR2Service.downloadFile(subtitleMedia.getOriginalPath(), tempInputPath.toString());
+
+      if (!Files.exists(tempInputPath) || Files.size(tempInputPath) == 0) {
+        throw new IOException("Downloaded input file is empty");
+      }
+
+      double totalDuration = getVideoDuration(tempInputPath.toFile());
+
+      // ── Plan-limit validation ──────────────────────────────────────────
+      validateProcessingLimits(user, quality, totalDuration);
+
+      String finalQuality = quality != null ? quality : "720p";
+      subtitleMedia.setQuality(finalQuality);
+      subtitleMedia.setStatus("PROCESSING");
+      subtitleMedia.setProgress(0.0);
+      subtitleMediaRepository.save(subtitleMedia);
+
+      validateInputFile(tempInputPath.toFile());
+
+      Map<String, Object> videoInfo = getVideoInfo(tempInputPath.toFile());
+      int canvasWidth  = (int) videoInfo.get("width");
+      int canvasHeight = (int) videoInfo.get("height");
+      float fps        = (float) videoInfo.get("fps");
+
+      List<SubtitleDTO> subtitles = objectMapper.readValue(
+              subtitleMedia.getSubtitlesJson(), new TypeReference<List<SubtitleDTO>>() {});
+
+      if (subtitles.isEmpty()) {
+        throw new IOException("No valid subtitles to process");
+      }
+
+      // ── Render locally ─────────────────────────────────────────────────
+      String outputFileName = "subtitled_" + subtitleMedia.getOriginalFileName();
+      Path tempOutputPath   = tempDir.resolve(outputFileName);
+
+      renderSubtitledVideo(tempInputPath.toFile(), tempOutputPath.toFile(), subtitles,
+              canvasWidth, canvasHeight, fps, mediaId, totalDuration, finalQuality);
+
+      // ── Upload processed video to R2 ───────────────────────────────────
+      String r2OutputPath = "subtitles/" + user.getId() + "/processed/" + outputFileName;
+      cloudflareR2Service.uploadFile(tempOutputPath.toFile(), r2OutputPath);
+
+      String cdnUrl = cloudflareR2Service.generateDownloadUrl(r2OutputPath, 0);
+
+      subtitleMedia.setProcessedFileName(outputFileName);
+      subtitleMedia.setProcessedPath(r2OutputPath);
+      subtitleMedia.setProcessedCdnUrl(cdnUrl);
+      subtitleMedia.setStatus("SUCCESS");
+      subtitleMedia.setProgress(100.0);
+      subtitleMediaRepository.save(subtitleMedia);
+
+      incrementUsageCount(user);
+
+      // ── Send completion email ──────────────────────────────────────────
+      // NOTE: Add SUBTITLE to ProcessingEmailHelper.ServiceType enum if not present.
+      // Wrapped defensively so an enum/mail failure never rolls back a successful job.
+      try {
+        ProcessingEmailHelper.ServiceType serviceType =
+                ProcessingEmailHelper.ServiceType.valueOf("SUBTITLE");
+        emailHelper.sendProcessingCompleteEmail(user, serviceType, outputFileName, cdnUrl, mediaId);
+      } catch (IllegalArgumentException enumEx) {
+        logger.warn("ProcessingEmailHelper.ServiceType.SUBTITLE not defined — add it to enable emails.");
+      } catch (Exception emailEx) {
+        logger.warn("Failed to send completion email for mediaId {}: {}", mediaId, emailEx.getMessage());
+      }
+
+      logger.info("Successfully processed subtitles for user: {}, mediaId: {}", user.getId(), mediaId);
+      return subtitleMedia;
+
+    } catch (Exception e) {
+      logger.error("Failed to process subtitles for mediaId {}: {}", mediaId, e.getMessage(), e);
+      subtitleMedia.setStatus("FAILED");
+      subtitleMedia.setProgress(0.0);
+      subtitleMediaRepository.save(subtitleMedia);
+      if (e instanceof IOException) throw (IOException) e;
+      if (e instanceof InterruptedException) throw (InterruptedException) e;
+      throw new IOException("Subtitle processing failed: " + e.getMessage(), e);
+
+    } finally {
+      cleanUpTempDir(tempDir);
+    }
   }
 
-  public SubtitleMedia updateSingleSubtitle(User user, Long mediaId, String subtitleId, SubtitleDTO updatedSubtitle) throws IOException {
-    logger.info("Updating single subtitle for user: {}, mediaId: {}, subtitleId: {}", user.getId(), mediaId, subtitleId);
+  // ══════════════════════════════════════════════════════════════════════════
+  //  SUBTITLE EDIT METHODS  (unchanged business logic, kept intact)
+  // ══════════════════════════════════════════════════════════════════════════
 
-    SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
-            .orElseThrow(() -> {
-              logger.error("Media not found for id: {}", mediaId);
-              return new IllegalArgumentException("Media not found");
-            });
-
-    if (!subtitleMedia.getUser().getId().equals(user.getId())) {
-      logger.error("User {} not authorized to update subtitle for media {}", user.getId(), mediaId);
-      throw new IllegalArgumentException("Not authorized to update subtitles for this media");
-    }
+  public SubtitleMedia updateSingleSubtitle(User user, Long mediaId, String subtitleId,
+                                            SubtitleDTO updatedSubtitle) throws IOException {
+    SubtitleMedia subtitleMedia = getAuthorizedMedia(user, mediaId);
 
     if (subtitleMedia.getSubtitlesJson() == null || subtitleMedia.getSubtitlesJson().isEmpty()) {
-      logger.error("No subtitles available for mediaId: {}", mediaId);
       throw new IllegalStateException("No subtitles available to update");
     }
 
-    List<SubtitleDTO> subtitles = objectMapper.readValue(subtitleMedia.getSubtitlesJson(), new TypeReference<List<SubtitleDTO>>() {});
-    boolean subtitleFound = false;
+    List<SubtitleDTO> subtitles = objectMapper.readValue(
+            subtitleMedia.getSubtitlesJson(), new TypeReference<List<SubtitleDTO>>() {});
+    boolean found = false;
 
     for (int i = 0; i < subtitles.size(); i++) {
       if (subtitles.get(i).getId().equals(subtitleId)) {
-        SubtitleDTO existingSubtitle = subtitles.get(i);
+        SubtitleDTO existing = subtitles.get(i);
+        if (updatedSubtitle.getText()                  != null) existing.setText(updatedSubtitle.getText());
+        if (updatedSubtitle.getTimelineStartTime()     != null) existing.setTimelineStartTime(updatedSubtitle.getTimelineStartTime());
+        if (updatedSubtitle.getTimelineEndTime()       != null) existing.setTimelineEndTime(updatedSubtitle.getTimelineEndTime());
+        if (updatedSubtitle.getFontFamily()            != null) existing.setFontFamily(updatedSubtitle.getFontFamily());
+        if (updatedSubtitle.getFontColor()             != null) existing.setFontColor(updatedSubtitle.getFontColor());
+        if (updatedSubtitle.getBackgroundColor()       != null) existing.setBackgroundColor(updatedSubtitle.getBackgroundColor());
+        if (updatedSubtitle.getScale()                 != null) existing.setScale(updatedSubtitle.getScale());
+        if (updatedSubtitle.getBackgroundOpacity()     != null) existing.setBackgroundOpacity(updatedSubtitle.getBackgroundOpacity());
+        if (updatedSubtitle.getPositionX()             != null) existing.setPositionX(updatedSubtitle.getPositionX());
+        if (updatedSubtitle.getPositionY()             != null) existing.setPositionY(updatedSubtitle.getPositionY());
+        if (updatedSubtitle.getAlignment()             != null) existing.setAlignment(updatedSubtitle.getAlignment());
+        if (updatedSubtitle.getOpacity()               != null) existing.setOpacity(updatedSubtitle.getOpacity());
+        if (updatedSubtitle.getRotation()              != null) existing.setRotation(updatedSubtitle.getRotation());
+        if (updatedSubtitle.getBackgroundH()           != null) existing.setBackgroundH(updatedSubtitle.getBackgroundH());
+        if (updatedSubtitle.getBackgroundW()           != null) existing.setBackgroundW(updatedSubtitle.getBackgroundW());
+        if (updatedSubtitle.getBackgroundBorderRadius()!= null) existing.setBackgroundBorderRadius(updatedSubtitle.getBackgroundBorderRadius());
+        if (updatedSubtitle.getBackgroundBorderWidth() != null) existing.setBackgroundBorderWidth(updatedSubtitle.getBackgroundBorderWidth());
+        if (updatedSubtitle.getBackgroundBorderColor() != null) existing.setBackgroundBorderColor(updatedSubtitle.getBackgroundBorderColor());
+        if (updatedSubtitle.getTextBorderColor()       != null) existing.setTextBorderColor(updatedSubtitle.getTextBorderColor());
+        if (updatedSubtitle.getTextBorderWidth()       != null) existing.setTextBorderWidth(updatedSubtitle.getTextBorderWidth());
+        if (updatedSubtitle.getTextBorderOpacity()     != null) existing.setTextBorderOpacity(updatedSubtitle.getTextBorderOpacity());
+        if (updatedSubtitle.getLetterSpacing()         != null) existing.setLetterSpacing(updatedSubtitle.getLetterSpacing());
+        if (updatedSubtitle.getLineSpacing()           != null) existing.setLineSpacing(updatedSubtitle.getLineSpacing());
 
-        // Merge only non-null fields from updatedSubtitle
-        if (updatedSubtitle.getText() != null) existingSubtitle.setText(updatedSubtitle.getText());
-        if (updatedSubtitle.getTimelineStartTime() != null) existingSubtitle.setTimelineStartTime(updatedSubtitle.getTimelineStartTime());
-        if (updatedSubtitle.getTimelineEndTime() != null) existingSubtitle.setTimelineEndTime(updatedSubtitle.getTimelineEndTime());
-        if (updatedSubtitle.getFontFamily() != null) existingSubtitle.setFontFamily(updatedSubtitle.getFontFamily());
-        if (updatedSubtitle.getFontColor() != null) existingSubtitle.setFontColor(updatedSubtitle.getFontColor());
-        if (updatedSubtitle.getBackgroundColor() != null) existingSubtitle.setBackgroundColor(updatedSubtitle.getBackgroundColor());
-        if (updatedSubtitle.getScale() != null) existingSubtitle.setScale(updatedSubtitle.getScale());
-        if (updatedSubtitle.getBackgroundOpacity() != null) existingSubtitle.setBackgroundOpacity(updatedSubtitle.getBackgroundOpacity());
-        if (updatedSubtitle.getPositionX() != null) existingSubtitle.setPositionX(updatedSubtitle.getPositionX());
-        if (updatedSubtitle.getPositionY() != null) existingSubtitle.setPositionY(updatedSubtitle.getPositionY());
-        if (updatedSubtitle.getAlignment() != null) existingSubtitle.setAlignment(updatedSubtitle.getAlignment());
-        if (updatedSubtitle.getOpacity() != null) existingSubtitle.setOpacity(updatedSubtitle.getOpacity());
-        if (updatedSubtitle.getRotation() != null) existingSubtitle.setRotation(updatedSubtitle.getRotation());
-        if (updatedSubtitle.getBackgroundH() != null) existingSubtitle.setBackgroundH(updatedSubtitle.getBackgroundH());
-        if (updatedSubtitle.getBackgroundW() != null) existingSubtitle.setBackgroundW(updatedSubtitle.getBackgroundW());
-        if (updatedSubtitle.getBackgroundBorderRadius() != null) existingSubtitle.setBackgroundBorderRadius(updatedSubtitle.getBackgroundBorderRadius());
-        if (updatedSubtitle.getBackgroundBorderWidth() != null) existingSubtitle.setBackgroundBorderWidth(updatedSubtitle.getBackgroundBorderWidth());
-        if (updatedSubtitle.getBackgroundBorderColor() != null) existingSubtitle.setBackgroundBorderColor(updatedSubtitle.getBackgroundBorderColor());
-        if (updatedSubtitle.getTextBorderColor() != null) existingSubtitle.setTextBorderColor(updatedSubtitle.getTextBorderColor());
-        if (updatedSubtitle.getTextBorderWidth() != null) existingSubtitle.setTextBorderWidth(updatedSubtitle.getTextBorderWidth());
-        if (updatedSubtitle.getTextBorderOpacity() != null) existingSubtitle.setTextBorderOpacity(updatedSubtitle.getTextBorderOpacity());
-        if (updatedSubtitle.getLetterSpacing() != null) existingSubtitle.setLetterSpacing(updatedSubtitle.getLetterSpacing());
-        if (updatedSubtitle.getLineSpacing() != null) existingSubtitle.setLineSpacing(updatedSubtitle.getLineSpacing());
-
-        if (existingSubtitle.getTimelineEndTime() <= existingSubtitle.getTimelineStartTime()) {
-          logger.error("Invalid subtitle timing for mediaId: {}, subtitleId: {}", mediaId, subtitleId);
+        if (existing.getTimelineEndTime() <= existing.getTimelineStartTime()) {
           throw new IllegalArgumentException("End time must be greater than start time");
         }
-
-        subtitles.set(i, existingSubtitle);
-        subtitleFound = true;
+        subtitles.set(i, existing);
+        found = true;
         break;
       }
     }
 
-    if (!subtitleFound) {
-      logger.error("Subtitle with id {} not found for mediaId: {}", subtitleId, mediaId);
-      throw new IllegalArgumentException("Subtitle with id " + subtitleId + " not found");
-    }
+    if (!found) throw new IllegalArgumentException("Subtitle with id " + subtitleId + " not found");
 
     subtitleMedia.setSubtitlesJson(objectMapper.writeValueAsString(subtitles));
     subtitleMedia.setStatus("SUCCESS");
     subtitleMediaRepository.save(subtitleMedia);
-
-    logger.info("Successfully updated subtitle for user: {}, mediaId: {}, subtitleId: {}", user.getId(), mediaId, subtitleId);
     return subtitleMedia;
   }
 
-  public SubtitleMedia updateMultipleSubtitles(User user, Long mediaId, List<SubtitleDTO> updatedSubtitles) throws IOException {
-    logger.info("Updating multiple subtitles for user: {}, mediaId: {}", user.getId(), mediaId);
-
-    SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
-            .orElseThrow(() -> {
-              logger.error("Media not found for id: {}", mediaId);
-              return new IllegalArgumentException("Media not found");
-            });
-
-    if (!subtitleMedia.getUser().getId().equals(user.getId())) {
-      logger.error("User {} not authorized to update subtitles for media {}", user.getId(), mediaId);
-      throw new IllegalArgumentException("Not authorized to update subtitles for this media");
-    }
+  public SubtitleMedia updateMultipleSubtitles(User user, Long mediaId,
+                                               List<SubtitleDTO> updatedSubtitles) throws IOException {
+    SubtitleMedia subtitleMedia = getAuthorizedMedia(user, mediaId);
 
     if (updatedSubtitles == null || updatedSubtitles.isEmpty()) {
-      logger.error("Updated subtitles list is null or empty for mediaId: {}", mediaId);
       throw new IllegalArgumentException("Subtitles list cannot be empty");
     }
-
-    for (SubtitleDTO subtitle : updatedSubtitles) {
-      if (subtitle.getId() == null || subtitle.getText() == null || subtitle.getText().trim().isEmpty()) {
-        logger.error("Invalid subtitle data for mediaId: {}", mediaId);
+    for (SubtitleDTO s : updatedSubtitles) {
+      if (s.getId() == null || s.getText() == null || s.getText().trim().isEmpty()) {
         throw new IllegalArgumentException("Subtitle id and text cannot be empty");
       }
-      if (subtitle.getTimelineEndTime() <= subtitle.getTimelineStartTime()) {
-        logger.error("Invalid subtitle timing for mediaId: {}", mediaId);
-        throw new IllegalArgumentException("End time must be greater than start time for subtitle id: " + subtitle.getId());
+      if (s.getTimelineEndTime() <= s.getTimelineStartTime()) {
+        throw new IllegalArgumentException("End time must be > start time for subtitle id: " + s.getId());
       }
     }
 
-    List<SubtitleDTO> subtitles = objectMapper.readValue(subtitleMedia.getSubtitlesJson(), new TypeReference<List<SubtitleDTO>>() {});
-    Map<String, SubtitleDTO> updatedSubtitlesMap = new HashMap<>();
-    for (SubtitleDTO updatedSubtitle : updatedSubtitles) {
-      updatedSubtitlesMap.put(updatedSubtitle.getId(), updatedSubtitle);
-    }
-
-    for (int i = 0; i < subtitles.size(); i++) {
-      SubtitleDTO existingSubtitle = subtitles.get(i);
-      if (updatedSubtitlesMap.containsKey(existingSubtitle.getId())) {
-        subtitles.set(i, updatedSubtitlesMap.get(existingSubtitle.getId()));
+    List<SubtitleDTO> existing = objectMapper.readValue(
+            subtitleMedia.getSubtitlesJson(), new TypeReference<List<SubtitleDTO>>() {});
+    Map<String, SubtitleDTO> updateMap = new HashMap<>();
+    updatedSubtitles.forEach(s -> updateMap.put(s.getId(), s));
+    for (int i = 0; i < existing.size(); i++) {
+      if (updateMap.containsKey(existing.get(i).getId())) {
+        existing.set(i, updateMap.get(existing.get(i).getId()));
       }
     }
 
-    subtitleMedia.setSubtitlesJson(objectMapper.writeValueAsString(subtitles));
+    subtitleMedia.setSubtitlesJson(objectMapper.writeValueAsString(existing));
     subtitleMedia.setStatus("SUCCESS");
     subtitleMediaRepository.save(subtitleMedia);
-
-    logger.info("Successfully updated multiple subtitles for user: {}, mediaId: {}", user.getId(), mediaId);
     return subtitleMedia;
   }
 
-  public SubtitleMedia updateAllSubtitles(User user, Long mediaId, Map<String, String> styleParams) throws IOException {
-    logger.info("Updating all subtitles for user: {}, mediaId: {}", user.getId(), mediaId);
-
-    SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
-            .orElseThrow(() -> {
-              logger.error("Media not found for id: {}", mediaId);
-              return new IllegalArgumentException("Media not found");
-            });
-
-    if (!subtitleMedia.getUser().getId().equals(user.getId())) {
-      logger.error("User {} not authorized to update subtitles for media {}", user.getId(), mediaId);
-      throw new IllegalArgumentException("Not authorized to update subtitles for this media");
-    }
+  public SubtitleMedia updateAllSubtitles(User user, Long mediaId,
+                                          Map<String, String> styleParams) throws IOException {
+    SubtitleMedia subtitleMedia = getAuthorizedMedia(user, mediaId);
 
     if (subtitleMedia.getSubtitlesJson() == null || subtitleMedia.getSubtitlesJson().isEmpty()) {
-      logger.error("No subtitles available for mediaId: {}", mediaId);
       throw new IllegalStateException("No subtitles available to update");
     }
 
-    List<SubtitleDTO> subtitles = objectMapper.readValue(subtitleMedia.getSubtitlesJson(), new TypeReference<List<SubtitleDTO>>() {});
-    for (SubtitleDTO subtitle : subtitles) {
-      subtitle.setFontFamily(styleParams.getOrDefault("fontFamily", subtitle.getFontFamily()));
-      subtitle.setFontColor(styleParams.getOrDefault("fontColor", subtitle.getFontColor()));
-      subtitle.setBackgroundColor(styleParams.getOrDefault("backgroundColor", subtitle.getBackgroundColor()));
+    List<SubtitleDTO> subtitles = objectMapper.readValue(
+            subtitleMedia.getSubtitlesJson(), new TypeReference<List<SubtitleDTO>>() {});
+    for (SubtitleDTO s : subtitles) {
+      s.setFontFamily(styleParams.getOrDefault("fontFamily", s.getFontFamily()));
+      s.setFontColor(styleParams.getOrDefault("fontColor", s.getFontColor()));
+      s.setBackgroundColor(styleParams.getOrDefault("backgroundColor", s.getBackgroundColor()));
     }
 
     subtitleMedia.setSubtitlesJson(objectMapper.writeValueAsString(subtitles));
     subtitleMedia.setStatus("SUCCESS");
     subtitleMediaRepository.save(subtitleMedia);
-
-    logger.info("Successfully updated all subtitles for user: {}, mediaId: {}", user.getId(), mediaId);
     return subtitleMedia;
   }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  QUERY HELPERS
+  // ══════════════════════════════════════════════════════════════════════════
 
   public List<SubtitleMedia> getUserSubtitleMedia(User user) {
     return subtitleMediaRepository.findByUser(user);
@@ -372,1614 +583,920 @@ public class SubtitleService {
   public User getUserFromToken(String token) {
     String email = jwtUtil.extractEmail(token.substring(7));
     return userRepository.findByEmail(email)
-            .orElseThrow(() -> {
-              logger.error("User not found for email extracted from token");
-              return new RuntimeException("User not found");
-            });
+            .orElseThrow(() -> new RuntimeException("User not found"));
   }
 
-  // Internal methods for SQS worker to process tasks
-  public SubtitleMedia generateSubtitlesTask(Long mediaId, Long userId, Map<String, String> styleParams) throws IOException, InterruptedException {
-    logger.info("Processing subtitle generation task for mediaId: {}, userId: {}", mediaId, userId);
+  // ══════════════════════════════════════════════════════════════════════════
+  //  AUDIO / VIDEO UTILITIES
+  // ══════════════════════════════════════════════════════════════════════════
 
-    SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
-            .orElseThrow(() -> {
-              logger.error("Media not found for id: {}", mediaId);
-              return new IllegalArgumentException("Media not found");
-            });
+  public String extractAudio(File inputFile, Long mediaId) throws IOException, InterruptedException {
+    Path audioDir = Paths.get(baseDir).resolve("temp/subtitle-audio/" + mediaId).toAbsolutePath();
+    Files.createDirectories(audioDir);
 
-    if (!subtitleMedia.getUser().getId().equals(userId)) {
-      logger.error("User {} not authorized to generate subtitles for media {}", userId, mediaId);
-      throw new IllegalArgumentException("Not authorized to generate subtitles for this media");
-    }
-
-    subtitleMedia.setStatus("PROCESSING");
-    subtitleMediaRepository.save(subtitleMedia);
-
-    String absoluteBaseDir = baseDir.startsWith("/") ? baseDir : "/" + baseDir;
-    String tempInputPath = absoluteBaseDir + File.separator + "videoeditor" + File.separator + "input-" + System.currentTimeMillis() + "-" + subtitleMedia.getOriginalFileName();
-    String r2AudioPath = String.format("subtitles/%s/temp/%s/audio_%s.mp3", userId, mediaId, System.currentTimeMillis());
-
-    File inputFile = null;
-    File audioFile = null;
-    try {
-      inputFile = cloudflareR2Service.downloadFileWithRetry(subtitleMedia.getOriginalPath(), tempInputPath, 3);
-      logger.debug("Downloaded media to: {}", inputFile.getAbsolutePath());
-
-      if (!inputFile.exists() || inputFile.length() == 0) {
-        logger.error("Input file is missing or empty: {}", tempInputPath);
-        subtitleMedia.setStatus("FAILED");
-        subtitleMediaRepository.save(subtitleMedia);
-        throw new IOException("Input file is missing or empty");
-      }
-
-      audioFile = new File(absoluteBaseDir + File.separator + "videoeditor" + File.separator + "audio_" + System.currentTimeMillis() + ".mp3");
-      extractAudio(inputFile, audioFile.getAbsolutePath());
-      cloudflareR2Service.uploadFile(r2AudioPath, audioFile);
-
-      double audioDuration = getAudioDuration(audioFile);
-      if (audioDuration <= 0) {
-        logger.error("Audio file has invalid duration: {}", audioFile.getAbsolutePath());
-        subtitleMedia.setStatus("FAILED");
-        subtitleMediaRepository.save(subtitleMedia);
-        throw new IOException("Audio file has invalid duration");
-      }
-
-      List<Map<String, Object>> rawSubtitles = runWhisperScript(audioFile);
-      if (rawSubtitles.isEmpty()) {
-        logger.warn("No subtitles generated for mediaId: {}", mediaId);
-        subtitleMedia.setStatus("FAILED");
-        subtitleMediaRepository.save(subtitleMedia);
-        throw new IOException("No subtitles generated");
-      }
-
-      List<SubtitleDTO> subtitles = new ArrayList<>();
-      for (Map<String, Object> raw : rawSubtitles) {
-        double startTime = ((Number) raw.get("start")).doubleValue();
-        double endTime = ((Number) raw.get("end")).doubleValue();
-        String text = (String) raw.get("text");
-
-        startTime = Math.max(0, startTime);
-        endTime = Math.min(audioDuration, endTime);
-
-        if (endTime > startTime && text != null && !text.trim().isEmpty()) {
-          SubtitleDTO subtitle = new SubtitleDTO();
-          subtitle.setId(UUID.randomUUID().toString());
-          subtitle.setTimelineStartTime(startTime);
-          subtitle.setTimelineEndTime(endTime);
-          subtitle.setText(text.trim());
-
-          subtitle.setFontFamily(styleParams != null && styleParams.containsKey("fontFamily") ?
-                  styleParams.get("fontFamily") : "Montserrat Alternates Black");
-          subtitle.setFontColor(styleParams != null && styleParams.containsKey("fontColor") ?
-                  styleParams.get("fontColor") : "black");
-          subtitle.setBackgroundColor(styleParams != null && styleParams.containsKey("backgroundColor") ?
-                  styleParams.get("backgroundColor") : "white");
-          subtitle.setBackgroundOpacity(1.0);
-          subtitle.setPositionX(0);
-          subtitle.setPositionY(500);
-          subtitle.setAlignment("center");
-          subtitle.setScale(1.5);
-          subtitle.setBackgroundH(20);
-          subtitle.setBackgroundW(40);
-          subtitle.setBackgroundBorderRadius(12);
-
-          subtitles.add(subtitle);
-        }
-      }
-
-      subtitleMedia.setSubtitlesJson(objectMapper.writeValueAsString(subtitles));
-      subtitleMedia.setStatus("SUCCESS");
-      subtitleMediaRepository.save(subtitleMedia);
-
-      logger.info("Successfully generated subtitles for mediaId: {}", mediaId);
-      return subtitleMedia;
-
-    } finally {
-      if (audioFile != null && audioFile.exists()) {
-        try {
-          Files.delete(audioFile.toPath());
-          logger.debug("Deleted temporary audio file: {}", audioFile.getAbsolutePath());
-        } catch (IOException e) {
-          logger.warn("Failed to delete temporary audio file: {}", audioFile.getAbsolutePath(), e);
-        }
-      }
-      if (inputFile != null && inputFile.exists()) {
-        try {
-          Files.delete(inputFile.toPath());
-          logger.debug("Deleted temporary input file: {}", inputFile.getAbsolutePath());
-        } catch (IOException e) {
-          logger.warn("Failed to delete temporary input file: {}", inputFile.getAbsolutePath(), e);
-        }
-      }
-      try {
-        cloudflareR2Service.deleteFile(r2AudioPath);
-        logger.debug("Deleted temporary audio file from R2: {}", r2AudioPath);
-      } catch (IOException e) {
-        logger.warn("Failed to delete temporary audio file from R2: {}", r2AudioPath, e);
-      }
-    }
-  }
-
-  public SubtitleMedia processSubtitlesTask(Long mediaId, Long userId, String quality) throws IOException, InterruptedException {
-    logger.info("Processing subtitles task for mediaId: {}, userId: {}, quality: {}", mediaId, userId, quality);
-
-    SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
-            .orElseThrow(() -> {
-              logger.error("Media not found for id: {}", mediaId);
-              return new IllegalArgumentException("Media not found");
-            });
-
-    if (!subtitleMedia.getUser().getId().equals(userId)) {
-      logger.error("User {} not authorized to process subtitles for media {}", userId, mediaId);
-      throw new IllegalArgumentException("Not authorized to process subtitles for this media");
-    }
-
-    subtitleMedia.setStatus("PROCESSING");
-    subtitleMedia.setProgress(0.0);
-    subtitleMediaRepository.save(subtitleMedia);
-
-    String absoluteBaseDir = baseDir.startsWith("/") ? baseDir : "/" + baseDir;
-    String tempInputPath = absoluteBaseDir + File.separator + "videoeditor" + File.separator + "input-" + System.currentTimeMillis() + "-" + subtitleMedia.getOriginalFileName();
-    String outputFileName = "subtitled_" + subtitleMedia.getOriginalFileName();
-    String tempOutputPath = absoluteBaseDir + File.separator + "videoeditor" + File.separator + outputFileName;
-    String r2ProcessedPath = String.format("subtitles/%s/processed/%s", userId, outputFileName);
-
-    File inputFile = null;
-    File outputFile = null;
-    try {
-      inputFile = cloudflareR2Service.downloadFileWithRetry(subtitleMedia.getOriginalPath(), tempInputPath, 3);
-      logger.debug("Downloaded media to: {}", inputFile.getAbsolutePath());
-
-      if (!inputFile.exists() || inputFile.length() == 0) {
-        logger.error("Input file is missing or empty: {}", tempInputPath);
-        subtitleMedia.setStatus("FAILED");
-        subtitleMediaRepository.save(subtitleMedia);
-        throw new IOException("Input file is missing or empty");
-      }
-
-      validateInputFile(inputFile);
-
-      double totalDuration = getVideoDuration(inputFile);
-      if (totalDuration <= 0) {
-        logger.error("Invalid video duration: {}", totalDuration);
-        subtitleMedia.setStatus("FAILED");
-        subtitleMediaRepository.save(subtitleMedia);
-        throw new IOException("Invalid video duration");
-      }
-
-
-      String finalQuality = quality != null ? quality : "720p";
-      subtitleMedia.setQuality(finalQuality);
-
-      Map<String, Object> videoInfo = getVideoInfo(inputFile);
-      int canvasWidth = (int) videoInfo.get("width");
-      int canvasHeight = (int) videoInfo.get("height");
-      float fps = (float) videoInfo.get("fps");
-
-      List<SubtitleDTO> subtitles = objectMapper.readValue(subtitleMedia.getSubtitlesJson(), new TypeReference<List<SubtitleDTO>>() {});
-      if (subtitles.isEmpty()) {
-        logger.error("No valid subtitles to process for mediaId: {}", mediaId);
-        subtitleMedia.setStatus("FAILED");
-        subtitleMediaRepository.save(subtitleMedia);
-        throw new IOException("No valid subtitles to process");
-      }
-
-      outputFile = new File(tempOutputPath);
-      Files.createDirectories(outputFile.toPath().getParent());
-      renderSubtitledVideo(inputFile, outputFile, subtitles, canvasWidth, canvasHeight, fps, mediaId, totalDuration, finalQuality);
-
-      cloudflareR2Service.uploadFile(r2ProcessedPath, outputFile);
-      logger.info("Uploaded processed media to R2: {}", r2ProcessedPath);
-
-      Map<String, String> processedUrls = cloudflareR2Service.generateUrls(r2ProcessedPath, 3600);
-      subtitleMedia.setProcessedFileName(outputFileName);
-      subtitleMedia.setProcessedPath(r2ProcessedPath);
-      subtitleMedia.setProcessedCdnUrl(processedUrls.get("cdnUrl"));
-      subtitleMedia.setStatus("SUCCESS");
-      subtitleMedia.setProgress(100.0);
-      subtitleMediaRepository.save(subtitleMedia);
-
-
-      // ---- NEW: SEND EMAIL ----
-      try {
-        User user = subtitleMedia.getUser();
-        Map<String, String> vars = Map.of(
-                "userName",         Optional.ofNullable(user.getName()).orElse("Creator"),
-                "originalFileName", subtitleMedia.getOriginalFileName(),
-                "downloadUrl",      subtitleMedia.getProcessedCdnUrl()
-        );
-
-        emailHelper.sendProcessingCompleteEmail(
-                subtitleMedia.getUser(),
-                ProcessingEmailHelper.ServiceType.SUBTITLE,
-                subtitleMedia.getOriginalFileName(),
-                subtitleMedia.getProcessedCdnUrl(),
-                mediaId
-        );
-
-        logger.info("Processing-complete email sent to {} for mediaId {}", user.getEmail(), mediaId);
-      } catch (Exception e) {
-        logger.error("Failed to send processing-complete email for mediaId {}", mediaId, e);
-        // Email failure does NOT affect video processing
-      }
-
-      logger.info("Successfully processed subtitles for mediaId: {}", mediaId);
-      return subtitleMedia;
-
-    } catch (Exception e) {
-      logger.error("Failed to process subtitles for mediaId {}: {}", mediaId, e.getMessage(), e);
-      subtitleMedia.setStatus("FAILED");
-      subtitleMedia.setProgress(0.0);
-      subtitleMediaRepository.save(subtitleMedia);
-      throw e;
-    } finally {
-      if (inputFile != null && inputFile.exists()) {
-        try {
-          Files.delete(inputFile.toPath());
-          logger.debug("Deleted temporary input file: {}", inputFile.getAbsolutePath());
-        } catch (IOException e) {
-          logger.warn("Failed to delete temporary input file: {}", inputFile.getAbsolutePath(), e);
-        }
-      }
-      if (outputFile != null && outputFile.exists()) {
-        try {
-          Files.delete(outputFile.toPath());
-          logger.debug("Deleted temporary output file: {}", outputFile.getAbsolutePath());
-        } catch (IOException e) {
-          logger.warn("Failed to delete temporary output file: {}", outputFile.getAbsolutePath(), e);
-        }
-      }
-    }
-  }
-
-  private double getAudioDuration(File audioFile) throws IOException, InterruptedException {
+    String audioFilePath = audioDir.resolve("audio_" + System.currentTimeMillis() + ".mp3").toString();
     List<String> command = Arrays.asList(
-            ffmpegPath.replace("ffmpeg", "ffprobe"),
-            "-i", audioFile.getAbsolutePath(),
-            "-show_entries", "format=duration",
-            "-v", "quiet",
-            "-of", "json"
-    );
+            ffmpegPath, "-i", inputFile.getAbsolutePath(),
+            "-vn", "-acodec", "mp3", "-y", audioFilePath);
 
-    logger.debug("Executing FFprobe command for audio duration: {}", String.join(" ", command));
-    ProcessBuilder pb = new ProcessBuilder(command);
-    pb.redirectErrorStream(true);
-    Process process = pb.start();
-    StringBuilder output = new StringBuilder();
-    try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-      String line;
-      while ((line = reader.readLine()) != null) {
-        output.append(line);
-        logger.debug("FFprobe output: {}", line);
-      }
-    }
-    int exitCode = process.waitFor();
-    if (exitCode != 0) {
-      logger.error("FFprobe failed to get audio duration for {}: {}", audioFile.getAbsolutePath(), output.toString());
-      throw new IOException("FFprobe failed to get audio duration: " + output.toString());
-    }
-
-    try {
-      Map<String, Object> result = objectMapper.readValue(output.toString(), new TypeReference<Map<String, Object>>() {});
-      Map<String, Object> format = (Map<String, Object>) result.get("format");
-      if (format == null || !format.containsKey("duration")) {
-        logger.error("No duration found in FFprobe output for {}: {}", audioFile.getAbsolutePath(), output.toString());
-        throw new IOException("No duration found in FFprobe output");
-      }
-      return Double.parseDouble(format.get("duration").toString());
-    } catch (JsonProcessingException e) {
-      logger.error("Failed to parse FFprobe output for {}: {}", audioFile.getAbsolutePath(), output.toString());
-      throw new IOException("Failed to parse FFprobe output: " + output.toString());
-    }
-  }
-
-  private void extractAudio(File inputFile, String audioFilePath) throws IOException, InterruptedException {
-    List<String> command = Arrays.asList(
-            ffmpegPath,
-            "-i", inputFile.getAbsolutePath(),
-            "-vn", "-acodec", "mp3",
-            "-y", audioFilePath
-    );
-
-    logger.debug("Executing FFmpeg command for audio extraction: {}", String.join(" ", command));
-    ProcessBuilder pb = new ProcessBuilder(command);
-    pb.redirectErrorStream(true);
-    Process process = pb.start();
-
-    StringBuilder output = new StringBuilder();
-    try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-      String line;
-      while ((line = reader.readLine()) != null) {
-        output.append(line).append("\n");
-        logger.debug("FFmpeg audio extraction output: {}", line);
-      }
-    }
-
-    int exitCode = process.waitFor();
-    if (exitCode != 0) {
-      logger.error("FFmpeg audio extraction failed with exit code {}: {}", exitCode, output.toString());
-      throw new IOException("FFmpeg audio extraction failed: " + output.toString());
-    }
+    runProcess(command, "FFmpeg audio extraction");
 
     File audioFile = new File(audioFilePath);
     if (!audioFile.exists() || audioFile.length() == 0) {
-      logger.error("Audio file not created or empty: {}", audioFilePath);
       throw new IOException("Audio file not created or empty: " + audioFilePath);
     }
 
-    List<String> probeCommand = Arrays.asList(
-            ffmpegPath.replace("ffmpeg", "ffprobe"),
-            "-i", audioFilePath,
-            "-show_streams",
-            "-select_streams", "a",
-            "-print_format", "json",
-            "-v", "quiet"
-    );
-    ProcessBuilder probePb = new ProcessBuilder(probeCommand);
-    probePb.redirectErrorStream(true);
-    Process probeProcess = probePb.start();
-    StringBuilder probeOutput = new StringBuilder();
-    try (BufferedReader reader = new BufferedReader(new InputStreamReader(probeProcess.getInputStream()))) {
-      String line;
-      while ((line = reader.readLine()) != null) {
-        probeOutput.append(line);
-      }
-    }
-    int probeExitCode = probeProcess.waitFor();
-    if (probeExitCode != 0) {
-      logger.error("FFprobe failed to verify audio stream for {}: {}", audioFilePath, probeOutput.toString());
-      throw new IOException("FFprobe failed to verify audio stream: " + probeOutput.toString());
-    }
+    // Verify audio stream
+    List<String> probeCmd = Arrays.asList(
+            getFfprobePath(), "-i", audioFilePath,
+            "-show_streams", "-select_streams", "a",
+            "-print_format", "json", "-v", "quiet");
 
-    try {
-      Map<String, Object> probeResult = objectMapper.readValue(probeOutput.toString(), new TypeReference<Map<String, Object>>() {});
-      List<?> streams = (List<?>) probeResult.getOrDefault("streams", Collections.emptyList());
-      if (streams.isEmpty()) {
-        logger.error("No audio stream found in file: {}", audioFilePath);
-        throw new IOException("No audio stream found in file: " + audioFilePath);
-      }
-    } catch (JsonProcessingException e) {
-      logger.error("Failed to parse FFprobe output for {}: {}", audioFilePath, probeOutput.toString());
-      throw new IOException("Failed to parse FFprobe output: " + probeOutput.toString());
+    String probeOut = runProcessGetOutput(probeCmd, "FFprobe audio verify");
+    Map<String, Object> probeResult = objectMapper.readValue(probeOut, new TypeReference<Map<String, Object>>() {});
+    List<?> streams = (List<?>) probeResult.getOrDefault("streams", Collections.emptyList());
+    if (streams.isEmpty()) {
+      throw new IOException("No audio stream found in file: " + audioFilePath);
     }
+    return audioFilePath;
   }
 
-  private List<Map<String, Object>> runWhisperScript(File audioFile) throws IOException, InterruptedException {
-    File scriptFile = new File(subtitleScriptPath);
-    if (!scriptFile.exists()) {
-      logger.error("Subtitle script not found: {}", scriptFile.getAbsolutePath());
-      throw new IOException("Subtitle script not found: " + scriptFile.getAbsolutePath());
-    }
+  public double getAudioDuration(File audioFile) throws IOException, InterruptedException {
+    return parseDurationFromFFprobe(audioFile.getAbsolutePath());
+  }
 
+  private double getVideoDuration(File videoFile) throws IOException, InterruptedException {
+    return parseDurationFromFFprobe(videoFile.getAbsolutePath());
+  }
+
+  private double parseDurationFromFFprobe(String filePath) throws IOException, InterruptedException {
     List<String> command = Arrays.asList(
-            pythonPath,
-            scriptFile.getAbsolutePath(),
-            audioFile.getAbsolutePath()
-    );
+            getFfprobePath(), "-i", filePath,
+            "-show_entries", "format=duration",
+            "-v", "quiet", "-of", "json");
 
-    logger.debug("Executing Whisper command: {}", String.join(" ", command));
-    ProcessBuilder pb = new ProcessBuilder(command);
-    pb.redirectErrorStream(false);
-    Process process = pb.start();
+    String output = runProcessGetOutput(command, "FFprobe duration");
 
-    StringBuilder output = new StringBuilder();
-    StringBuilder errorOutput = new StringBuilder();
-
-    try (BufferedReader stdoutReader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-         BufferedReader stderrReader = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
-      String line;
-      while ((line = stdoutReader.readLine()) != null) {
-        output.append(line);
-        logger.debug("Whisper stdout: {}", line);
-      }
-      while ((line = stderrReader.readLine()) != null) {
-        errorOutput.append(line).append("\n");
-        logger.debug("Whisper stderr: {}", line);
-      }
+    Map<String, Object> result = objectMapper.readValue(output, new TypeReference<Map<String, Object>>() {});
+    @SuppressWarnings("unchecked")
+    Map<String, Object> format = (Map<String, Object>) result.get("format");
+    if (format == null || !format.containsKey("duration")) {
+      throw new IOException("No duration found in FFprobe output for: " + filePath);
     }
+    return Double.parseDouble(format.get("duration").toString());
+  }
 
-    int exitCode = process.waitFor();
-    if (exitCode != 0) {
-      logger.error("Whisper script failed with exit code {}: {}", exitCode, errorOutput.toString());
-      throw new IOException("Whisper transcription failed with exit code " + exitCode + ": " + errorOutput.toString());
-    }
+  private void validateInputFile(File inputFile) throws IOException, InterruptedException {
+    List<String> command = Arrays.asList(
+            getFfprobePath(), "-i", inputFile.getAbsolutePath(),
+            "-show_streams", "-show_format",
+            "-print_format", "json", "-v", "quiet");
 
-    String outputStr = output.toString().trim();
-    if (outputStr.isEmpty()) {
-      logger.warn("No output from Whisper script: {}", errorOutput.toString());
-      throw new IOException("No output from Whisper script: " + errorOutput.toString());
-    }
-
-    try {
-      List<Map<String, Object>> subtitles = objectMapper.readValue(outputStr, new TypeReference<List<Map<String, Object>>>() {});
-      logger.debug("Parsed {} subtitles from Whisper output", subtitles.size());
-      return subtitles;
-    } catch (JsonProcessingException e) {
-      logger.error("Failed to parse Whisper output as JSON: {}. Output: {}. Stderr: {}", e.getMessage(), outputStr, errorOutput.toString());
-      throw new IOException("Invalid JSON output from Whisper script: " + outputStr, e);
+    String output = runProcessGetOutput(command, "FFprobe validate input");
+    Map<String, Object> result = objectMapper.readValue(output, new TypeReference<Map<String, Object>>() {});
+    List<?> streams = (List<?>) result.getOrDefault("streams", Collections.emptyList());
+    if (streams.isEmpty()) {
+      throw new IOException("No streams found in input file: " + inputFile.getAbsolutePath());
     }
   }
 
   private Map<String, Object> getVideoInfo(File inputFile) throws IOException, InterruptedException {
     List<String> command = Arrays.asList(
-            ffmpegPath,
-            "-i", inputFile.getAbsolutePath(),
-            "-f", "null",
-            "-"
-    );
+            ffmpegPath, "-i", inputFile.getAbsolutePath(), "-f", "null", "-");
 
     ProcessBuilder pb = new ProcessBuilder(command);
     pb.redirectErrorStream(true);
     Process process = pb.start();
-
     StringBuilder output = new StringBuilder();
     try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
       String line;
-      while ((line = reader.readLine()) != null) {
-        output.append(line).append("\n");
-      }
+      while ((line = reader.readLine()) != null) output.append(line).append("\n");
     }
+    process.waitFor();   // non-zero exit is expected for "-f null"
 
-    int exitCode = process.waitFor();
-    if (exitCode != 0) {
-      throw new IOException("FFmpeg failed to get video info: " + output.toString());
-    }
-
-    Map<String, Object> info = new HashMap<>();
     String outputStr = output.toString();
     Pattern resolutionPattern = Pattern.compile("Stream.*Video:.* (\\d+)x(\\d+).*?([0-9.]+) fps");
     Matcher matcher = resolutionPattern.matcher(outputStr);
-    if (matcher.find()) {
-      info.put("width", Integer.parseInt(matcher.group(1)));
-      info.put("height", Integer.parseInt(matcher.group(2)));
-      info.put("fps", Float.parseFloat(matcher.group(3)));
-    } else {
+    if (!matcher.find()) {
       throw new IOException("Could not parse video info from FFmpeg output");
     }
-
+    Map<String, Object> info = new HashMap<>();
+    info.put("width",  Integer.parseInt(matcher.group(1)));
+    info.put("height", Integer.parseInt(matcher.group(2)));
+    info.put("fps",    Float.parseFloat(matcher.group(3)));
     return info;
   }
 
-  private void validateInputFile(File inputFile) throws IOException, InterruptedException {
-    List<String> command = Arrays.asList(
-            ffmpegPath.replace("ffmpeg", "ffprobe"),
-            "-i", inputFile.getAbsolutePath(),
-            "-show_streams",
-            "-show_format",
-            "-print_format", "json",
-            "-v", "quiet"
-    );
+  // ══════════════════════════════════════════════════════════════════════════
+  //  WHISPER
+  // ══════════════════════════════════════════════════════════════════════════
+
+  public List<Map<String, Object>> runWhisperScript(File audioFile) throws IOException, InterruptedException {
+    File scriptFile = new File(subtitleScriptPath);
+    if (!scriptFile.exists()) {
+      throw new IOException("Subtitle script not found: " + scriptFile.getAbsolutePath());
+    }
+
+    List<String> command = Arrays.asList(pythonPath, scriptFile.getAbsolutePath(), audioFile.getAbsolutePath());
+    logger.debug("Executing Whisper command: {}", String.join(" ", command));
 
     ProcessBuilder pb = new ProcessBuilder(command);
-    pb.redirectErrorStream(true);
+    pb.redirectErrorStream(false);
     Process process = pb.start();
-    StringBuilder output = new StringBuilder();
-    try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-      String line;
-      while ((line = reader.readLine()) != null) {
-        output.append(line);
-      }
+
+    StringBuilder output      = new StringBuilder();
+    StringBuilder errorOutput = new StringBuilder();
+
+    Thread stdoutThread = new Thread(() -> {
+      try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+        String line;
+        while ((line = reader.readLine()) != null) {
+          synchronized (output) { output.append(line); }
+        }
+      } catch (IOException e) { logger.error("Error reading Whisper stdout: {}", e.getMessage()); }
+    });
+
+    Thread stderrThread = new Thread(() -> {
+      try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
+        String line;
+        while ((line = reader.readLine()) != null) {
+          synchronized (errorOutput) { errorOutput.append(line).append("\n"); }
+          logger.debug("Whisper stderr: {}", line);
+        }
+      } catch (IOException e) { logger.error("Error reading Whisper stderr: {}", e.getMessage()); }
+    });
+
+    stdoutThread.start();
+    stderrThread.start();
+
+    boolean finished = process.waitFor(15, TimeUnit.MINUTES);
+    stdoutThread.join(5000);
+    stderrThread.join(5000);
+
+    if (!finished) {
+      process.destroyForcibly();
+      throw new IOException("Whisper transcription timed out after 15 minutes");
     }
-    int exitCode = process.waitFor();
+
+    int exitCode = process.exitValue();
     if (exitCode != 0) {
-      logger.error("FFprobe failed to validate input file {}: {}", inputFile.getAbsolutePath(), output.toString());
-      throw new IOException("FFprobe failed to validate input file: " + output.toString());
+      throw new IOException("Whisper failed (exit " + exitCode + "): " + errorOutput);
+    }
+
+    String outputStr = output.toString().trim();
+    if (outputStr.isEmpty()) {
+      throw new IOException("No output from Whisper script. Stderr: " + errorOutput);
     }
 
     try {
-      Map<String, Object> result = objectMapper.readValue(output.toString(), new TypeReference<Map<String, Object>>() {});
-      List<?> streams = (List<?>) result.getOrDefault("streams", Collections.emptyList());
-      if (streams.isEmpty()) {
-        logger.error("No streams found in input file: {}", inputFile.getAbsolutePath());
-        throw new IOException("No streams found in input file");
-      }
+      return objectMapper.readValue(outputStr, new TypeReference<List<Map<String, Object>>>() {});
     } catch (JsonProcessingException e) {
-      logger.error("Failed to parse FFprobe output for {}: {}", inputFile.getAbsolutePath(), output.toString());
-      throw new IOException("Failed to parse FFprobe output: " + output.toString());
+      throw new IOException("Invalid JSON from Whisper: " + outputStr, e);
     }
   }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  VIDEO RENDERING  (batch + concat – same algorithm as local version)
+  // ══════════════════════════════════════════════════════════════════════════
 
   private void renderSubtitledVideo(File inputFile, File outputFile, List<SubtitleDTO> subtitles,
                                     int canvasWidth, int canvasHeight, float fps, Long mediaId,
                                     double totalDuration, String quality) throws IOException, InterruptedException {
-    String absoluteBaseDir = baseDir.startsWith("/") ? baseDir : "/" + baseDir;
-    File tempDir = new File(absoluteBaseDir + File.separator + "videoeditor" + File.separator + "temp" + File.separator + mediaId);
-    if (!tempDir.exists() && !tempDir.mkdirs()) {
-      throw new IOException("Failed to create temp directory: " + tempDir.getAbsolutePath());
-    }
+    Path tempDir = Paths.get(baseDir).resolve("temp/subtitle-render/" + mediaId).toAbsolutePath();
+    Files.createDirectories(tempDir);
 
     double batchSize = 8.0;
     List<String> tempVideoFiles = new ArrayList<>();
+    List<File>   tempTextFiles  = new ArrayList<>();
 
     try {
       int batchIndex = 0;
       for (double startTime = 0; startTime < totalDuration; startTime += batchSize) {
-        double endTime = Math.min(startTime + batchSize, totalDuration);
+        double endTime       = Math.min(startTime + batchSize, totalDuration);
         String safeBatchName = "batch_" + batchIndex + ".mp4";
-        String tempOutput = new File(tempDir, safeBatchName).getAbsolutePath();
+        String tempOutput    = tempDir.resolve(safeBatchName).toString();
         tempVideoFiles.add(tempOutput);
         Map<String, String> qualitySettings = getFFmpegQualitySettings(quality);
-        renderBatch(inputFile, new File(tempOutput), subtitles, canvasWidth, canvasHeight, fps, mediaId, startTime, endTime, totalDuration, batchIndex, qualitySettings);
+        renderBatch(inputFile, new File(tempOutput), subtitles, canvasWidth, canvasHeight, fps,
+                mediaId, startTime, endTime, totalDuration, batchIndex, tempTextFiles, qualitySettings);
         batchIndex++;
       }
-
-      concatenateBatches(tempVideoFiles, outputFile.getAbsolutePath(), fps, tempDir);
+      concatenateBatches(tempVideoFiles, outputFile.getAbsolutePath(), fps, tempDir.toFile());
     } finally {
-      // Clean up temp directory - DELETE ALL FILES FIRST, THEN DIRECTORY
-      try {
-        if (tempDir.exists()) {
-          // Delete all files in directory first
-          File[] files = tempDir.listFiles();
-          if (files != null) {
-            for (File file : files) {
-              try {
-                Files.deleteIfExists(file.toPath());
-                logger.debug("Deleted temp file: {}", file.getName());
-              } catch (IOException e) {
-                logger.warn("Failed to delete temp file: {}", file.getName(), e);
-              }
-            }
-          }
-
-          // Now delete the empty directory
-          Files.deleteIfExists(tempDir.toPath());
-          logger.debug("Deleted temp directory: {}", tempDir.getAbsolutePath());
-        }
-      } catch (IOException e) {
-        logger.warn("Failed to delete temp directory: {}", tempDir.getAbsolutePath(), e);
-        // Don't throw - this is just cleanup
-      }
+      for (File f : tempTextFiles)   { try { Files.deleteIfExists(f.toPath()); } catch (IOException ignored) {} }
+      for (String v : tempVideoFiles) { try { Files.deleteIfExists(Paths.get(v)); } catch (IOException ignored) {} }
     }
   }
 
   private void renderBatch(File inputFile, File outputFile, List<SubtitleDTO> subtitles,
                            int canvasWidth, int canvasHeight, float fps, Long mediaId,
-                           double batchStart, double batchEnd, double totalDuration,
-                           int batchIndex, Map<String, String> qualitySettings)
+                           double batchStart, double batchEnd, double totalDuration, int batchIndex,
+                           List<File> tempTextFiles, Map<String, String> qualitySettings)
           throws IOException, InterruptedException {
+
     double batchDuration = batchEnd - batchStart;
-    logger.debug("Rendering batch from {} to {} seconds for mediaId: {}", batchStart, batchEnd, mediaId);
+    Path batchTempDir    = Paths.get(baseDir).resolve("temp/subtitle-render/" + mediaId).toAbsolutePath();
+    Files.createDirectories(batchTempDir);
 
     List<String> command = new ArrayList<>();
     command.add(ffmpegPath);
-    command.add("-ss");
-    command.add(String.format("%.6f", batchStart));
-    command.add("-t");
-    command.add(String.format("%.6f", batchDuration));
-    command.add("-i");
-    command.add(inputFile.getAbsolutePath());
+    command.add("-ss"); command.add(String.format("%.6f", batchStart));
+    command.add("-t");  command.add(String.format("%.6f", batchDuration));
+    command.add("-i");  command.add(inputFile.getAbsolutePath());
 
-    StringBuilder filterComplex = new StringBuilder();
+    StringBuilder filterComplex  = new StringBuilder();
     Map<String, String> textInputIndices = new HashMap<>();
     int inputCount = 1;
-
-    String absoluteBaseDir = baseDir.startsWith("/") ? baseDir : "/" + baseDir;
-    File tempDir = new File(absoluteBaseDir + File.separator + "videoeditor" + File.separator + "temp" + File.separator + mediaId);
-    if (!tempDir.exists() && !tempDir.mkdirs()) {
-      throw new IOException("Failed to create temp directory: " + tempDir.getAbsolutePath());
-    }
 
     List<SubtitleDTO> relevantSubtitles = subtitles.stream()
             .filter(s -> s.getTimelineStartTime() < batchEnd && s.getTimelineEndTime() > batchStart)
             .collect(Collectors.toList());
 
-    List<File> localPngFiles = new ArrayList<>();
-    try {
+    for (SubtitleDTO subtitle : relevantSubtitles) {
+      if (subtitle.getText() == null || subtitle.getText().trim().isEmpty()) continue;
+      if (subtitle.getTimelineEndTime() <= subtitle.getTimelineStartTime()) continue;
+
+      String textPngPath = generateTextPng(subtitle, batchTempDir.toFile(), canvasWidth, canvasHeight);
+      File textPngFile   = new File(textPngPath);
+      if (!textPngFile.exists() || textPngFile.length() == 0) continue;
+
+      tempTextFiles.add(textPngFile);
+      command.add("-loop"); command.add("1");
+      command.add("-i");    command.add(textPngPath);
+      textInputIndices.put(subtitle.getId(), String.valueOf(inputCount++));
+    }
+
+    if (textInputIndices.isEmpty()) {
+      // No subtitles in this batch – just copy + scale
+      command.clear();
+      command.add(ffmpegPath);
+      command.add("-ss"); command.add(String.format("%.6f", batchStart));
+      command.add("-t");  command.add(String.format("%.6f", batchDuration));
+      command.add("-i");  command.add(inputFile.getAbsolutePath());
+      command.add("-vf"); command.add("scale=" + qualitySettings.get("scale"));
+      command.add("-c:v"); command.add("libx264");
+      command.add("-preset"); command.add(qualitySettings.get("preset"));
+      command.add("-crf");    command.add(qualitySettings.get("crf"));
+      command.add("-pix_fmt"); command.add("yuv420p");
+      command.add("-c:a");    command.add("copy");
+      command.add("-y");      command.add(outputFile.getAbsolutePath());
+    } else {
+      String lastOutput  = "0:v";
+      int    overlayCount = 0;
+
       for (SubtitleDTO subtitle : relevantSubtitles) {
-        if (subtitle.getText() == null || subtitle.getText().trim().isEmpty()) {
-          logger.warn("Skipping subtitle with empty text for mediaId: {}, id: {}", mediaId, subtitle.getId());
-          continue;
+        String inputIdx = textInputIndices.get(subtitle.getId());
+        if (inputIdx == null) continue;
+
+        double segmentStart = Math.max(subtitle.getTimelineStartTime(), batchStart) - batchStart;
+        double segmentEnd   = Math.min(subtitle.getTimelineEndTime(),   batchEnd)   - batchStart;
+        if (segmentStart >= segmentEnd) continue;
+
+        String outputLabel = "ov" + overlayCount++;
+        double defaultScale = subtitle.getScale() != null ? subtitle.getScale() : 1.0;
+        double resolutionMultiplier = canvasWidth >= 3840 ? 1.5 : 2.0;
+        double baseScale = 1.0 / resolutionMultiplier;
+
+        filterComplex.append("[").append(inputIdx).append(":v]");
+        filterComplex.append("setpts=PTS-STARTPTS+")
+                .append(String.format("%.6f", segmentStart)).append("/TB,");
+        filterComplex.append("scale=w='2*trunc((iw*").append(baseScale).append("*")
+                .append(String.format("%.6f", defaultScale))
+                .append(")/2)':h='2*trunc((ih*").append(baseScale).append("*")
+                .append(String.format("%.6f", defaultScale))
+                .append(")/2)':flags=lanczos:eval=frame,");
+
+        double rotation = subtitle.getRotation() != null ? subtitle.getRotation() : 0.0;
+        if (Math.abs(rotation) > 0.01) {
+          filterComplex.append("rotate=a=").append(String.format("%.6f", Math.toRadians(rotation)))
+                  .append(":ow='2*trunc(hypot(iw,ih)/2)'")
+                  .append(":oh='2*trunc(hypot(iw,ih)/2)'")
+                  .append(":c=0x00000000,");
         }
-        if (subtitle.getTimelineEndTime() <= subtitle.getTimelineStartTime()) {
-          logger.warn("Skipping subtitle with invalid timing for mediaId: {}, id: {}", mediaId, subtitle.getId());
-          continue;
+        filterComplex.append("format=rgba,");
+
+        double opacity = subtitle.getOpacity() != null ? subtitle.getOpacity() : 1.0;
+        if (opacity < 1.0) {
+          filterComplex.append("colorchannelmixer=aa=").append(String.format("%.6f", opacity)).append(",");
         }
 
-        String tempPngPath = generateTextPng(subtitle, tempDir, canvasWidth, canvasHeight);
-        File tempPngFile = new File(tempPngPath);
-
-        // Validate PNG file
-        try {
-          BufferedImage img = ImageIO.read(tempPngFile);
-          if (img == null) {
-            logger.error("Invalid or corrupted PNG file: {}", tempPngPath);
-            throw new IOException("Invalid or corrupted PNG file: " + tempPngPath);
-          }
-          logger.debug("Validated PNG file: {} ({}x{})", tempPngPath, img.getWidth(), img.getHeight());
-          img.flush();
-        } catch (IOException e) {
-          logger.error("Failed to validate PNG file: {}", tempPngPath, e);
-          throw new IOException("Failed to validate PNG file: " + tempPngPath, e);
+        String xExpr, yExpr;
+        if ("left".equalsIgnoreCase(subtitle.getAlignment())) {
+          xExpr = String.format("%d", subtitle.getPositionX() != null ? subtitle.getPositionX() : 0);
+        } else if ("right".equalsIgnoreCase(subtitle.getAlignment())) {
+          xExpr = String.format("W-w-%d", subtitle.getPositionX() != null ? subtitle.getPositionX() : 0);
+        } else {
+          xExpr = String.format("(W-w)/2+%d", subtitle.getPositionX() != null ? subtitle.getPositionX() : 0);
         }
-
-        localPngFiles.add(tempPngFile);
-
-        command.add("-loop");
-        command.add("1");
-        command.add("-i");
-        command.add(tempPngPath);
-        textInputIndices.put(subtitle.getId(), String.valueOf(inputCount++));
-      }
-
-      if (textInputIndices.isEmpty()) {
-        logger.warn("No valid subtitle PNGs for batch from {} to {} seconds, copying input segment with scaling", batchStart, batchEnd);
-        command.clear();
-        command.add(ffmpegPath);
-        command.add("-ss");
-        command.add(String.format("%.6f", batchStart));
-        command.add("-t");
-        command.add(String.format("%.6f", batchDuration));
-        command.add("-i");
-        command.add(inputFile.getAbsolutePath());
-        command.add("-vf");
-        command.add("scale=" + qualitySettings.get("scale"));
-        command.add("-c:v");
-        command.add("libx264");
-        command.add("-preset");
-        command.add(qualitySettings.get("preset"));
-        command.add("-crf");
-        command.add(qualitySettings.get("crf"));
-        command.add("-pix_fmt");
-        command.add("yuv420p");
-        command.add("-c:a");
-        command.add("copy");
-        command.add("-y");
-        command.add(outputFile.getAbsolutePath());
-      } else {
-        String lastOutput = "0:v";
-        int overlayCount = 0;
-
-        for (SubtitleDTO subtitle : relevantSubtitles) {
-          String inputIdx = textInputIndices.get(subtitle.getId());
-          if (inputIdx == null) {
-            continue;
-          }
-
-          double segmentStart = Math.max(subtitle.getTimelineStartTime(), batchStart) - batchStart;
-          double segmentEnd = Math.min(subtitle.getTimelineEndTime(), batchEnd) - batchStart;
-          if (segmentStart >= segmentEnd) {
-            logger.warn("Invalid segment timing for subtitle id: {}", subtitle.getId());
-            continue;
-          }
-          String outputLabel = "ov" + overlayCount++;
-
-          filterComplex.append("[").append(inputIdx).append(":v]");
-          filterComplex.append("setpts=PTS-STARTPTS+").append(String.format("%.6f", segmentStart)).append("/TB,");
-
-          double defaultScale = subtitle.getScale() != null ? subtitle.getScale() : 1.0;
-          double resolutionMultiplier = canvasWidth >= 3840 ? 1.5 : 2.0;
-          double baseScale = 1.0 / resolutionMultiplier;
-
-          StringBuilder scaleExpr = new StringBuilder();
-          scaleExpr.append(String.format("%.6f", defaultScale));
-
-          filterComplex.append("scale=w='2*trunc((iw*").append(baseScale).append("*").append(scaleExpr)
-                  .append(")/2)':h='2*trunc((ih*").append(baseScale).append("*").append(scaleExpr)
-                  .append(")/2)':flags=lanczos:eval=frame,");
-
-          double rotation = subtitle.getRotation() != null ? subtitle.getRotation() : 0.0;
-          if (Math.abs(rotation) > 0.01) {
-            filterComplex.append("rotate=a=").append(String.format("%.6f", Math.toRadians(rotation)))
-                    .append(":ow='2*trunc(hypot(iw,ih)/2)'")
-                    .append(":oh='2*trunc(hypot(iw,ih)/2)'")
-                    .append(":c=0x00000000,");
-          }
-
-          filterComplex.append("format=rgba,");
-
-          double opacity = subtitle.getOpacity() != null ? subtitle.getOpacity() : 1.0;
-          if (opacity < 1.0) {
-            filterComplex.append("colorchannelmixer=aa=").append(String.format("%.6f", opacity)).append(",");
-          }
-
-          String xExpr, yExpr;
-          if (subtitle.getAlignment() != null && subtitle.getAlignment().equalsIgnoreCase("left")) {
-            xExpr = String.format("%d", subtitle.getPositionX() != null ? subtitle.getPositionX() : 0);
-          } else if (subtitle.getAlignment() != null && subtitle.getAlignment().equalsIgnoreCase("right")) {
-            xExpr = String.format("W-w-%d", subtitle.getPositionX() != null ? subtitle.getPositionX() : 0);
-          } else {
-            xExpr = String.format("(W-w)/2+%d", subtitle.getPositionX() != null ? subtitle.getPositionX() : 0);
-          }
-          yExpr = String.format("(H-h)/2+%d", subtitle.getPositionY() != null ? subtitle.getPositionY() : 0);
-
-          filterComplex.append("[").append(lastOutput).append("]");
-          filterComplex.append("overlay=x='").append(xExpr).append("':y='").append(yExpr).append("':format=auto");
-          filterComplex.append(":enable='between(t,").append(String.format("%.6f", segmentStart)).append(",").append(String.format("%.6f", segmentEnd)).append(")'");
-          filterComplex.append("[ov").append(outputLabel).append("];");
-          lastOutput = "ov" + outputLabel;
-        }
+        yExpr = String.format("(H-h)/2+%d", subtitle.getPositionY() != null ? subtitle.getPositionY() : 0);
 
         filterComplex.append("[").append(lastOutput).append("]");
-        filterComplex.append("scale=").append(qualitySettings.get("scale"));
-        filterComplex.append(",setpts=PTS-STARTPTS[vout]");
-
-        command.add("-filter_complex");
-        command.add(filterComplex.toString());
-        command.add("-map");
-        command.add("[vout]");
-        command.add("-map");
-        command.add("0:a?");
-        command.add("-c:v");
-        command.add("libx264");
-        command.add("-preset");
-        command.add(qualitySettings.get("preset"));
-        command.add("-crf");
-        command.add(qualitySettings.get("crf"));
-        command.add("-pix_fmt");
-        command.add("yuv420p");
-        command.add("-c:a");
-        command.add("aac");
-        command.add("-b:a");
-        command.add("192k");
-        command.add("-t");
-        command.add(String.format("%.6f", batchDuration));
-        command.add("-r");
-        command.add(String.format("%.2f", fps));
-        command.add("-y");
-        command.add(outputFile.getAbsolutePath());
+        filterComplex.append("overlay=x='").append(xExpr).append("':y='").append(yExpr)
+                .append("':format=auto")
+                .append(":enable='between(t,").append(String.format("%.6f", segmentStart))
+                .append(",").append(String.format("%.6f", segmentEnd)).append(")'");
+        filterComplex.append("[ov").append(outputLabel).append("];");
+        lastOutput = "ov" + outputLabel;
       }
 
-      logger.debug("FFmpeg command for batch: {}", String.join(" ", command));
-      executeFFmpegCommand(command, mediaId, batchStart, batchDuration, totalDuration, batchIndex);
-    } finally {
-      // Clean up local PNG files after FFmpeg completes
-      for (File localPngFile : localPngFiles) {
-        try {
-          Files.deleteIfExists(localPngFile.toPath());
-          logger.debug("Deleted local PNG file: {}", localPngFile.getAbsolutePath());
-        } catch (IOException e) {
-          logger.warn("Failed to delete local PNG file: {}", localPngFile.getAbsolutePath(), e);
-        }
-      }
+      // Scale at the end of the filter chain
+      filterComplex.append("[").append(lastOutput).append("]")
+              .append("scale=").append(qualitySettings.get("scale"))
+              .append(",setpts=PTS-STARTPTS[vout]");
+
+      command.add("-filter_complex"); command.add(filterComplex.toString());
+      command.add("-map");    command.add("[vout]");
+      command.add("-map");    command.add("0:a?");
+      command.add("-c:v");    command.add("libx264");
+      command.add("-preset"); command.add(qualitySettings.get("preset"));
+      command.add("-crf");    command.add(qualitySettings.get("crf"));
+      command.add("-pix_fmt"); command.add("yuv420p");
+      command.add("-c:a");    command.add("aac");
+      command.add("-b:a");    command.add("192k");
+      command.add("-t");      command.add(String.format("%.6f", batchDuration));
+      command.add("-r");      command.add(String.format("%.2f", fps));
+      command.add("-y");      command.add(outputFile.getAbsolutePath());
     }
+
+    logger.debug("FFmpeg batch command: {}", String.join(" ", command));
+    executeFFmpegWithProgress(command, mediaId, batchStart, batchDuration, totalDuration, batchIndex);
   }
 
-  private void concatenateBatches(List<String> tempVideoFiles, String outputPath, float fps, File tempDir)
-          throws IOException, InterruptedException {
-    if (tempVideoFiles.isEmpty()) {
-      throw new IllegalStateException("No batch files to concatenate");
-    }
+  private void concatenateBatches(List<String> tempVideoFiles, String outputPath,
+                                  float fps, File tempDir) throws IOException, InterruptedException {
+    if (tempVideoFiles.isEmpty()) throw new IllegalStateException("No batch files to concatenate");
+
     if (tempVideoFiles.size() == 1) {
-      // Single file, just move it
-      Files.move(new File(tempVideoFiles.get(0)).toPath(),
-              new File(outputPath).toPath(),
+      Files.move(Paths.get(tempVideoFiles.get(0)), Paths.get(outputPath),
               StandardCopyOption.REPLACE_EXISTING);
       return;
     }
 
     File concatListFile = new File(tempDir, "concat_list.txt");
-
     try (PrintWriter writer = new PrintWriter(concatListFile, "UTF-8")) {
-      for (String tempFile : tempVideoFiles) {
-        // Use absolute paths in concat file
-        String absolutePath = new File(tempFile).getAbsolutePath();
-        writer.println("file '" + absolutePath.replace("\\", "\\\\") + "'");
+      for (String f : tempVideoFiles) {
+        writer.println("file '" + f.replace("\\", "\\\\") + "'");
       }
     }
 
-    List<String> command = new ArrayList<>();
-    command.add(ffmpegPath);
-    command.add("-f");
-    command.add("concat");
-    command.add("-safe");
-    command.add("0");
-    command.add("-i");
-    command.add(concatListFile.getAbsolutePath());
-    command.add("-c");
-    command.add("copy");
-    command.add("-r");
-    command.add(String.valueOf(fps));
-    command.add("-y");
-    command.add(outputPath);
+    List<String> command = Arrays.asList(
+            ffmpegPath,
+            "-f", "concat", "-safe", "0",
+            "-i", concatListFile.getAbsolutePath(),
+            "-c", "copy",
+            "-r", String.valueOf(fps),
+            "-y", outputPath);
 
-    logger.debug("FFmpeg concatenation command: {}", String.join(" ", command));
     try {
-      executeFFmpegCommand(command);
+      runProcess(command, "FFmpeg concatenate");
     } finally {
-      if (concatListFile.exists()) {
-        try {
-          Files.delete(concatListFile.toPath());
-          logger.debug("Deleted concat list file: {}", concatListFile.getAbsolutePath());
-        } catch (IOException e) {
-          logger.error("Failed to delete concat list file {}: {}",
-                  concatListFile.getAbsolutePath(), e.getMessage());
-        }
-      }
+      try { Files.deleteIfExists(concatListFile.toPath()); } catch (IOException ignored) {}
     }
   }
 
-  private void executeFFmpegCommand(List<String> command, Long mediaId, double batchStart, double batchDuration, double totalDuration, int batchIndex) throws IOException, InterruptedException {
+  private void executeFFmpegWithProgress(List<String> command, Long mediaId,
+                                         double batchStart, double batchDuration,
+                                         double totalDuration, int batchIndex)
+          throws IOException, InterruptedException {
+
     SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
             .orElseThrow(() -> new RuntimeException("Media not found: " + mediaId));
 
-    List<String> updatedCommand = new ArrayList<>(command);
-    updatedCommand.add("-progress");
-    updatedCommand.add("pipe:");
+    List<String> cmd = new ArrayList<>(command);
+    if (!cmd.contains("-progress")) { cmd.add("-progress"); cmd.add("pipe:"); }
 
-    ProcessBuilder processBuilder = new ProcessBuilder(updatedCommand);
-    processBuilder.redirectErrorStream(false); // Separate stdout and stderr
+    ProcessBuilder pb = new ProcessBuilder(cmd);
+    pb.redirectErrorStream(true);
+    Process process = pb.start();
 
-    String absoluteBaseDir = baseDir.startsWith("/") ? baseDir : "/" + baseDir;
-    File tempDir = new File(absoluteBaseDir, "videoeditor/logs/" + mediaId);
-    if (!tempDir.exists() && !tempDir.mkdirs()) {
-      logger.error("Failed to create log directory: {}", tempDir.getAbsolutePath());
-      throw new IOException("Failed to create log directory: " + tempDir.getAbsolutePath());
-    }
-
-    String commandLogFileName = "ffmpeg_command_" + mediaId + "_" + batchIndex + ".txt";
-    String errorLogFileName = "ffmpeg_error_" + mediaId + "_" + batchIndex + ".txt";
-    String stdoutLogFileName = "ffmpeg_stdout_" + mediaId + "_" + batchIndex + ".txt";
-    File commandLogFile = new File(tempDir, commandLogFileName);
-    File errorLogFile = new File(tempDir, errorLogFileName);
-    File stdoutLogFile = new File(tempDir, stdoutLogFileName); // Declare outside try block
-
-    // Log the command to file and R2
-    try (PrintWriter writer = new PrintWriter(commandLogFile, "UTF-8")) {
-      writer.println(String.join(" ", updatedCommand));
-    }
-    logger.debug("Executing FFmpeg command: {}", String.join(" ", updatedCommand));
-    Process process = processBuilder.start();
-    StringBuilder stdoutOutput = new StringBuilder();
-    StringBuilder stderrOutput = new StringBuilder();
-    final double[] lastProgress = {-1.0}; // Use array to allow modification in lambda
-
-    // Read stdout and stderr concurrently
-    try (BufferedReader stdoutReader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-         BufferedReader stderrReader = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
-      Thread stdoutThread = new Thread(() -> {
-        try {
-          String line;
-          while ((line = stdoutReader.readLine()) != null) {
-            synchronized (stdoutOutput) {
-              stdoutOutput.append(line).append("\n");
-              logger.debug("FFmpeg stdout: {}", line);
-              if (line.startsWith("out_time_ms=") && !line.equals("out_time_ms=N/A")) {
-                try {
-                  long outTimeUs = Long.parseLong(line.replace("out_time_ms=", ""));
-                  double currentBatchTime = outTimeUs / 1_000_000.0;
-
-                  double batchProgress = Math.min(currentBatchTime / batchDuration, 1.0);
-                  double batchContribution = batchDuration / totalDuration * 100.0;
-                  double completedBatchesProgress = batchIndex * (batchDuration / totalDuration * 100.0);
-                  double totalProgress = completedBatchesProgress + (batchProgress * batchContribution);
-                  totalProgress = Math.min(totalProgress, 100.0);
-
-                  int roundedProgress = (int) Math.round(totalProgress);
-                  if (roundedProgress != (int) lastProgress[0] && roundedProgress >= 0 && roundedProgress <= 100 && roundedProgress % 10 == 0) {
-                    subtitleMedia.setProgress((double) roundedProgress);
-                    subtitleMedia.setStatus("PROCESSING");
-                    subtitleMediaRepository.save(subtitleMedia);
-                    logger.info("Progress updated: {}% for mediaId: {}", roundedProgress, mediaId);
-                    lastProgress[0] = roundedProgress; // Update array element
-                  }
-                } catch (NumberFormatException e) {
-                  logger.error("Failed to parse out_time_ms: {}", line);
-                }
-              }
+    double lastProgress = -1.0;
+    try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+      String line;
+      while ((line = reader.readLine()) != null) {
+        if (line.startsWith("out_time_ms=") && !line.contains("N/A")) {
+          try {
+            long   outTimeUs          = Long.parseLong(line.replace("out_time_ms=", ""));
+            double currentBatchTime   = outTimeUs / 1_000_000.0;
+            double batchProgress      = Math.min(currentBatchTime / batchDuration, 1.0);
+            double batchContribution  = batchDuration / totalDuration * 100.0;
+            double completedPrevious  = batchIndex * (batchDuration / totalDuration * 100.0);
+            double totalProgress      = Math.min(completedPrevious + batchProgress * batchContribution, 100.0);
+            int    rounded            = (int) Math.round(totalProgress);
+            if (rounded != (int) lastProgress && rounded >= 0 && rounded <= 100 && rounded % 10 == 0) {
+              subtitleMedia.setProgress((double) rounded);
+              subtitleMedia.setStatus("PROCESSING");
+              subtitleMediaRepository.save(subtitleMedia);
+              logger.info("Progress: {}% for mediaId: {}", rounded, mediaId);
+              lastProgress = rounded;
             }
-          }
-        } catch (IOException e) {
-          logger.error("Error reading FFmpeg stdout: {}", e.getMessage(), e);
+          } catch (NumberFormatException ignored) {}
         }
-      });
-
-      Thread stderrThread = new Thread(() -> {
-        try {
-          String line;
-          while ((line = stderrReader.readLine()) != null) {
-            synchronized (stderrOutput) {
-              stderrOutput.append(line).append("\n");
-              logger.error("FFmpeg stderr: {}", line);
-            }
-          }
-        } catch (IOException e) {
-          logger.error("Error reading FFmpeg stderr: {}", e.getMessage(), e);
-        }
-      });
-
-      stdoutThread.start();
-      stderrThread.start();
-      stdoutThread.join();
-      stderrThread.join();
-
-      // Write outputs to files and upload to R2
-      try (PrintWriter writer = new PrintWriter(errorLogFile, "UTF-8")) {
-        writer.println(stderrOutput.toString());
-      }
-
-      try (PrintWriter writer = new PrintWriter(stdoutLogFile, "UTF-8")) {
-        writer.println(stdoutOutput.toString());
       }
     }
 
-    try {
-      boolean completed = process.waitFor(30, TimeUnit.MINUTES);
-
-      if (!completed) {
-        process.destroyForcibly();
-        subtitleMedia.setStatus("FAILED");
-        subtitleMedia.setProgress(0.0);
-        subtitleMediaRepository.save(subtitleMedia);
-        throw new RuntimeException("FFmpeg process timed out after 30 minutes for mediaId: " + mediaId);
-      }
-
-      int exitCode = process.exitValue();
-      if (exitCode != 0) {
-        subtitleMedia.setStatus("FAILED");
-        subtitleMedia.setProgress(0.0);
-        subtitleMediaRepository.save(subtitleMedia);
-        throw new RuntimeException("FFmpeg process failed with exit code: " + exitCode + " for mediaId: " + mediaId);
-      }
-
-    } finally {
-      // ✅ Always clean up local log files (even on failure)
-      try { Files.deleteIfExists(commandLogFile.toPath()); } catch (Exception ignored) {}
-      try { Files.deleteIfExists(errorLogFile.toPath()); } catch (Exception ignored) {}
-      try { Files.deleteIfExists(stdoutLogFile.toPath()); } catch (Exception ignored) {}
-
-      // ✅ OPTIONAL: try to remove the per-media directory if empty
-      try {
-        File[] remaining = tempDir.listFiles();
-        if (remaining == null || remaining.length == 0) {
-          Files.deleteIfExists(tempDir.toPath());
-        }
-      } catch (Exception ignored) {}
+    boolean completed = process.waitFor(10, TimeUnit.MINUTES);
+    if (!completed) {
+      process.destroyForcibly();
+      subtitleMedia.setStatus("FAILED");
+      subtitleMedia.setProgress(0.0);
+      subtitleMediaRepository.save(subtitleMedia);
+      throw new RuntimeException("FFmpeg timed out after 10 minutes for mediaId: " + mediaId);
     }
 
+    int exitCode = process.exitValue();
+    if (exitCode != 0) {
+      subtitleMedia.setStatus("FAILED");
+      subtitleMedia.setProgress(0.0);
+      subtitleMediaRepository.save(subtitleMedia);
+      throw new RuntimeException("FFmpeg failed (exit " + exitCode + ") for mediaId: " + mediaId);
+    }
   }
 
-  private void executeFFmpegCommand(List<String> command) throws IOException, InterruptedException {
-    ProcessBuilder processBuilder = new ProcessBuilder(command);
-    processBuilder.redirectErrorStream(false);
+  // ══════════════════════════════════════════════════════════════════════════
+  //  PNG GENERATION  (unchanged – runs locally inside Docker)
+  // ══════════════════════════════════════════════════════════════════════════
 
-    String absoluteBaseDir = baseDir.startsWith("/") ? baseDir : "/" + baseDir;
-    File tempDir = new File(absoluteBaseDir, "videoeditor/logs");
-    if (!tempDir.exists() && !tempDir.mkdirs()) {
-      logger.error("Failed to create log directory: {}", tempDir.getAbsolutePath());
-      throw new IOException("Failed to create log directory: " + tempDir.getAbsolutePath());
+  public String generateTextPng(SubtitleDTO ts, File outputDir, int canvasWidth, int canvasHeight)
+          throws IOException {
+    if (!outputDir.exists() && !outputDir.mkdirs()) {
+      throw new IOException("Failed to create PNG output dir: " + outputDir.getAbsolutePath());
     }
+    String     fileName   = "subtitle_" + ts.getId() + "_" + System.nanoTime() + ".png";
+    File       outputFile = new File(outputDir, fileName);
 
-    String commandLogFileName = "ffmpeg_concat_command.txt";
-    String errorLogFileName = "ffmpeg_concat_error.txt";
-    String stdoutLogFileName = "ffmpeg_concat_stdout.txt";
-    File commandLogFile = new File(tempDir, commandLogFileName);
-    File errorLogFile = new File(tempDir, errorLogFileName);
-    File stdoutLogFile = new File(tempDir, stdoutLogFileName); // Declare outside try block
-
-    // Log the command to file and R2
-    try (PrintWriter writer = new PrintWriter(commandLogFile, "UTF-8")) {
-      writer.println(String.join(" ", command));
-    }
-    logger.debug("Executing FFmpeg command: {}", String.join(" ", command));
-    Process process = processBuilder.start();
-    StringBuilder stdoutOutput = new StringBuilder();
-    StringBuilder stderrOutput = new StringBuilder();
-
-    // Read stdout and stderr concurrently
-    try (BufferedReader stdoutReader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-         BufferedReader stderrReader = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
-      Thread stdoutThread = new Thread(() -> {
-        try {
-          String line;
-          while ((line = stdoutReader.readLine()) != null) {
-            synchronized (stdoutOutput) {
-              stdoutOutput.append(line).append("\n");
-              logger.debug("FFmpeg concat stdout: {}", line);
-            }
-          }
-        } catch (IOException e) {
-          logger.error("Error reading FFmpeg concat stdout: {}", e.getMessage(), e);
-        }
-      });
-
-      Thread stderrThread = new Thread(() -> {
-        try {
-          String line;
-          while ((line = stderrReader.readLine()) != null) {
-            synchronized (stderrOutput) {
-              stderrOutput.append(line).append("\n");
-              logger.error("FFmpeg concat stderr: {}", line);
-            }
-          }
-        } catch (IOException e) {
-          logger.error("Error reading FFmpeg concat stderr: {}", e.getMessage(), e);
-        }
-      });
-
-      stdoutThread.start();
-      stderrThread.start();
-      stdoutThread.join();
-      stderrThread.join();
-
-      // Write outputs to files and upload to R2
-      try (PrintWriter writer = new PrintWriter(errorLogFile, "UTF-8")) {
-        writer.println(stderrOutput.toString());
-      }
-      try (PrintWriter writer = new PrintWriter(stdoutLogFile, "UTF-8")) {
-        writer.println(stdoutOutput.toString());
-      }
-    }
-
-    try {
-      boolean completed = process.waitFor(5, TimeUnit.MINUTES);
-      if (!completed) {
-        process.destroyForcibly();
-        throw new RuntimeException("FFmpeg concat process timed out after 5 minutes");
-      }
-
-      int exitCode = process.exitValue();
-      if (exitCode != 0) {
-        throw new RuntimeException("FFmpeg concat process failed with exit code: " + exitCode);
-      }
-
-    } finally {
-      // ✅ Always cleanup local log files
-      try { Files.deleteIfExists(commandLogFile.toPath()); } catch (Exception ignored) {}
-      try { Files.deleteIfExists(errorLogFile.toPath()); } catch (Exception ignored) {}
-      try { Files.deleteIfExists(stdoutLogFile.toPath()); } catch (Exception ignored) {}
-    }
-
-  }
-
-  public String generateTextPng(SubtitleDTO ts, File tempDir, int canvasWidth, int canvasHeight) throws IOException {
     final double RESOLUTION_MULTIPLIER = canvasWidth >= 3840 ? 1.5 : 2.0;
-    final double BORDER_SCALE_FACTOR = canvasWidth >= 3840 ? 1.5 : 2.0;
+    final double BORDER_SCALE_FACTOR   = canvasWidth >= 3840 ? 1.5 : 2.0;
 
     double defaultScale = ts.getScale() != null ? ts.getScale() : 1.0;
     List<Keyframe> scaleKeyframes = ts.getKeyframes().getOrDefault("scale", new ArrayList<>());
     double maxScale = defaultScale;
     if (!scaleKeyframes.isEmpty()) {
-      maxScale = Math.max(
-              defaultScale,
-              scaleKeyframes.stream()
-                      .mapToDouble(kf -> ((Number) kf.getValue()).doubleValue())
-                      .max()
-                      .orElse(defaultScale)
-      );
+      maxScale = Math.max(defaultScale, scaleKeyframes.stream()
+              .mapToDouble(kf -> ((Number) kf.getValue()).doubleValue()).max().orElse(defaultScale));
     }
 
-    Color fontColor = parseColor(ts.getFontColor(), Color.WHITE, "font", ts.getId());
-    Color bgColor = ts.getBackgroundColor() != null && !ts.getBackgroundColor().equals("transparent") ?
-            parseColor(ts.getBackgroundColor(), null, "background", ts.getId()) : null;
-    Color bgBorderColor = ts.getBackgroundBorderColor() != null && !ts.getBackgroundBorderColor().equals("transparent") ?
-            parseColor(ts.getBackgroundBorderColor(), null, "border", ts.getId()) : null;
-    Color textBorderColor = ts.getTextBorderColor() != null && !ts.getTextBorderColor().equals("transparent") ?
-            parseColor(ts.getTextBorderColor(), null, "text border", ts.getId()) : null;
+    Color fontColor     = parseColor(ts.getFontColor(), Color.WHITE, "font", ts.getId());
+    Color bgColor       = ts.getBackgroundColor() != null && !ts.getBackgroundColor().equals("transparent")
+            ? parseColor(ts.getBackgroundColor(), null, "background", ts.getId()) : null;
+    Color bgBorderColor = ts.getBackgroundBorderColor() != null && !ts.getBackgroundBorderColor().equals("transparent")
+            ? parseColor(ts.getBackgroundBorderColor(), null, "border", ts.getId()) : null;
+    Color textBorderColor = ts.getTextBorderColor() != null && !ts.getTextBorderColor().equals("transparent")
+            ? parseColor(ts.getTextBorderColor(), null, "text border", ts.getId()) : null;
 
     double baseFontSize = 24.0 * maxScale * RESOLUTION_MULTIPLIER;
     Font font;
     try {
-      font = Font.createFont(Font.TRUETYPE_FONT, new File(getFontPathByFamily(ts.getFontFamily())))
-              .deriveFont((float) baseFontSize);
+      String fontPath = containsHindiCharacters(ts.getText())
+              ? getFontFilePath("NotoSansDevanagari-Regular.ttf", "/fonts/",
+              System.getProperty("java.io.tmpdir") + "/scenith-fonts/")
+              : getFontPathByFamily(ts.getFontFamily());
+      font = Font.createFont(Font.TRUETYPE_FONT, new File(fontPath)).deriveFont((float) baseFontSize);
     } catch (Exception e) {
-      logger.error("Failed to load font for subtitle {}: {}, using Arial", ts.getId(), ts.getFontFamily(), e);
-      font = new Font("Arial", Font.PLAIN, (int) baseFontSize);
+      try {
+        String hindiFontPath = getFontFilePath("NotoSansDevanagari-Regular.ttf", "/fonts/",
+                System.getProperty("java.io.tmpdir") + "/scenith-fonts/");
+        font = Font.createFont(Font.TRUETYPE_FONT, new File(hindiFontPath)).deriveFont((float) baseFontSize);
+      } catch (Exception ex) {
+        font = new Font("Arial", Font.PLAIN, (int) baseFontSize);
+      }
     }
 
-    double letterSpacing = ts.getLetterSpacing() != null ? ts.getLetterSpacing() : 0.0;
+    double letterSpacing       = ts.getLetterSpacing()  != null ? ts.getLetterSpacing()  : 0.0;
     double scaledLetterSpacing = letterSpacing * maxScale * RESOLUTION_MULTIPLIER;
-    double lineSpacing = ts.getLineSpacing() != null ? ts.getLineSpacing() : 1.2;
-    double scaledLineSpacing = lineSpacing * baseFontSize;
+    double lineSpacing         = ts.getLineSpacing()     != null ? ts.getLineSpacing()     : 1.2;
+    double scaledLineSpacing   = lineSpacing * baseFontSize;
 
+    // Measure text
     BufferedImage tempImage = new BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB);
     Graphics2D g2d = tempImage.createGraphics();
     g2d.setFont(font);
     FontMetrics fm = g2d.getFontMetrics();
     String[] lines = ts.getText().split("\n");
-    int lineHeight = (int) scaledLineSpacing;
-    int totalTextHeight = lines.length > 1 ? (lines.length - 1) * lineHeight + fm.getAscent() + fm.getDescent() : fm.getAscent() + fm.getDescent();
+    int lineHeight      = (int) scaledLineSpacing;
+    int totalTextHeight = lines.length > 1
+            ? (lines.length - 1) * lineHeight + fm.getAscent() + fm.getDescent()
+            : fm.getAscent() + fm.getDescent();
     int maxTextWidth = 0;
     for (String line : lines) {
-      int lineWidth = 0;
+      int lw = 0;
       for (int i = 0; i < line.length(); i++) {
-        lineWidth += fm.charWidth(line.charAt(i));
-        if (i < line.length() - 1) {
-          lineWidth += (int) scaledLetterSpacing;
-        }
+        lw += fm.charWidth(line.charAt(i));
+        if (i < line.length() - 1) lw += (int) scaledLetterSpacing;
       }
-      maxTextWidth = Math.max(maxTextWidth, lineWidth);
+      maxTextWidth = Math.max(maxTextWidth, lw);
     }
-    int textBlockHeight = totalTextHeight;
     g2d.dispose();
     tempImage.flush();
 
-    int bgHeight = (int) ((ts.getBackgroundH() != null ? ts.getBackgroundH() : 0) * maxScale * RESOLUTION_MULTIPLIER);
-    int bgWidth = (int) ((ts.getBackgroundW() != null ? ts.getBackgroundW() : 0) * maxScale * RESOLUTION_MULTIPLIER);
-    int bgBorderWidth = (int) ((ts.getBackgroundBorderWidth() != null ? ts.getBackgroundBorderWidth() : 0) * maxScale * BORDER_SCALE_FACTOR);
-    int borderRadius = (int) ((ts.getBackgroundBorderRadius() != null ? ts.getBackgroundBorderRadius() : 0) * maxScale * RESOLUTION_MULTIPLIER);
-    int textBorderWidth = (int) ((ts.getTextBorderWidth() != null ? ts.getTextBorderWidth() : 0) * maxScale * BORDER_SCALE_FACTOR);
+    int bgHeight       = (int) ((ts.getBackgroundH()           != null ? ts.getBackgroundH()           : 0) * maxScale * RESOLUTION_MULTIPLIER);
+    int bgWidth        = (int) ((ts.getBackgroundW()           != null ? ts.getBackgroundW()           : 0) * maxScale * RESOLUTION_MULTIPLIER);
+    int bgBorderWidth  = (int) ((ts.getBackgroundBorderWidth() != null ? ts.getBackgroundBorderWidth() : 0) * maxScale * BORDER_SCALE_FACTOR);
+    int borderRadius   = (int) ((ts.getBackgroundBorderRadius()!= null ? ts.getBackgroundBorderRadius(): 0) * maxScale * RESOLUTION_MULTIPLIER);
+    int textBorderWidth= (int) ((ts.getTextBorderWidth()       != null ? ts.getTextBorderWidth()       : 0) * maxScale * BORDER_SCALE_FACTOR);
 
-    int contentWidth = maxTextWidth + bgWidth + 2 * textBorderWidth;
-    int contentHeight = textBlockHeight + bgHeight + 2 * textBorderWidth;
+    int contentWidth   = maxTextWidth + bgWidth + 2 * textBorderWidth;
+    int contentHeight  = totalTextHeight + bgHeight + 2 * textBorderWidth;
 
     int maxDimension = (int) (Math.max(canvasWidth, canvasHeight) * RESOLUTION_MULTIPLIER * 1.5);
-    double scaleDown = 1.0;
-    if (contentWidth + 2 * bgBorderWidth + 2 * textBorderWidth > maxDimension ||
-            contentHeight + 2 * bgBorderWidth + 2 * textBorderWidth > maxDimension) {
-      scaleDown = Math.min(
-              maxDimension / (double) (contentWidth + 2 * bgBorderWidth + 2 * textBorderWidth),
-              maxDimension / (double) (contentHeight + 2 * bgBorderWidth + 2 * textBorderWidth)
-      );
-      scaleDown = Math.max(scaleDown, 0.5);
-      bgWidth = (int) (bgWidth * scaleDown);
-      bgHeight = (int) (bgHeight * scaleDown);
-      bgBorderWidth = (int) (bgBorderWidth * scaleDown);
-      borderRadius = (int) (borderRadius * scaleDown);
-      textBorderWidth = (int) (textBorderWidth * scaleDown);
-      contentWidth = maxTextWidth + bgWidth + 2 * textBorderWidth;
-      contentHeight = textBlockHeight + bgHeight + 2 * textBorderWidth;
+    if (contentWidth + 2 * bgBorderWidth + 2 * textBorderWidth > maxDimension
+            || contentHeight + 2 * bgBorderWidth + 2 * textBorderWidth > maxDimension) {
+      double scaleDown = Math.max(0.5, Math.min(
+              maxDimension / (double) (contentWidth  + 2 * bgBorderWidth + 2 * textBorderWidth),
+              maxDimension / (double) (contentHeight + 2 * bgBorderWidth + 2 * textBorderWidth)));
+      bgWidth        = (int) (bgWidth        * scaleDown);
+      bgHeight       = (int) (bgHeight       * scaleDown);
+      bgBorderWidth  = (int) (bgBorderWidth  * scaleDown);
+      borderRadius   = (int) (borderRadius   * scaleDown);
+      textBorderWidth= (int) (textBorderWidth* scaleDown);
+      contentWidth   = maxTextWidth + bgWidth + 2 * textBorderWidth;
+      contentHeight  = totalTextHeight + bgHeight + 2 * textBorderWidth;
     }
 
-    int totalWidth = contentWidth + 2 * bgBorderWidth + 2 * textBorderWidth;
-    totalWidth = (totalWidth % 2 != 0) ? totalWidth + 1 : totalWidth;
+    int totalWidth  = contentWidth  + 2 * bgBorderWidth + 2 * textBorderWidth;
     int totalHeight = contentHeight + 2 * bgBorderWidth + 2 * textBorderWidth;
-    totalHeight = (totalHeight % 2 != 0) ? totalHeight + 1 : totalHeight;
+    totalWidth  = totalWidth  % 2 != 0 ? totalWidth  + 1 : totalWidth;
+    totalHeight = totalHeight % 2 != 0 ? totalHeight + 1 : totalHeight;
 
     BufferedImage image = new BufferedImage(totalWidth, totalHeight, BufferedImage.TYPE_INT_ARGB);
     g2d = image.createGraphics();
-    g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-    g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-    g2d.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, RenderingHints.VALUE_FRACTIONALMETRICS_ON);
-    g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+    g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING,       RenderingHints.VALUE_ANTIALIAS_ON);
+    g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,  RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+    g2d.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS,  RenderingHints.VALUE_FRACTIONALMETRICS_ON);
+    g2d.setRenderingHint(RenderingHints.KEY_RENDERING,          RenderingHints.VALUE_RENDER_QUALITY);
     g2d.setFont(font);
     fm = g2d.getFontMetrics();
 
+    // Background
     if (bgColor != null) {
       float bgOpacity = ts.getBackgroundOpacity() != null ? ts.getBackgroundOpacity().floatValue() : 1.0f;
-      g2d.setColor(new Color(bgColor.getRed(), bgColor.getGreen(), bgColor.getBlue(), (int) (bgOpacity * 255)));
+      g2d.setColor(new Color(bgColor.getRed(), bgColor.getGreen(), bgColor.getBlue(), (int)(bgOpacity*255)));
       if (borderRadius > 0) {
-        g2d.fillRoundRect(
-                bgBorderWidth + textBorderWidth,
-                bgBorderWidth + textBorderWidth,
-                contentWidth,
-                contentHeight,
-                borderRadius,
-                borderRadius
-        );
+        g2d.fillRoundRect(bgBorderWidth + textBorderWidth, bgBorderWidth + textBorderWidth,
+                contentWidth, contentHeight, borderRadius, borderRadius);
       } else {
-        g2d.fillRect(
-                bgBorderWidth + textBorderWidth,
-                bgBorderWidth + textBorderWidth,
-                contentWidth,
-                contentHeight
-        );
+        g2d.fillRect(bgBorderWidth + textBorderWidth, bgBorderWidth + textBorderWidth,
+                contentWidth, contentHeight);
       }
     }
 
+    // Background border
     if (bgBorderColor != null && bgBorderWidth > 0) {
       g2d.setColor(bgBorderColor);
       g2d.setStroke(new BasicStroke((float) bgBorderWidth));
       if (borderRadius > 0) {
-        g2d.drawRoundRect(
-                bgBorderWidth / 2 + textBorderWidth,
-                bgBorderWidth / 2 + textBorderWidth,
-                contentWidth + bgBorderWidth,
-                contentHeight + bgBorderWidth,
-                borderRadius + bgBorderWidth,
-                borderRadius + bgBorderWidth
-        );
+        g2d.drawRoundRect(bgBorderWidth/2+textBorderWidth, bgBorderWidth/2+textBorderWidth,
+                contentWidth+bgBorderWidth, contentHeight+bgBorderWidth,
+                borderRadius+bgBorderWidth, borderRadius+bgBorderWidth);
       } else {
-        g2d.drawRect(
-                bgBorderWidth / 2 + textBorderWidth,
-                bgBorderWidth / 2 + textBorderWidth,
-                contentWidth + bgBorderWidth,
-                contentHeight + bgBorderWidth
-        );
+        g2d.drawRect(bgBorderWidth/2+textBorderWidth, bgBorderWidth/2+textBorderWidth,
+                contentWidth+bgBorderWidth, contentHeight+bgBorderWidth);
       }
     }
 
-    String alignment = ts.getAlignment() != null ? ts.getAlignment().toLowerCase() : "center";
-    int textYStart = bgBorderWidth + textBorderWidth + (contentHeight - textBlockHeight) / 2 + fm.getAscent();
-    int y = textYStart;
+    // Text
+    String alignment  = ts.getAlignment() != null ? ts.getAlignment().toLowerCase() : "center";
+    int    textYStart = bgBorderWidth + textBorderWidth + (contentHeight - totalTextHeight) / 2 + fm.getAscent();
+    int    y          = textYStart;
     FontRenderContext frc = g2d.getFontRenderContext();
 
     for (String line : lines) {
       int lineWidth = 0;
       for (int i = 0; i < line.length(); i++) {
         lineWidth += fm.charWidth(line.charAt(i));
-        if (i < line.length() - 1) {
-          lineWidth += (int) scaledLetterSpacing;
-        }
+        if (i < line.length() - 1) lineWidth += (int) scaledLetterSpacing;
       }
-
       int x;
-      if (alignment.equals("left")) {
-        x = bgBorderWidth + textBorderWidth;
-      } else if (alignment.equals("center")) {
-        x = bgBorderWidth + textBorderWidth + (contentWidth - lineWidth) / 2;
-      } else {
-        x = bgBorderWidth + textBorderWidth + contentWidth - lineWidth;
-      }
+      if      (alignment.equals("left"))  x = bgBorderWidth + textBorderWidth;
+      else if (alignment.equals("center")) x = bgBorderWidth + textBorderWidth + (contentWidth - lineWidth) / 2;
+      else                                  x = bgBorderWidth + textBorderWidth + contentWidth - lineWidth;
 
       if (textBorderColor != null && textBorderWidth > 0) {
         float textBorderOpacity = ts.getTextBorderOpacity() != null ? ts.getTextBorderOpacity().floatValue() : 1.0f;
-        g2d.setColor(new Color(textBorderColor.getRed(), textBorderColor.getGreen(), textBorderColor.getBlue(), (int) (textBorderOpacity * 255)));
-        g2d.setStroke(new BasicStroke((float) textBorderWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-
+        g2d.setColor(new Color(textBorderColor.getRed(), textBorderColor.getGreen(),
+                textBorderColor.getBlue(), (int)(textBorderOpacity*255)));
+        g2d.setStroke(new BasicStroke((float)textBorderWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
         Area combinedArea = new Area();
-        int currentX = x;
+        int cx = x;
         for (int i = 0; i < line.length(); i++) {
           char c = line.charAt(i);
           TextLayout charLayout = new TextLayout(String.valueOf(c), font, frc);
-          Shape charShape = charLayout.getOutline(AffineTransform.getTranslateInstance(currentX, y));
+          Shape charShape = charLayout.getOutline(AffineTransform.getTranslateInstance(cx, y));
           combinedArea.add(new Area(charShape));
-          currentX += fm.charWidth(c) + (int) scaledLetterSpacing;
+          cx += fm.charWidth(c) + (int) scaledLetterSpacing;
         }
         g2d.draw(combinedArea);
       }
 
       g2d.setColor(fontColor);
-      int currentX = x;
+      int cx = x;
       for (int i = 0; i < line.length(); i++) {
         char c = line.charAt(i);
-        g2d.drawString(String.valueOf(c), currentX, y);
-        currentX += fm.charWidth(c) + (int) scaledLetterSpacing;
+        g2d.drawString(String.valueOf(c), cx, y);
+        cx += fm.charWidth(c) + (int) scaledLetterSpacing;
       }
       y += lineHeight;
     }
 
     g2d.dispose();
-
-    String tempPngPath = new File(tempDir, "text_" + ts.getId() + ".png").getAbsolutePath();
-    File outputFile = new File(tempPngPath);
     ImageIO.write(image, "PNG", outputFile);
-
-    logger.info("Generated PNG with even dimensions: {}x{} for subtitle {}", totalWidth, totalHeight, ts.getId());
-    return tempPngPath;
+    return outputFile.getAbsolutePath();
   }
 
-  private Color parseColor(String colorStr, Color fallback, String type, String segmentId) {
-    try {
-      return Color.decode(colorStr);
-    } catch (NumberFormatException e) {
-      logger.warn("Invalid {} color for segment {}: {}, using {}", type, segmentId, colorStr, fallback != null ? "fallback" : "none");
-      return fallback;
-    }
-  }
+  // ══════════════════════════════════════════════════════════════════════════
+  //  FONT HELPERS  (identical to local – fonts are bundled in the Docker image)
+  // ══════════════════════════════════════════════════════════════════════════
 
   private String getFontPathByFamily(String fontFamily) {
     final String FONTS_RESOURCE_PATH = "/fonts/";
-    // Use system-specific temp directory with proper separators
-    final String TEMP_FONT_DIR = System.getProperty("java.io.tmpdir") +
-            File.separator + "scenith-fonts" + File.separator;
+    final String TEMP_FONT_DIR       = System.getProperty("java.io.tmpdir") + "/scenith-fonts/";
 
-    // Create temp directory for fonts if it doesn't exist
     File tempDir = new File(TEMP_FONT_DIR);
-    if (!tempDir.exists()) {
-      tempDir.mkdirs();
-    }
+    if (!tempDir.exists()) tempDir.mkdirs();
 
-    // Default font path (fallback)
     String defaultFontPath = getFontFilePath("arial.ttf", FONTS_RESOURCE_PATH, TEMP_FONT_DIR);
+    if (fontFamily == null || fontFamily.trim().isEmpty()) return defaultFontPath;
 
-    if (fontFamily == null || fontFamily.trim().isEmpty()) {
-      System.out.println("Font family is null or empty. Using default font: arial.ttf");
-      return defaultFontPath;
-    }
-
-    // Map font families to filenames in resources/fonts
-    Map<String, String> fontMap = new HashMap<>();
+    Map<String, String> fontMap = new LinkedHashMap<>();
+    // System fonts
     fontMap.put("Arial", "arial.ttf");
-    fontMap.put("Times New Roman", "times.ttf");
-    fontMap.put("Courier New", "cour.ttf");
-    fontMap.put("Calibri", "calibri.ttf");
-    fontMap.put("Verdana", "verdana.ttf");
-    fontMap.put("Georgia", "georgia.ttf");
-    fontMap.put("Comic Sans MS", "comic.ttf");
-    fontMap.put("Impact", "impact.ttf");
-    fontMap.put("Tahoma", "tahoma.ttf");
-
-    // Arial variants
     fontMap.put("Arial Bold", "arialbd.ttf");
     fontMap.put("Arial Italic", "ariali.ttf");
     fontMap.put("Arial Bold Italic", "arialbi.ttf");
     fontMap.put("Arial Black", "ariblk.ttf");
-
-    // Georgia variants
-    fontMap.put("Georgia Bold", "georgiab.ttf");
-    fontMap.put("Georgia Italic", "georgiai.ttf");
-    fontMap.put("Georgia Bold Italic", "georgiaz.ttf");
-
-    // Times New Roman variants
+    fontMap.put("Times New Roman", "times.ttf");
     fontMap.put("Times New Roman Bold", "timesbd.ttf");
     fontMap.put("Times New Roman Italic", "timesi.ttf");
     fontMap.put("Times New Roman Bold Italic", "timesbi.ttf");
-
-    // Alumni Sans Pinstripe
+    fontMap.put("Courier New", "cour.ttf");
+    fontMap.put("Calibri", "calibri.ttf");
+    fontMap.put("Verdana", "verdana.ttf");
+    fontMap.put("Georgia", "georgia.ttf");
+    fontMap.put("Georgia Bold", "georgiab.ttf");
+    fontMap.put("Georgia Italic", "georgiai.ttf");
+    fontMap.put("Georgia Bold Italic", "georgiaz.ttf");
+    fontMap.put("Comic Sans MS", "comic.ttf");
+    fontMap.put("Impact", "impact.ttf");
+    fontMap.put("Tahoma", "tahoma.ttf");
+    // Google / custom fonts
     fontMap.put("Alumni Sans Pinstripe", "AlumniSansPinstripe-Regular.ttf");
-
-    // Lexend Giga variants
     fontMap.put("Lexend Giga", "LexendGiga-Regular.ttf");
     fontMap.put("Lexend Giga Black", "LexendGiga-Black.ttf");
     fontMap.put("Lexend Giga Bold", "LexendGiga-Bold.ttf");
-
-
-    // Montserrat Alternates variants
     fontMap.put("Montserrat Alternates", "MontserratAlternates-ExtraLight.ttf");
     fontMap.put("Montserrat Alternates Black", "MontserratAlternates-Black.ttf");
     fontMap.put("Montserrat Alternates Medium Italic", "MontserratAlternates-MediumItalic.ttf");
-
-    // Noto Sans Mono variants
     fontMap.put("Noto Sans Mono", "NotoSansMono-Regular.ttf");
     fontMap.put("Noto Sans Mono Bold", "NotoSansMono-Bold.ttf");
-
-
-    // Poiret One
+    fontMap.put("Noto Sans Devanagari", "NotoSansDevanagari-Regular.ttf");
     fontMap.put("Poiret One", "PoiretOne-Regular.ttf");
-
-    // Arimo variants
     fontMap.put("Arimo", "Arimo-Regular.ttf");
     fontMap.put("Arimo Bold", "Arimo-Bold.ttf");
     fontMap.put("Arimo Bold Italic", "Arimo-BoldItalic.ttf");
     fontMap.put("Arimo Italic", "Arimo-Italic.ttf");
-
-
-    // Carlito variants
     fontMap.put("Carlito", "Carlito-Regular.ttf");
     fontMap.put("Carlito Bold", "Carlito-Bold.ttf");
     fontMap.put("Carlito Bold Italic", "Carlito-BoldItalic.ttf");
     fontMap.put("Carlito Italic", "Carlito-Italic.ttf");
-
-    // Comic Neue variants
     fontMap.put("Comic Neue", "ComicNeue-Regular.ttf");
     fontMap.put("Comic Neue Bold", "ComicNeue-Bold.ttf");
     fontMap.put("Comic Neue Bold Italic", "ComicNeue-BoldItalic.ttf");
     fontMap.put("Comic Neue Italic", "ComicNeue-Italic.ttf");
-
-
-    // Courier Prime variants
     fontMap.put("Courier Prime", "CourierPrime-Regular.ttf");
     fontMap.put("Courier Prime Bold", "CourierPrime-Bold.ttf");
     fontMap.put("Courier Prime Bold Italic", "CourierPrime-BoldItalic.ttf");
     fontMap.put("Courier Prime Italic", "CourierPrime-Italic.ttf");
-
-    // Gelasio variants
     fontMap.put("Gelasio", "Gelasio-Regular.ttf");
     fontMap.put("Gelasio Bold", "Gelasio-Bold.ttf");
     fontMap.put("Gelasio Bold Italic", "Gelasio-BoldItalic.ttf");
     fontMap.put("Gelasio Italic", "Gelasio-Italic.ttf");
-
-
-    // Tinos variants
     fontMap.put("Tinos", "Tinos-Regular.ttf");
     fontMap.put("Tinos Bold", "Tinos-Bold.ttf");
     fontMap.put("Tinos Bold Italic", "Tinos-BoldItalic.ttf");
     fontMap.put("Tinos Italic", "Tinos-Italic.ttf");
-
-    // Amatic SC variants
     fontMap.put("Amatic SC", "AmaticSC-Regular.ttf");
     fontMap.put("Amatic SC Bold", "AmaticSC-Bold.ttf");
-
-// Barriecito
     fontMap.put("Barriecito", "Barriecito-Regular.ttf");
-
-// Barrio
     fontMap.put("Barrio", "Barrio-Regular.ttf");
-
-// Birthstone
     fontMap.put("Birthstone", "Birthstone-Regular.ttf");
-
-// Bungee Hairline
     fontMap.put("Bungee Hairline", "BungeeHairline-Regular.ttf");
-
-// Butcherman
     fontMap.put("Butcherman", "Butcherman-Regular.ttf");
-
-// Doto variants
     fontMap.put("Doto Black", "Doto-Black.ttf");
     fontMap.put("Doto ExtraBold", "Doto-ExtraBold.ttf");
     fontMap.put("Doto Rounded Bold", "Doto_Rounded-Bold.ttf");
-
-// Fascinate Inline
     fontMap.put("Fascinate Inline", "FascinateInline-Regular.ttf");
-
-// Freckle Face
     fontMap.put("Freckle Face", "FreckleFace-Regular.ttf");
-
-// Fredericka the Great
     fontMap.put("Fredericka the Great", "FrederickatheGreat-Regular.ttf");
-
-// Imperial Script
     fontMap.put("Imperial Script", "ImperialScript-Regular.ttf");
-
-// Kings
     fontMap.put("Kings", "Kings-Regular.ttf");
-
-// Kirang Haerang
     fontMap.put("Kirang Haerang", "KirangHaerang-Regular.ttf");
-
-// Lavishly Yours
     fontMap.put("Lavishly Yours", "LavishlyYours-Regular.ttf");
-
-// Mountains of Christmas variants
     fontMap.put("Mountains of Christmas", "MountainsofChristmas-Regular.ttf");
     fontMap.put("Mountains of Christmas Bold", "MountainsofChristmas-Bold.ttf");
-
-// Rampart One
     fontMap.put("Rampart One", "RampartOne-Regular.ttf");
-
-// Rubik Wet Paint
     fontMap.put("Rubik Wet Paint", "RubikWetPaint-Regular.ttf");
-
-// Tangerine variants
     fontMap.put("Tangerine", "Tangerine-Regular.ttf");
     fontMap.put("Tangerine Bold", "Tangerine-Bold.ttf");
-
-// Yesteryear
     fontMap.put("Yesteryear", "Yesteryear-Regular.ttf");
 
-    // Process the font family name
-    String processedFontFamily = fontFamily.trim();
-
-    // Try direct match
-    if (fontMap.containsKey(processedFontFamily)) {
-      String fontFileName = fontMap.get(processedFontFamily);
-      String fontPath = getFontFilePath(fontFileName, FONTS_RESOURCE_PATH, TEMP_FONT_DIR);
-      System.out.println("Found exact font match for: " + processedFontFamily + " -> " + fontPath);
-      return fontPath;
+    String key = fontFamily.trim();
+    if (fontMap.containsKey(key)) {
+      return getFontFilePath(fontMap.get(key), FONTS_RESOURCE_PATH, TEMP_FONT_DIR);
     }
-
-    // Try case-insensitive match
     for (Map.Entry<String, String> entry : fontMap.entrySet()) {
-      if (entry.getKey().equalsIgnoreCase(processedFontFamily)) {
-        String fontFileName = entry.getValue();
-        String fontPath = getFontFilePath(fontFileName, FONTS_RESOURCE_PATH, TEMP_FONT_DIR);
-        System.out.println("Found case-insensitive font match for: " + processedFontFamily + " -> " + fontPath);
-        return fontPath;
+      if (entry.getKey().equalsIgnoreCase(key)) {
+        return getFontFilePath(entry.getValue(), FONTS_RESOURCE_PATH, TEMP_FONT_DIR);
       }
     }
-
-    // Fallback to default font
-    System.out.println("Warning: Font family '" + fontFamily + "' not found in font map. Using default: arial.ttf");
+    logger.warn("Font family '{}' not found, using Arial", fontFamily);
     return defaultFontPath;
   }
 
   private String getFontFilePath(String fontFileName, String fontsResourcePath, String tempFontDir) {
     try {
-      // Check if font is already extracted in temp directory
       File tempFontFile = new File(tempFontDir + fontFileName);
-      if (tempFontFile.exists()) {
-        return tempFontFile.getAbsolutePath();
-      }
+      if (tempFontFile.exists()) return tempFontFile.getAbsolutePath();
 
-      // Load font from classpath
-      String resourcePath = fontsResourcePath + fontFileName;
-      InputStream fontStream = getClass().getResourceAsStream(resourcePath);
-
+      InputStream fontStream = getClass().getResourceAsStream(fontsResourcePath + fontFileName);
       if (fontStream == null) {
-        System.err.println("Font file not found in resources: " + resourcePath);
-        throw new IOException("Font file not found: " + fontFileName);
+        logger.error("Font not found in resources: {}{}", fontsResourcePath, fontFileName);
+        return "/usr/share/fonts/liberation/LiberationSans-Regular.ttf"; // Linux fallback
       }
-
-      // Copy font to temp directory
-      Path tempPath = tempFontFile.toPath();
-      Files.copy(fontStream, tempPath, StandardCopyOption.REPLACE_EXISTING);
+      Files.copy(fontStream, tempFontFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
       fontStream.close();
-
-      System.out.println("Extracted font to: " + tempFontFile.getAbsolutePath());
       return tempFontFile.getAbsolutePath();
-
     } catch (IOException e) {
-      System.err.println("Error accessing font file: " + fontFileName + ". Error: " + e.getMessage());
-
-      // Try to find any available default font in temp directory
-      String[] fallbackFonts = {"arial.ttf", "Arimo-Regular.ttf", "ComicNeue-Regular.ttf"};
-
-      for (String fallbackFont : fallbackFonts) {
-        File defaultFont = new File(tempFontDir + fallbackFont);
-        if (defaultFont.exists()) {
-          System.out.println("Using fallback font: " + defaultFont.getAbsolutePath());
-          return defaultFont.getAbsolutePath();
-        }
-      }
-
-      // Cross-platform system font fallbacks
-      String os = System.getProperty("os.name").toLowerCase();
-      if (os.contains("win")) {
-        return "C:/Windows/Fonts/Arial.ttf";
-      } else if (os.contains("mac")) {
-        return "/System/Library/Fonts/Arial.ttf";
-      } else {
-        // Linux/Unix
-        return "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
-      }
+      logger.error("Error loading font {}: {}", fontFileName, e.getMessage());
+      return "/usr/share/fonts/liberation/LiberationSans-Regular.ttf";
     }
   }
 
-  private double getVideoDuration(File videoFile) throws IOException, InterruptedException {
-    List<String> command = Arrays.asList(
-            ffmpegPath.replace("ffmpeg", "ffprobe"),
-            "-i", videoFile.getAbsolutePath(),
-            "-show_entries", "format=duration",
-            "-v", "quiet",
-            "-of", "json"
-    );
+  // ══════════════════════════════════════════════════════════════════════════
+  //  PLAN-LIMITS & USAGE TRACKING
+  // ══════════════════════════════════════════════════════════════════════════
 
-    logger.debug("Executing FFprobe command for video duration: {}", String.join(" ", command));
+  private void validateProcessingLimits(User user, String quality, double videoDuration) {
+    if (quality != null && !planLimitsService.isQualityAllowed(user, quality)) {
+      throw new IllegalArgumentException("Quality " + quality + " not allowed. Maximum: "
+              + planLimitsService.getMaxAllowedQuality(user));
+    }
+
+    int maxPerMonth = planLimitsService.getMaxVideoProcessingPerMonth(user);
+    if (maxPerMonth > 0) {
+      String currentYearMonth = YearMonth.now().toString();
+      Optional<UserProcessingUsage> usageOpt = userProcessingUsageRepository
+              .findByUserAndServiceTypeAndYearMonth(user, "SUBTITLE", currentYearMonth);
+      int currentCount = usageOpt.map(UserProcessingUsage::getProcessCount).orElse(0);
+      if (currentCount >= maxPerMonth) {
+        throw new IllegalArgumentException(
+                "Monthly processing limit reached (" + maxPerMonth + "). Upgrade your plan.");
+      }
+    }
+
+    int maxMinutes = planLimitsService.getMaxVideoLengthMinutes(user);
+    if (maxMinutes > 0 && videoDuration > maxMinutes * 60) {
+      throw new IllegalArgumentException(
+              "Video length exceeds maximum allowed (" + maxMinutes + " minutes). Upgrade your plan.");
+    }
+  }
+
+  private void incrementUsageCount(User user) {
+    String currentYearMonth = YearMonth.now().toString();
+    Optional<UserProcessingUsage> usageOpt = userProcessingUsageRepository
+            .findByUserAndServiceTypeAndYearMonth(user, "SUBTITLE", currentYearMonth);
+    UserProcessingUsage usage;
+    if (usageOpt.isPresent()) {
+      usage = usageOpt.get();
+      usage.setProcessCount(usage.getProcessCount() + 1);
+    } else {
+      usage = new UserProcessingUsage();
+      usage.setUser(user);
+      usage.setServiceType("SUBTITLE");
+      usage.setYearMonth(currentYearMonth);
+      usage.setProcessCount(1);
+    }
+    userProcessingUsageRepository.save(usage);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  QUALITY SETTINGS
+  // ══════════════════════════════════════════════════════════════════════════
+
+  private Map<String, String> getFFmpegQualitySettings(String quality) {
+    Map<String, String> s = new HashMap<>();
+    switch (quality != null ? quality.toLowerCase() : "720p") {
+      case "144p":  s.put("scale","-2:144");  s.put("crf","28"); s.put("preset","veryfast"); break;
+      case "240p":  s.put("scale","-2:240");  s.put("crf","27"); s.put("preset","veryfast"); break;
+      case "360p":  s.put("scale","-2:360");  s.put("crf","26"); s.put("preset","fast");     break;
+      case "480p":  s.put("scale","-2:480");  s.put("crf","25"); s.put("preset","fast");     break;
+      case "1080p": s.put("scale","-2:1080"); s.put("crf","22"); s.put("preset","medium");   break;
+      case "1440p":
+      case "2k":    s.put("scale","-2:1440"); s.put("crf","20"); s.put("preset","slow");     break;
+      case "4k":    s.put("scale","-2:2160"); s.put("crf","18"); s.put("preset","slow");     break;
+      default:      s.put("scale","-2:720");  s.put("crf","23"); s.put("preset","medium");   break;
+    }
+    return s;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  SMALL UTILITIES
+  // ══════════════════════════════════════════════════════════════════════════
+
+  private SubtitleMedia getAuthorizedMedia(User user, Long mediaId) {
+    SubtitleMedia media = subtitleMediaRepository.findById(mediaId)
+            .orElseThrow(() -> new IllegalArgumentException("Media not found: " + mediaId));
+    if (!media.getUser().getId().equals(user.getId())) {
+      throw new IllegalArgumentException("Not authorized to access media: " + mediaId);
+    }
+    return media;
+  }
+
+  private String getFfprobePath() {
+    // On Linux the binaries sit next to each other; on Windows they share the same dir
+    return ffmpegPath.replace("ffmpeg", "ffprobe");
+  }
+
+  /** Run a process, capture stdout+stderr, throw on non-zero exit. Has a 5-minute timeout. */
+  private void runProcess(List<String> command, String label) throws IOException, InterruptedException {
     ProcessBuilder pb = new ProcessBuilder(command);
     pb.redirectErrorStream(true);
     Process process = pb.start();
-    StringBuilder output = new StringBuilder();
+    StringBuilder sb = new StringBuilder();
     try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
       String line;
-      while ((line = reader.readLine()) != null) {
-        output.append(line);
-        logger.debug("FFprobe output: {}", line);
-      }
+      while ((line = reader.readLine()) != null) sb.append(line).append("\n");
     }
-    int exitCode = process.waitFor();
-    if (exitCode != 0) {
-      logger.error("FFprobe failed to get video duration for {}: {}", videoFile.getAbsolutePath(), output.toString());
-      throw new IOException("FFprobe failed to get video duration: " + output.toString());
+    boolean completed = process.waitFor(5, TimeUnit.MINUTES);
+    if (!completed) {
+      process.destroyForcibly();
+      throw new IOException(label + " timed out after 5 minutes. Partial output: " + sb);
     }
+    int exit = process.exitValue();
+    if (exit != 0) throw new IOException(label + " failed (exit " + exit + "): " + sb);
+  }
 
+  /** Run a process and return stdout as a String; throws on non-zero exit. */
+  private String runProcessGetOutput(List<String> command, String label) throws IOException, InterruptedException {
+    ProcessBuilder pb = new ProcessBuilder(command);
+    pb.redirectErrorStream(false);
+    Process process = pb.start();
+
+    StringBuilder stdout = new StringBuilder();
+    StringBuilder stderr = new StringBuilder();
+
+    Thread t1 = new Thread(() -> {
+      try (BufferedReader r = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+        String l; while ((l = r.readLine()) != null) stdout.append(l).append("\n");
+      } catch (IOException ignored) {}
+    });
+    Thread t2 = new Thread(() -> {
+      try (BufferedReader r = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
+        String l; while ((l = r.readLine()) != null) stderr.append(l).append("\n");
+      } catch (IOException ignored) {}
+    });
+    t1.start(); t2.start();
+    int exit = process.waitFor();
+    t1.join(3000); t2.join(3000);
+
+    if (exit != 0) throw new IOException(label + " failed (exit " + exit + "): " + stderr);
+    return stdout.toString().trim();
+  }
+
+  private void cleanUpTempDir(Path dir) {
     try {
-      Map<String, Object> result = objectMapper.readValue(output.toString(), new TypeReference<Map<String, Object>>() {});
-      Map<String, Object> format = (Map<String, Object>) result.get("format");
-      if (format == null || !format.containsKey("duration")) {
-        logger.error("No duration found in FFprobe output for {}: {}", videoFile.getAbsolutePath(), output.toString());
-        throw new IOException("No duration found in FFprobe output");
-      }
-      return Double.parseDouble(format.get("duration").toString());
-    } catch (JsonProcessingException e) {
-      logger.error("Failed to parse FFprobe output for {}: {}", videoFile.getAbsolutePath(), output.toString());
-      throw new IOException("Failed to parse FFprobe output: " + output.toString());
+      if (!Files.exists(dir)) return;
+      Files.walk(dir)
+              .sorted(Comparator.reverseOrder())
+              .forEach(p -> { try { Files.delete(p); } catch (IOException ignored) {} });
+    } catch (IOException e) {
+      logger.warn("Failed to clean up temp dir {}: {}", dir, e.getMessage());
     }
   }
 
-  private Map<String, String> getFFmpegQualitySettings(String quality) {
-    Map<String, String> settings = new HashMap<>();
-    switch (quality != null ? quality.toLowerCase() : "720p") {
-      case "144p":
-        settings.put("scale", "-2:144");  // ✅ Width auto-calculated to maintain aspect ratio
-        settings.put("crf", "28");
-        settings.put("preset", "veryfast");
-        break;
-      case "240p":
-        settings.put("scale", "-2:240");
-        settings.put("crf", "27");
-        settings.put("preset", "veryfast");
-        break;
-      case "360p":
-        settings.put("scale", "-2:360");
-        settings.put("crf", "26");
-        settings.put("preset", "fast");
-        break;
-      case "480p":
-        settings.put("scale", "-2:480");
-        settings.put("crf", "25");
-        settings.put("preset", "fast");
-        break;
-      case "720p":
-        settings.put("scale", "-2:720");
-        settings.put("crf", "23");
-        settings.put("preset", "veryfast");
-        break;
-      case "1080p":
-        settings.put("scale", "-2:1080");
-        settings.put("crf", "22");
-        settings.put("preset", "medium");
-        break;
-      case "1440p":
-      case "2k":
-        settings.put("scale", "-2:1440");
-        settings.put("crf", "20");
-        settings.put("preset", "slow");
-        break;
-      case "4k":
-        settings.put("scale", "-2:2160");
-        settings.put("crf", "18");
-        settings.put("preset", "slow");
-        break;
-      default:
-        settings.put("scale", "-2:720");
-        settings.put("crf", "23");
-        settings.put("preset", "medium");
-    }
-    return settings;
+  private String getExtension(String filename) {
+    if (filename == null) return ".mp4";
+    int dot = filename.lastIndexOf('.');
+    return dot > 0 ? filename.substring(dot) : ".mp4";
   }
 
+  private String sanitizeFilename(String filename) {
+    if (filename == null) return "media_" + System.currentTimeMillis() + ".mp4";
+    return filename.toLowerCase().replaceAll("[^a-z0-9._-]", "_");
+  }
+
+  private boolean containsHindiCharacters(String text) {
+    if (text == null) return false;
+    for (char c : text.toCharArray()) if (c >= 0x0900 && c <= 0x097F) return true;
+    return false;
+  }
+
+  private Color parseColor(String colorStr, Color fallback, String type, String segmentId) {
+    try {
+      return Color.decode(colorStr);
+    } catch (Exception e) {
+      logger.warn("Invalid {} color for segment {}: {}", type, segmentId, colorStr);
+      return fallback;
+    }
+  }
   @Transactional
   public void deleteMedia(User user, Long mediaId) throws IOException {
     logger.info("Deleting subtitle media for user: {}, mediaId: {}", user.getId(), mediaId);
@@ -2019,5 +1536,39 @@ public class SubtitleService {
     // Delete from database
     subtitleMediaRepository.delete(subtitleMedia);
     logger.info("Successfully deleted subtitle media for user: {}, mediaId: {}", user.getId(), mediaId);
+  }
+
+  public SubtitleMedia deleteSingleSubtitle(User user, Long mediaId, String subtitleId) throws IOException {
+    SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
+            .orElseThrow(() -> new IllegalArgumentException("Media not found"));
+
+    if (!subtitleMedia.getUser().getId().equals(user.getId())) {
+      throw new IllegalArgumentException("Not authorized");
+    }
+
+    List<SubtitleDTO> subtitles = objectMapper.readValue(
+            subtitleMedia.getSubtitlesJson(), new TypeReference<List<SubtitleDTO>>() {});
+
+    boolean removed = subtitles.removeIf(s -> s.getId().equals(subtitleId));
+    if (!removed) {
+      throw new IllegalArgumentException("Subtitle not found: " + subtitleId);
+    }
+
+    subtitleMedia.setSubtitlesJson(objectMapper.writeValueAsString(subtitles));
+    subtitleMediaRepository.save(subtitleMedia);
+    return subtitleMedia;
+  }
+
+  public SubtitleMedia replaceAllSubtitles(User user, Long mediaId, List<SubtitleDTO> subtitles) throws IOException {
+    SubtitleMedia subtitleMedia = subtitleMediaRepository.findById(mediaId)
+            .orElseThrow(() -> new IllegalArgumentException("Media not found"));
+
+    if (!subtitleMedia.getUser().getId().equals(user.getId())) {
+      throw new IllegalArgumentException("Not authorized");
+    }
+
+    subtitleMedia.setSubtitlesJson(objectMapper.writeValueAsString(subtitles));
+    subtitleMediaRepository.save(subtitleMedia);
+    return subtitleMedia;
   }
 }

@@ -144,5 +144,35 @@ public class SubtitleController {
                     .body(Map.of("message", "Delete failed: " + e.getMessage()));
         }
     }
+    @DeleteMapping("/delete-subtitle/{mediaId}/{subtitleId}")
+    public ResponseEntity<?> deleteSubtitle(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long mediaId,
+            @PathVariable String subtitleId) {
+        try {
+            User user = subtitleService.getUserFromToken(token);
+            SubtitleMedia result = subtitleService.deleteSingleSubtitle(user, mediaId, subtitleId);
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("message", e.getMessage()));
+        } catch (IOException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("message", "Delete failed: " + e.getMessage()));
+        }
+    }
 
+    @PutMapping("/replace-all/{mediaId}")
+    public ResponseEntity<?> replaceAllSubtitles(
+            @RequestHeader("Authorization") String token,
+            @PathVariable Long mediaId,
+            @RequestBody List<SubtitleDTO> subtitles) {
+        try {
+            User user = subtitleService.getUserFromToken(token);
+            SubtitleMedia result = subtitleService.replaceAllSubtitles(user, mediaId, subtitles);
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("message", e.getMessage()));
+        } catch (IOException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("message", "Replace failed: " + e.getMessage()));
+        }
+    }
 }

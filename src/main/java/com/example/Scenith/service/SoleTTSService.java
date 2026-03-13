@@ -55,8 +55,7 @@ public class SoleTTSService {
             String text,
             String voiceName,
             String languageCode,
-            String emotion,
-            Map<String, String> customConfig) throws IOException, InterruptedException {
+            Double speed) throws IOException, InterruptedException {
         // Validate input
         if (text == null || text.trim().isEmpty()) {
             throw new IllegalArgumentException("Text is required and cannot be empty");
@@ -124,22 +123,14 @@ public class SoleTTSService {
         }
 
         try (TextToSpeechClient textToSpeechClient = TextToSpeechClient.create(settings)) {
-            // Apply emotion preset (your local logic)
-            Map<String, String> finalSsmlConfig = applyEmotionPreset(emotion, customConfig);
-
-            // Build SSML or plain text
-            String inputText = (finalSsmlConfig != null && !finalSsmlConfig.isEmpty())
-                    ? buildSSMLText(text, finalSsmlConfig)
-                    : text;
-
-            SynthesisInput.Builder inputBuilder = SynthesisInput.newBuilder();
-            if (finalSsmlConfig != null && !finalSsmlConfig.isEmpty()) {
-                inputBuilder.setSsml(inputText);
+            SynthesisInput input;
+            if (speed != null && speed != 1.0) {
+                String ssml = "<speak><prosody rate=\"" + String.format("%.2f", speed) + "\">"
+                        + text + "</prosody></speak>";
+                input = SynthesisInput.newBuilder().setSsml(ssml).build();
             } else {
-                inputBuilder.setText(inputText);
+                input = SynthesisInput.newBuilder().setText(text).build();
             }
-            SynthesisInput input = inputBuilder.build();
-
             VoiceSelectionParams voice = VoiceSelectionParams.newBuilder()
                     .setLanguageCode(languageCode)
                     .setName(voiceName)

@@ -56,8 +56,8 @@ public class ExternalTtsService {
         this.cloudflareR2Service = cloudflareR2Service;
     }
 
-    public SoleTTS generateTTS(User user, String text, String voiceId, SoleTTS.TtsProvider provider)
-            throws IOException, InterruptedException {
+    public SoleTTS generateTTS(User user, String text, String voiceId,
+                               SoleTTS.TtsProvider provider, Double speed) throws IOException, InterruptedException {
 
         // 1. Access check — BASIC users cannot use external providers
         if (!planLimitsService.hasExternalTtsAccess(user)) {
@@ -104,8 +104,8 @@ public class ExternalTtsService {
 
         // 6. Route to correct provider
         byte[] audioBytes = switch (provider) {
-            case OPENAI -> generateWithOpenAI(text, voiceId);
-            case AZURE  -> generateWithAzure(text, voiceId);
+            case OPENAI -> generateWithOpenAI(text, voiceId, speed);
+            case AZURE  -> generateWithAzure(text, voiceId, speed);
             default -> throw new IllegalArgumentException("Unsupported provider: " + provider);
         };
 
@@ -171,13 +171,15 @@ public class ExternalTtsService {
 
     // ─── OpenAI TTS ───────────────────────────────────────────────────────────
 
-    private byte[] generateWithOpenAI(String text, String voiceId) throws IOException, InterruptedException {
-        // voiceId = "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer"
-        Map<String, Object> body = Map.of(
-                "model", "tts-1",
-                "input", text,
-                "voice", voiceId
-        );
+    private byte[] generateWithOpenAI(String text, String voiceId, Double speed)
+            throws IOException, InterruptedException {
+        Map<String, Object> body = new HashMap<>();
+        body.put("model", "tts-1");
+        body.put("input", text);
+        body.put("voice", voiceId);
+        if (speed != null && speed != 1.0) {
+            body.put("speed", speed); // OpenAI supports 0.25–4.0 natively
+        }
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("https://api.openai.com/v1/audio/speech"))
@@ -196,10 +198,16 @@ public class ExternalTtsService {
 
     // ─── Azure TTS ────────────────────────────────────────────────────────────
 
-    private byte[] generateWithAzure(String text, String voiceId) throws IOException, InterruptedException {
-        // voiceId = Azure short name e.g. "en-US-JennyNeural"
+    private byte[] generateWithAzure(String text, String voiceId, Double speed)
+            throws IOException, InterruptedException {
+        String rateAttr = (speed != null && speed != 1.0)
+                ? String.format("%.2f", speed)
+                : "1.0";
+
         String ssml = "<speak version='1.0' xml:lang='en-US'>" +
-                "<voice name='" + voiceId + "'>" + text + "</voice>" +
+                "<voice name='" + voiceId + "'>" +
+                "<prosody rate='" + rateAttr + "'>" + text + "</prosody>" +
+                "</voice>" +
                 "</speak>";
 
         String url = "https://" + azureRegion + ".tts.speech.microsoft.com/cognitiveservices/v1";

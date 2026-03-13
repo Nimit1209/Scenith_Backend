@@ -70,9 +70,25 @@ public class SoleTTSController {
                 return ResponseEntity.badRequest().body("Language code is required");
             }
 
-            // Generate TTS with emotion
+            // Extract speed
+            Double speed = 1.0;
+            if (request.containsKey("speed")) {
+                speed = ((Number) request.get("speed")).doubleValue();
+            }
+
+// Validate
+            if (speed < 0.5 || speed > 4.0) {
+                return ResponseEntity.badRequest().body("Speed must be between 0.5 and 4.0");
+            }
+
+// Block free users silently (just use 1.0)
+            if (!planLimitsService.hasSpeedControl(user)) {
+                speed = 1.0;
+            }
+
+// Update call — remove emotion param
             SoleTTS soleTTS = soleTTSService.generateTTS(
-                    user, text, voiceName, languageCode, emotion, customConfig
+                    user, text, voiceName, languageCode, speed
             );
 
             // Prepare response
@@ -242,7 +258,18 @@ public class SoleTTSController {
                 return ResponseEntity.badRequest().body("Invalid provider. Use: OPENAI, AZURE, or AWS");
             }
 
-            SoleTTS soleTTS = externalTtsService.generateTTS(user, text, voiceId, provider);
+            Double speed = 1.0;
+            if (request.containsKey("speed")) {
+                speed = ((Number) request.get("speed")).doubleValue();
+            }
+            if (speed < 0.5 || speed > 4.0) {
+                return ResponseEntity.badRequest().body("Speed must be between 0.5 and 4.0");
+            }
+            if (!planLimitsService.hasSpeedControl(user)) {
+                speed = 1.0;
+            }
+
+            SoleTTS soleTTS = externalTtsService.generateTTS(user, text, voiceId, provider, speed);
 
             Map<String, Object> response = new HashMap<>();
             response.put("id", soleTTS.getId());

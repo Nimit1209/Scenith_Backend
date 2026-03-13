@@ -15,16 +15,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStreamReader;
+import java.awt.*;
+import java.awt.image.BufferedImage;
+import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.util.*;
+import java.util.List;
 
 @Service
 @RequiredArgsConstructor
@@ -303,7 +303,7 @@ public class VideoSpeedService {
 
             // Process video with FFmpeg
             logger.info("Processing video with FFmpeg: speed={}, quality={}", speed, quality);
-            processVideoWithFFmpeg(tempInputPath.toString(), tempOutputPath.toString(), speed, quality, video);
+            processVideoWithFFmpeg(tempInputPath.toString(), tempOutputPath.toString(), speed, quality, video, planLimitsService.shouldAddWatermark(video.getUser()));
 
             video.setProgress(80.0);
             videoSpeedRepository.save(video);
@@ -371,7 +371,7 @@ public class VideoSpeedService {
      * Process video with FFmpeg (updated with progress tracking)
      */
     private void processVideoWithFFmpeg(String inputPath, String outputPath, double speed,
-                                        String quality, VideoSpeed video) throws IOException, InterruptedException {
+                                        String quality, VideoSpeed video, boolean addWatermark) throws IOException, InterruptedException {
         File ffmpegFile = new File(ffmpegPath);
         if (!ffmpegFile.exists() || !ffmpegFile.canExecute()) {
             throw new IOException("FFmpeg executable not found or not executable: " + ffmpegPath);
@@ -384,10 +384,33 @@ public class VideoSpeedService {
         command.add(ffmpegPath);
         command.add("-i");
         command.add(inputPath);
-        command.add("-filter:v");
-        command.add(String.format("setpts=%f*PTS,scale=%s", 1.0 / speed, qualitySettings.get("scale")));
-        command.add("-filter:a");
-        command.add(String.format("atempo=%f", speed));
+        String videoFilter = String.format("setpts=%f*PTS,scale=%s", 1.0 / speed, qualitySettings.get("scale"));
+
+        if (addWatermark) {
+            String watermarkPngPath = generateWatermarkPng(outputPath);
+            command.add("-i");
+            command.add(watermarkPngPath);
+
+            // Properly structured filter_complex:
+            // [0:v] apply speed+scale -> [scaled]; [scaled][1:v] overlay watermark -> [vout]
+            String filterComplex = String.format(
+                    "[0:v]setpts=%f*PTS,scale=%s[scaled];[scaled][1:v]overlay=x=W-w-20:y=20[vout];[0:a]atempo=%f[aout]",
+                    1.0 / speed,
+                    qualitySettings.get("scale"),
+                    speed
+            );
+            command.add("-filter_complex");
+            command.add(filterComplex);
+            command.add("-map");
+            command.add("[vout]");
+            command.add("-map");
+            command.add("[aout]");
+        } else {
+            command.add("-filter:v");
+            command.add(videoFilter);
+            command.add("-filter:a");
+            command.add(String.format("atempo=%f", speed));
+        }
         command.add("-c:v");
         command.add("libx264");
         command.add("-preset");
@@ -433,7 +456,56 @@ public class VideoSpeedService {
 
         logger.info("FFmpeg processing completed successfully");
     }
+    private String generateWatermarkPng(String outputPath) throws IOException {
+        // Derive a sibling temp path for the watermark PNG
+        Path outputDir = Paths.get(outputPath).getParent();
+        Path watermarkFile = outputDir.resolve("watermark_" + System.currentTimeMillis() + ".png");
 
+        int width = 300;
+        int height = 60;
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g2d = image.createGraphics();
+
+        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+
+        // Transparent background
+        g2d.setColor(new Color(0, 0, 0, 0));
+        g2d.fillRect(0, 0, width, height);
+
+        // Load font from classpath (same pattern as SubtitleService.getFontFilePath)
+        Font font;
+        try {
+            String tempFontDir = System.getProperty("java.io.tmpdir") + "/scenith-fonts/";
+            new File(tempFontDir).mkdirs();
+            File tempFontFile = new File(tempFontDir + "LexendGiga-Bold.ttf");
+            if (!tempFontFile.exists()) {
+                try (InputStream fontStream = getClass().getResourceAsStream("/fonts/LexendGiga-Bold.ttf")) {
+                    if (fontStream != null) {
+                        Files.copy(fontStream, tempFontFile.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                }
+            }
+            font = Font.createFont(Font.TRUETYPE_FONT, tempFontFile).deriveFont(Font.BOLD, 36f);
+        } catch (Exception e) {
+            logger.warn("Could not load LexendGiga-Bold font for watermark, using fallback: {}", e.getMessage());
+            font = new Font("Arial", Font.BOLD, 36);
+        }
+
+        g2d.setFont(font);
+
+        // Draw white text with 75% opacity (alpha=191 is 0.75*255)
+        g2d.setColor(new Color(255, 255, 255, 191));
+        FontMetrics fm = g2d.getFontMetrics();
+        int textX = (width - fm.stringWidth("SCENITH")) / 2;
+        int textY = (height + fm.getAscent() - fm.getDescent()) / 2;
+        g2d.drawString("SCENITH", textX, textY);
+        g2d.dispose();
+
+        javax.imageio.ImageIO.write(image, "PNG", watermarkFile.toFile());
+        logger.info("Generated watermark PNG: {}", watermarkFile);
+        return watermarkFile.toString();
+    }
     /**
      * Update progress based on FFmpeg output (optional enhancement)
      */

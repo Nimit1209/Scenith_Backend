@@ -37,6 +37,7 @@ public class SubtitleDTO {
     private Double rotation = 0.0;
     @JsonProperty("isSubtitle")
     private boolean isSubtitle = true;
+    private List<WordTimestamp> words = new ArrayList<>();
 
     private Map<String, List<Keyframe>> keyframes = new HashMap<>();
 
@@ -109,5 +110,26 @@ public class SubtitleDTO {
             throw new IllegalArgumentException("Letter spacing must be non-negative");
         }
         this.letterSpacing = letterSpacing != null ? letterSpacing : 0.0;
+    }
+
+    public static class WordTimestamp {
+        private String word;
+        private double start;
+        private double end;
+
+        public WordTimestamp() {}
+
+        public WordTimestamp(String word, double start, double end) {
+            this.word = word;
+            this.start = start;
+            this.end = end;
+        }
+
+        public String getWord() { return word; }
+        public void setWord(String word) { this.word = word; }
+        public double getStart() { return start; }
+        public void setStart(double start) { this.start = start; }
+        public double getEnd() { return end; }
+        public void setEnd(double end) { this.end = end; }
     }
 }

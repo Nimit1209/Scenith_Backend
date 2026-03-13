@@ -24,7 +24,7 @@ public class PlanLimitsService {
         if (isStudio(user))   return 250000;
         if (isCreator(user))  return 75000;
         if (isCreatorLite(user)) return 10000;
-        return 2000;
+        return 600;
     }
 
     public long getDailyTtsLimit(User user) {
@@ -32,14 +32,14 @@ public class PlanLimitsService {
         if (isStudio(user))   return -1;
         if (isCreator(user))  return 20000;
         if (isCreatorLite(user)) return 2500;
-        return 500;
+        return 150;
     }
     public long getMaxCharsPerRequest(User user) {
         if (user.isAdmin()) return 10000;
         if (isStudio(user))   return 6000;
         if (isCreator(user))  return 4000;
         if (isCreatorLite(user)) return 700;
-        return 200;
+        return 80;
     }
 
 
@@ -197,7 +197,7 @@ public class PlanLimitsService {
 
     public int getMaxElementDownloadResolution(User user) {
         if (isPremium(user)) return Integer.MAX_VALUE;
-        return 512;
+        return 256;
     }
 
 
@@ -258,6 +258,13 @@ public class PlanLimitsService {
 
     public boolean hasExternalTtsAccess(User user) {
         // Only paid plans — BASIC users stay on Google only
+        return user.isAdmin() || isStudio(user) || isCreator(user) || isCreatorLite(user);
+    }
+
+    public boolean shouldAddWatermark(User user) {
+        return !user.isAdmin() && !isStudio(user) && !isCreator(user) && !isCreatorLite(user);
+    }
+    public boolean hasSpeedControl(User user) {
         return user.isAdmin() || isStudio(user) || isCreator(user) || isCreatorLite(user);
     }
 }
